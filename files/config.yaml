@@ -1,0 +1,252 @@
+# Forecasting System Configuration
+
+# Data Source Configuration
+data_source:
+  type: "postgres"  # Options: postgres, s3, azure, local
+  
+  # PostgreSQL configuration
+  postgres:
+    host: "localhost"
+    port: 5432
+    database: "demand_db"
+    schema: "public"
+    table: "demand_history"
+    user: "${POSTGRES_USER}"
+    password: "${POSTGRES_PASSWORD}"
+  
+  # S3 configuration (alternative)
+  s3:
+    bucket: "demand-data"
+    prefix: "time_series/"
+    region: "us-east-1"
+  
+  # Azure configuration (alternative)
+  azure:
+    container: "demand-data"
+    account_name: "${AZURE_ACCOUNT}"
+    account_key: "${AZURE_KEY}"
+
+# ETL Configuration
+etl:
+  output_path: "./data/time_series.parquet"
+  partition_by: ["hierarchy_level_1", "category"]  # Partition strategy
+  
+  # Query configuration
+  query:
+    date_column: "date"
+    value_column: "demand"
+    id_column: "sku_id"
+    hierarchy_columns: ["hierarchy_level_1", "hierarchy_level_2", "hierarchy_level_3"]
+    
+    # Filters
+    min_date: "2020-01-01"
+    max_date: null  # null = use current date
+    
+    # Data quality filters
+    min_observations: 12  # Minimum number of observations per time series
+    
+  # Aggregation if needed
+  aggregation:
+    frequency: "M"  # D=Daily, W=Weekly, M=Monthly
+    method: "sum"   # sum, mean, median
+
+# Outlier Detection & Correction
+outlier_detection:
+  enabled: true
+  detection_method: "iqr"          # iqr | zscore | stl_residuals
+  correction_method: "clip"        # clip | interpolate | median | none
+
+  iqr:
+    multiplier: 1.5
+
+  zscore:
+    threshold: 3.0
+    use_mad: true
+
+  stl_residuals:
+    seasonal_period: 12
+    residual_threshold: 3.0
+
+  correction:
+    interpolation_method: "linear"
+    median_window: 5
+
+  min_observations: 6
+
+# Time Series Characterization
+characterization:
+  # Seasonality detection
+  seasonality:
+    test_periods: [7, 30, 365]  # Days for daily data, adjust for monthly
+    significance_level: 0.05
+    min_strength: 0.3  # Minimum seasonal strength to consider significant
+  
+  # Trend detection
+  trend:
+    method: "mann_kendall"  # Options: mann_kendall, linear_regression
+    significance_level: 0.05
+  
+  # Intermittency thresholds
+  intermittency:
+    zero_threshold: 0.5  # % of zeros to consider intermittent
+    adi_threshold: 1.32  # Average inter-demand interval threshold
+    cov_threshold: 0.49  # Coefficient of variation threshold
+  
+  # Stationarity test
+  stationarity:
+    test: "adf"  # Augmented Dickey-Fuller
+    significance_level: 0.05
+  
+  # Data sufficiency thresholds
+  data_sufficiency:
+    min_for_ml: 100
+    min_for_deep_learning: 200
+    min_for_seasonal: 24  # 2 full seasonal cycles
+
+# Forecasting Configuration
+forecasting:
+  horizon: 24  # Number of periods to forecast (2 years monthly)
+  frequency: "M"  # D, W, M, Q, Y
+  
+  # Backtesting configuration
+  backtesting:
+    n_windows: 6  # Number of rolling windows to test
+    step_size: 1  # Step between windows
+    min_train_size: 24
+  
+  # Prediction intervals
+  confidence_levels: [10, 25, 50, 75, 90, 95, 99]  # For MEIO
+  
+  # Method selection based on characteristics
+  method_selection:
+    sparse_data: ["SeasonalNaive", "HistoricAverage", "TimesFM"]
+    intermittent: ["CrostonOptimized", "ADIDA", "IMAPA", "TimesFM"]
+    seasonal: ["MSTL", "AutoETS", "NHITS", "PatchTST", "TimesFM"]
+    complex: ["NHITS", "NBEATS", "TFT", "PatchTST", "AutoETS"]
+    standard: ["AutoETS", "AutoARIMA", "AutoTheta", "NHITS", "TimesFM"]
+  
+  # Nixtla StatsForecast models
+  statsforecast_models:
+    - AutoARIMA
+    - AutoETS
+    - AutoTheta
+    - AutoCES
+    - MSTL
+    - CrostonOptimized
+    - ADIDA
+    - IMAPA
+    - HistoricAverage
+    - SeasonalNaive
+  
+  # Nixtla NeuralForecast models
+  neuralforecast_models:
+    - NHITS
+    - NBEATS
+    - PatchTST
+    - TFT
+    - DeepAR
+  
+  # TimesFM configuration
+  timesfm:
+    model_name: "timesfm-1.0-200m"
+    context_length: 512
+    horizon_length: 128
+    quantiles: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+
+# Hierarchical Forecasting
+hierarchical:
+  enabled: true
+  reconciliation_methods:
+    - "BottomUp"
+    - "TopDown"
+    - "MinTrace"
+    - "ERM"  # Empirical Risk Minimization
+  
+  # Structure definition
+  structure:
+    levels: ["hierarchy_level_1", "hierarchy_level_2", "hierarchy_level_3", "sku_id"]
+
+# Evaluation Metrics
+evaluation:
+  metrics:
+    point_forecast:
+      - "mae"
+      - "rmse"
+      - "mape"
+      - "smape"
+      - "bias"
+      - "mase"
+    
+    probabilistic:
+      - "winkler_score"
+      - "crps"  # Continuous Ranked Probability Score
+      - "coverage"
+      - "quantile_loss"
+    
+    information_criteria:
+      - "aic"
+      - "bic"
+      - "aicc"
+
+# Distribution Fitting for MEIO
+meio:
+  enabled: true
+  
+  # Distribution types to test
+  distributions:
+    - "normal"
+    - "gamma"
+    - "negative_binomial"
+    - "lognormal"
+  
+  # Fitting method
+  fitting_method: "quantile_matching"  # or "mle" (maximum likelihood)
+  
+  # Service levels for safety stock calculation
+  service_levels: [0.90, 0.95, 0.99]
+
+# Parallel Processing
+parallel:
+  backend: "dask"
+  
+  dask:
+    scheduler: "processes"  # processes, threads, distributed
+    n_workers: null  # null = use all available cores
+    threads_per_worker: 1
+    memory_limit: "auto"
+    
+    # For distributed setup
+    distributed:
+      scheduler_address: null  # "tcp://scheduler:8786"
+      
+  # Batch size for processing
+  batch_size: 100  # Time series per batch
+
+# Output Configuration
+output:
+  base_path: "./output"
+  
+  # What to save
+  save:
+    forecasts: true
+    characteristics: true
+    metrics: true
+    distributions: true
+    hyperparameters: true
+    plots: true
+  
+  # Output formats
+  formats:
+    forecasts: "parquet"  # parquet, csv
+    metrics: "parquet"
+    plots: "png"
+  
+  # Compression
+  compression: "snappy"  # snappy, gzip, brotli
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "./logs/forecasting.log"
+  console: true
