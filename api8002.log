@@ -1,0 +1,55 @@
+INFO:     Started server process [70272]
+INFO:     Waiting for application startup.
+INFO:api.main:Starting API server...
+INFO:api.main:Loaded corrected time series: 42934 rows
+INFO:api.main:Loaded original time series: 48294 rows
+INFO:api.main:Loaded characteristics: 2348 series
+INFO:api.main:Loaded forecasts: 5058 forecasts
+INFO:api.main:Loaded metrics: 138 evaluations
+INFO:api.main:Loaded best methods: 25 series
+INFO:api.main:Loaded forecasts by origin: 3312 rows
+INFO:api.main:Loaded outliers: 1861 detections
+INFO:api.main:Loaded config.yaml
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8002 (Press CTRL+C to quit)
+INFO:     127.0.0.1:50817 - "GET /api/metrics/10173_2238 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:22147 - "GET /api/metrics/10173_2238 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43544 - "GET /api/forecasts/10173_2238 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43547 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:35763 - "GET /api/metrics/10173_2238 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:35766 - "GET /api/forecasts/10173_2238 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41911 - "GET /api/series/10173_2238/distributions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47520 - "GET /api/series/10173_2238/outliers HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42522 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42525 - "GET /api/series/10173_2238/data HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42528 - "GET /api/forecasts/10173_2238 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42531 - "GET /api/metrics/10173_2238 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42534 - "GET /api/series/10173_2238/distributions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:23430 - "GET /api/series?limit=3 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32417 - "GET /api/metrics/10173_2238 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32420 - "GET /api/series?limit=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56667 - "GET /api/metrics/10173_2238 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42570 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42575 - "GET /api/metrics/10173_2238 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42578 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40286 - "GET /api/series?limit=50000 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40287 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40288 - "GET /api/best-methods HTTP/1.1" 200 OK
+INFO:     127.0.0.1:16895 - "GET /api/series?limit=50000 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:22355 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:22356 - "GET /api/best-methods HTTP/1.1" 200 OK
+INFO:     127.0.0.1:22357 - "POST /api/sparklines HTTP/1.1" 200 OK
+INFO:     127.0.0.1:16795 - "GET /api/series?limit=50000 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50561 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:24153 - "GET /api/best-methods HTTP/1.1" 200 OK
+INFO:     127.0.0.1:24154 - "GET /api/series?limit=50000 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:5236 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:5237 - "GET /api/best-methods HTTP/1.1" 200 OK
+INFO:     127.0.0.1:15011 - "POST /api/sparklines HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54017 - "GET /api/series?limit=50000 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54018 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:15529 - "GET /api/best-methods HTTP/1.1" 200 OK
+INFO:     127.0.0.1:15530 - "GET /api/series?limit=50000 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:45887 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36989 - "GET /api/best-methods HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36991 - "POST /api/sparklines HTTP/1.1" 200 OK

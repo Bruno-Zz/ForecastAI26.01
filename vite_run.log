@@ -1,0 +1,60 @@
+
+> forecastai-frontend@1.0.0 dev
+> vite
+
+Port 5173 is in use, trying another one...
+Port 5174 is in use, trying another one...
+
+  [32m[1mVITE[22m v5.4.21[39m  [2mready in [0m[1m886[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5175[22m/[39m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[2m12:26:54 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:26:59 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:27:05 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Dashboard.jsx, /src/index.css[22m
+[2m12:27:09 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Dashboard.jsx, /src/index.css[22m
+[2m12:40:29 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Dashboard.jsx, /src/index.css[22m
+[2m12:40:37 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Dashboard.jsx, /src/index.css[22m
+[2m12:40:48 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:40:56 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:40:59 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:41:01 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:41:05 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:41:08 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:41:10 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:41:14 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:41:17 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:41:19 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:41:25 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m12:41:32 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:12 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:20 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:25 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:28 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:33 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:38 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:42 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:46 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:48 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:51 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:54 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:02:57 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:03:04 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Dashboard.jsx, /src/index.css[22m
+[2m1:03:07 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Dashboard.jsx, /src/index.css[22m
+[2m1:08:37 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:08:40 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:08:44 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:08:47 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:08:51 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:09:06 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:09:11 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:09:14 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:09:16 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:09:19 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:09:22 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:09:25 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:09:31 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Dashboard.jsx, /src/index.css[22m
+[2m1:09:36 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Dashboard.jsx, /src/index.css[22m
+[2m1:09:40 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/Dashboard.jsx, /src/index.css[22m
+[2m1:09:46 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m
+[2m1:09:49 AM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/TimeSeriesViewer.jsx, /src/index.css[22m

@@ -1,0 +1,12 @@
+INFO:     Started server process [74472]
+INFO:     Waiting for application startup.
+INFO:main:Starting API server...
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+INFO:     127.0.0.1:18493 - "GET /api/metrics/10173_2238 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:34869 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34871 - "GET /api/series/10173_2238/data HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:34873 - "GET /api/forecasts/10173_2238 HTTP/1.1" 503 Service Unavailable
+INFO:     127.0.0.1:34875 - "GET /api/metrics/10173_2238 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:27832 - "GET /api/metrics/10173_2238 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:3738 - "GET /api/metrics/NONEXIST HTTP/1.1" 404 Not Found

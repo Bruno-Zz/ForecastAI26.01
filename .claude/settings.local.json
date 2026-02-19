@@ -40,7 +40,28 @@
       "Bash(cmd /c \"cd C:\\\\allDev\\\\ForecastAI2026.01\\\\files && start cmd /k \"\"python -m uvicorn api.main:app --reload --port 8000\"\"\")",
       "Bash(start cmd:*)",
       "Bash(powershell -Command:*)",
-      "Bash(cmd /c \"netstat -ano | findstr :8000\")"
+      "Bash(cmd /c \"netstat -ano | findstr :8000\")",
+      "Bash(cmd /c \"findstr /n \"\"_compute_metrics_from_origin\"\" C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\api\\\\main.py\")",
+      "Bash(cmd /c \"netstat -ano 2>nul | findstr :8000 | findstr LISTENING\")",
+      "Bash(cmd /c \"netstat -ano 2>nul | findstr :5173 | findstr LISTENING\")",
+      "Bash(cmd /c \"findstr /n \"\"selectedItem\\\\|selectedSite\\\\|handleItemChange\\\\|handleSiteChange\"\" C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\frontend\\\\src\\\\components\\\\TimeSeriesViewer.jsx\")",
+      "Bash(cmd /c \"findstr /n \"\"selectedItem\\\\|selectedSite\\\\|handleItem\\\\|handleSite\"\" C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\frontend\\\\src\\\\components\\\\TimeSeriesViewer.jsx 2>&1\")",
+      "Bash(cmd /c \"netstat -ano 2>nul | findstr :8000\")",
+      "Bash(cmd /c \"netstat -ano 2>nul | findstr :5173\")",
+      "Bash(cmd /c \"tasklist 2>nul | findstr /i uvicorn\")",
+      "Bash(cmd /c \"tasklist 2>nul | findstr /i node\")",
+      "Bash(cmd /c:*)",
+      "Bash(echo:*)",
+      "Bash(lsof:*)",
+      "Bash(ss:*)",
+      "Bash(jobs:*)",
+      "Bash(kill:*)",
+      "Bash(fuser:*)",
+      "Bash(__NEW_LINE_188ab00484dd70bc__ echo \"=== Series data ===\")",
+      "Bash(__NEW_LINE_12e4bc56d42bb997__ echo \"=== Forecasts ===\")",
+      "Bash(__NEW_LINE_ea9ac5d75a5ea4c8__ echo \"=== Metrics \\(FALLBACK\\) ===\")",
+      "Bash(__NEW_LINE_624c3a7339af0cde__ echo \"=== Distributions ===\")",
+      "Bash(ls:*)"
     ]
   }
 }

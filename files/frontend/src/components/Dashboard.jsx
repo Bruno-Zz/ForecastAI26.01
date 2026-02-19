@@ -172,7 +172,7 @@ export const Dashboard = () => {
     const data = Object.entries(analytics.complexity_distribution).map(([k, v]) => ({ level: k, count: v }));
     return {
       $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
-      width: 'container', height: 200,
+      width: 280, height: 200,
       data: { values: data },
       mark: 'arc',
       encoding: {
@@ -249,13 +249,13 @@ export const Dashboard = () => {
             {complexitySpec && (
               <div>
                 <h3 className="text-sm font-semibold text-gray-600 mb-2">Complexity Distribution</h3>
-                <div className="w-full"><VegaLite spec={complexitySpec} actions={false} /></div>
+                <div className="w-full flex justify-center"><VegaLite spec={complexitySpec} actions={false} renderer="svg" style={{display:'block'}} /></div>
               </div>
             )}
             {bestMethodSpec && (
               <div>
                 <h3 className="text-sm font-semibold text-gray-600 mb-2">Best Method Distribution</h3>
-                <div className="w-full overflow-x-auto"><VegaLite spec={bestMethodSpec} actions={false} /></div>
+                <div className="w-full overflow-x-auto"><VegaLite spec={bestMethodSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
               </div>
             )}
           </div>

@@ -1,0 +1,4 @@
+INFO:     Will watch for changes in these directories: ['C:\\allDev\\ForecastAI2026.01']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [28852] using WatchFiles
+ERROR:    Error loading ASGI app. Could not import module "main".

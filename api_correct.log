@@ -1,0 +1,16 @@
+INFO:     Started server process [69744]
+INFO:     Waiting for application startup.
+INFO:api.main:Starting API server...
+INFO:api.main:Loaded corrected time series: 42934 rows
+INFO:api.main:Loaded original time series: 48294 rows
+INFO:api.main:Loaded characteristics: 2348 series
+INFO:api.main:Loaded forecasts: 5058 forecasts
+INFO:api.main:Loaded metrics: 138 evaluations
+INFO:api.main:Loaded best methods: 25 series
+INFO:api.main:Loaded forecasts by origin: 3312 rows
+INFO:api.main:Loaded outliers: 1861 detections
+INFO:api.main:Loaded config.yaml
+INFO:     Application startup complete.
+ERROR:    [Errno 10048] error while attempting to bind on address ('0.0.0.0', 8000): [winerror 10048] only one usage of each socket address (protocol/network address/port) is normally permitted
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
