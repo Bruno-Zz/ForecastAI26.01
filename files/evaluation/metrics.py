@@ -66,53 +66,81 @@ class ForecastEvaluator:
         
         # Extract configuration
         self.horizon = self.forecast_config['horizon']
-        self.n_windows = self.backtesting_config['n_windows']
-        self.step_size = self.backtesting_config['step_size']
-        self.min_train_size = self.backtesting_config['min_train_size']
-    
-    def create_rolling_windows(self, 
-                              series: pd.Series,
-                              dates: pd.Series) -> List[Tuple[int, pd.Series, pd.Series]]:
+        self.n_windows = self.backtesting_config.get('n_windows', 3)
+        self.step_size = self.backtesting_config.get('step_size', 1)
+        # min_train_size kept for backward compat but no longer gates backtesting
+        self.min_train_size = self.backtesting_config.get('min_train_size', 12)
+
+    def create_rolling_windows(self,
+                               series: pd.Series,
+                               dates: pd.Series) -> List[Tuple[int, pd.Series, pd.Series]]:
         """
         Create rolling window splits for backtesting.
-        
+
+        Rules:
+        - First forecast origin = earliest observation + 2 years (24 periods for
+          monthly data).  If the series is shorter than 2 years we use the
+          midpoint so that we always have *some* training data.
+        - n_windows windows are attempted, each step_size periods apart.
+        - A window is only included when there are enough actuals to evaluate
+          at least 1 horizon step (i.e. origin_idx < n).
+        - Backtest is ALWAYS attempted — there is no hard minimum-observation gate.
+
         Args:
             series: Time series values
             dates: Corresponding dates
-            
+
         Returns:
             List of (origin_idx, train_series, test_series) tuples
         """
         n = len(series)
         windows = []
-        
-        # Calculate forecast origins
-        # Start from earliest possible origin (min_train_size + horizon from start)
-        # End at latest origin (horizon periods before end)
-        earliest_origin = self.min_train_size
-        latest_origin = n - self.horizon
-        
-        if earliest_origin >= latest_origin:
-            self.logger.warning(f"Insufficient data for backtesting. Need at least {self.min_train_size + self.horizon} observations")
+
+        if n < 2:
+            self.logger.debug(f"Series too short ({n} obs) for backtesting — need at least 2")
             return windows
-        
-        # Create evenly spaced origins
-        origin_step = max(1, (latest_origin - earliest_origin) // max(1, self.n_windows - 1))
-        
+
+        # Determine 2-year offset in periods using actual date spacing
+        # Fall back to 24 (monthly) if dates don't parse cleanly
+        try:
+            span_days = (dates.iloc[-1] - dates.iloc[0]).days
+            if span_days > 0 and n > 1:
+                days_per_period = span_days / (n - 1)
+                periods_per_year = max(1, round(365.25 / days_per_period))
+            else:
+                periods_per_year = 12
+        except Exception:
+            periods_per_year = 12
+
+        two_year_periods = 2 * periods_per_year
+
+        # First origin: 2 years after the first observation
+        # If the series is too short for that, use at least half the series length
+        # so there is always some training data
+        first_origin = min(two_year_periods, max(1, n // 2))
+
         for i in range(self.n_windows):
-            origin_idx = earliest_origin + i * origin_step
-            
-            if origin_idx + self.horizon > n:
+            origin_idx = first_origin + i * self.step_size
+
+            # Need at least 1 actual observation after the origin
+            if origin_idx >= n:
                 break
-            
-            train_end = origin_idx
+
+            train_series = series.iloc[:origin_idx]
             test_end = min(origin_idx + self.horizon, n)
-            
-            train_series = series.iloc[:train_end]
             test_series = series.iloc[origin_idx:test_end]
-            
+
+            if len(train_series) == 0 or len(test_series) == 0:
+                continue
+
             windows.append((origin_idx, train_series, test_series))
-        
+
+        if not windows:
+            self.logger.debug(
+                f"Could not construct any backtest windows "
+                f"(n={n}, first_origin={first_origin}, n_windows={self.n_windows})"
+            )
+
         return windows
     
     def calculate_point_metrics(self,
@@ -440,7 +468,7 @@ class ForecastEvaluator:
         windows = self.create_rolling_windows(series, dates)
         
         if not windows:
-            self.logger.warning(f"No valid windows for {unique_id}")
+            self.logger.debug(f"No valid windows for {unique_id} — skipping backtest")
             return pd.DataFrame()
         
         all_metrics = []
@@ -527,7 +555,7 @@ class ForecastEvaluator:
         windows = self.create_rolling_windows(series, dates)
 
         if not windows:
-            self.logger.warning(f"No valid windows for {unique_id}")
+            self.logger.debug(f"No valid windows for {unique_id} — skipping backtest")
             return pd.DataFrame(), pd.DataFrame()
 
         all_metrics = []

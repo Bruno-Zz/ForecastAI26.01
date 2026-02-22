@@ -227,8 +227,8 @@ class ETLPipeline:
         site_table = f"pg_db.{self.tables['site']}"
         demand_table = f"pg_db.{self.tables['demand_actual']}"
 
-        # Build WHERE clause for date filtering
-        where_clauses = []
+        # Build WHERE clause for date filtering and original-rows-only filter
+        where_clauses = ["d.original = 1"]   # only keep original (non-mapped) demand rows
         if self.min_date:
             where_clauses.append(f"d.{self.date_column} >= '{self.min_date}'")
         if self.max_date:
@@ -304,6 +304,11 @@ class ETLPipeline:
 
         demand_df = con.execute(f"SELECT * FROM {demand_table};").fetchdf()
         self.logger.info(f"  demand_actual: {len(demand_df):,} rows, columns: {list(demand_df.columns)}")
+        # Keep only original (non-mapped) demand rows
+        if "original" in demand_df.columns:
+            before = len(demand_df)
+            demand_df = demand_df[demand_df["original"] == 1].copy()
+            self.logger.info(f"  Filtered to original=1: {before - len(demand_df):,} mapped rows removed, {len(demand_df):,} remain")
 
         item_df = con.execute(f"SELECT * FROM {item_table};").fetchdf()
         self.logger.info(f"  item: {len(item_df):,} rows, columns: {list(item_df.columns)}")
@@ -435,7 +440,7 @@ class ETLPipeline:
         df["y"] = pd.to_numeric(df["y"], errors="coerce")
         null_values = df["y"].isna().sum()
         if null_values > 0:
-            self.logger.warning(f"Dropping {null_values:,} rows with non-numeric values")
+            self.logger.info(f"Dropping {null_values:,} rows with null/non-numeric values (expected: some source records have no quantity)")
             df = df.dropna(subset=["y"])
 
         # --- 4. Apply date range filter (post-extraction safety net) ---

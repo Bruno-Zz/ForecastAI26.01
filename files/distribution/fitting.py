@@ -37,8 +37,14 @@ class FittedDistribution:
     service_level_quantiles: Optional[Dict[float, float]] = None
     
     def to_dict(self) -> Dict:
-        """Convert to dictionary."""
-        return asdict(self)
+        """Convert to dictionary, ensuring dict keys are strings for Parquet compatibility."""
+        d = asdict(self)
+        # PyArrow requires string keys in dict columns — convert float quantile keys
+        if d.get('service_level_quantiles'):
+            d['service_level_quantiles'] = {
+                str(k): v for k, v in d['service_level_quantiles'].items()
+            }
+        return d
     
     def get_quantile(self, q: float) -> float:
         """
@@ -379,9 +385,21 @@ class DistributionFitter:
                 import json
                 quantiles_dict = json.loads(quantiles_dict.replace("'", '"'))
             
-            # Convert to numeric
-            quantiles = {float(k): float(v) for k, v in quantiles_dict.items()}
+            # Convert to numeric — quantile values may be full-horizon arrays
+            # (one value per forecast step).  Reduce to a scalar by taking the
+            # mean across the horizon so the fitted distribution represents the
+            # average-period demand (the API scales it per-horizon from there).
+            quantiles = {}
+            for k, v in quantiles_dict.items():
+                try:
+                    arr = np.asarray(v, dtype=float)
+                    quantiles[float(k)] = float(arr.mean()) if arr.ndim > 0 and arr.size > 1 else float(arr)
+                except (TypeError, ValueError):
+                    continue
             
+            if len(quantiles) < 2:
+                continue
+
             # Fit distribution
             fit = self.fit_from_quantiles(quantiles, distribution_type='auto')
             

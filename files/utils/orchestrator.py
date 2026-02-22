@@ -26,7 +26,7 @@ try:
     DASK_AVAILABLE = True
 except ImportError:
     DASK_AVAILABLE = False
-    logging.warning("Dask not available. Install with: pip install dask[complete]")
+    logging.debug("Dask not available (optional). Install with: pip install dask[complete]")
 
 # Core forecasting modules
 from forecasting.statistical_models import StatisticalForecaster
@@ -43,6 +43,158 @@ from etl.etl import ETLPipeline
 from characterization.characterization import TimeSeriesCharacterizer
 from selection.best_method import MethodSelector
 from outlier.detection import OutlierDetector
+
+
+def _dask_forecast_batch(config_path: str,
+                         batch_df: pd.DataFrame,
+                         batch_chars: pd.DataFrame) -> pd.DataFrame:
+    """
+    Module-level standalone function submitted to Dask workers.
+
+    Must be a plain function (not a bound method) so it can be pickled.
+    Each worker reconstructs the forecasters from the config path; no
+    asyncio state is transmitted.
+
+    Args:
+        config_path: Path to config.yaml (picklable string).
+        batch_df: Time series data slice for this batch.
+        batch_chars: Characteristics slice for this batch.
+
+    Returns:
+        DataFrame with forecast results for the batch.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    all_forecasts = []
+
+    # Statistical forecasts (always attempted)
+    try:
+        stat_forecaster = StatisticalForecaster(config_path)
+        stat_forecasts = stat_forecaster.forecast_multiple_series(
+            df=batch_df,
+            characteristics_df=batch_chars
+        )
+        if not stat_forecasts.empty:
+            all_forecasts.append(stat_forecasts)
+    except Exception as e:
+        logger.warning(f"Statistical forecasting failed in worker: {e}")
+
+    # ML forecasts (LightGBM / XGBoost) — only for eligible series
+    ml_eligible = batch_chars[
+        batch_chars.get('sufficient_for_ml', pd.Series(dtype=bool)).fillna(False)
+    ] if 'sufficient_for_ml' in batch_chars.columns else pd.DataFrame()
+
+    if len(ml_eligible) > 0:
+        try:
+            ml_forecaster = MLForecaster(config_path)
+            ml_forecasts = ml_forecaster.forecast_multiple_series(
+                df=batch_df,
+                characteristics_df=ml_eligible
+            )
+            if not ml_forecasts.empty:
+                all_forecasts.append(ml_forecasts)
+        except Exception as e:
+            logger.warning(f"ML forecasting failed in worker: {e}")
+
+    if all_forecasts:
+        return pd.concat(all_forecasts, ignore_index=True)
+    return pd.DataFrame()
+
+
+# Statistical methods known to StatisticalForecaster — used for backtest filtering
+_STAT_METHODS = {
+    'AutoARIMA', 'AutoETS', 'AutoTheta', 'AutoCES', 'MSTL',
+    'CrostonOptimized', 'ADIDA', 'IMAPA', 'TSB',
+    'SeasonalNaive', 'HistoricAverage', 'Naive', 'SeasonalWindowAverage'
+}
+
+
+def _dask_backtest_batch(config_path: str,
+                         batch_df: pd.DataFrame,
+                         batch_work: list) -> tuple:
+    """
+    Module-level standalone function submitted to Dask workers for backtesting.
+
+    Processes a *batch* of series in one worker call so that StatisticalForecaster
+    and ForecastEvaluator are constructed only once per task, amortising the
+    YAML-parse / import overhead across many series.
+
+    Must be a plain function (not a bound method) so it can be pickled.
+
+    Args:
+        config_path: Path to config.yaml (picklable string).
+        batch_df:    DataFrame rows for all series in this batch (unique_id, date, y).
+        batch_work:  List of (unique_id, methods, characteristics_dict) tuples.
+
+    Returns:
+        Tuple (metrics_df, origin_forecasts_df) — concatenation of all series
+        results; both may be empty DataFrames.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    stat_forecaster = StatisticalForecaster(config_path)
+    evaluator = ForecastEvaluator(config_path)
+    use_with_forecasts = hasattr(evaluator, 'backtest_series_with_forecasts')
+
+    all_metrics = []
+    all_origins = []
+
+    for unique_id, methods, characteristics in batch_work:
+        series_df = batch_df[batch_df['unique_id'] == unique_id]
+        try:
+            if use_with_forecasts:
+                metrics_df, origin_df = evaluator.backtest_series_with_forecasts(
+                    df=series_df,
+                    unique_id=unique_id,
+                    forecast_fn=stat_forecaster.forecast_single_series,
+                    methods=methods,
+                    characteristics=characteristics,
+                )
+                if not origin_df.empty:
+                    all_origins.append(origin_df)
+            else:
+                metrics_df = evaluator.backtest_series(
+                    df=series_df,
+                    unique_id=unique_id,
+                    forecast_fn=stat_forecaster.forecast_single_series,
+                    methods=methods,
+                    characteristics=characteristics,
+                )
+            if not metrics_df.empty:
+                all_metrics.append(metrics_df)
+        except Exception as exc:
+            logger.warning(f"Backtest worker failed for {unique_id}: {exc}")
+
+    metrics_out = pd.concat(all_metrics, ignore_index=True) if all_metrics else pd.DataFrame()
+    origins_out = pd.concat(all_origins, ignore_index=True) if all_origins else pd.DataFrame()
+    return metrics_out, origins_out
+
+
+def _dask_distribution_batch(config_path: str,
+                              batch_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Module-level standalone function submitted to Dask workers for distribution fitting.
+
+    Constructs DistributionFitter once per task and fits all rows in the batch,
+    amortising init overhead across many (unique_id, method) pairs.
+
+    Args:
+        config_path: Path to config.yaml (picklable string).
+        batch_df:    Slice of forecasts_df for this batch.
+
+    Returns:
+        DataFrame with fitted distribution rows; may be empty.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        fitter = DistributionFitter(config_path)
+        return fitter.fit_forecast_distributions(batch_df)
+    except Exception as exc:
+        logger.warning(f"Distribution fitting batch failed: {exc}")
+        return pd.DataFrame()
 
 
 class ForecastOrchestrator:
@@ -364,10 +516,13 @@ class ForecastOrchestrator:
             self.logger.info("Running forecasting in serial mode...")
             forecasts_df = self.forecast_batch(df, characteristics_df)
         else:
-            # Parallel with Dask
-            self.logger.info(f"Running parallel forecasting, batch_size={batch_size}...")
+            # Parallel with Dask — use the module-level standalone function so
+            # the orchestrator instance (which holds un-picklable asyncio state)
+            # is never transmitted to workers.
+            self.logger.info(f"Running parallel forecasting with Dask, batch_size={batch_size}...")
             n_series = len(characteristics_df)
             n_batches = (n_series + batch_size - 1) // batch_size
+            self.logger.info(f"  {n_series} series → {n_batches} batches")
 
             futures = []
             for i in range(n_batches):
@@ -378,9 +533,10 @@ class ForecastOrchestrator:
                 batch_df = df[df['unique_id'].isin(batch_ids)]
 
                 future = self.client.submit(
-                    self.forecast_batch,
-                    batch_df,
-                    batch_chars
+                    _dask_forecast_batch,   # picklable module-level function
+                    self.config_path,       # picklable string
+                    batch_df,               # DataFrame (Arrow-serialisable)
+                    batch_chars,            # DataFrame (Arrow-serialisable)
                 )
                 futures.append(future)
 
@@ -414,6 +570,9 @@ class ForecastOrchestrator:
         """
         Step 4: Rolling-window backtesting with per-origin forecast storage.
 
+        Runs one Dask future per series when a Dask client is available,
+        otherwise falls back to sequential execution.
+
         Args:
             df: Time series data
             characteristics_df: Series characteristics
@@ -425,47 +584,93 @@ class ForecastOrchestrator:
         self.logger.info("STEP 4: Backtesting with Per-Origin Forecast Storage")
         self.logger.info("=" * 80)
 
-        all_metrics = []
-        all_origin_forecasts = []
-
+        # Build per-series work items: (unique_id, series_df_slice, methods, chars_dict)
+        work_items = []
         for _, char_row in characteristics_df.iterrows():
             unique_id = char_row['unique_id']
-
-            # Use top recommended methods (limit to avoid excessive compute)
             methods = char_row.get('recommended_methods', ['AutoETS', 'AutoARIMA', 'AutoTheta'])
             if isinstance(methods, str):
                 methods = [methods]
-            methods = methods[:5]
+            # Filter to statistical methods only; TimesFM / LightGBM etc. are not handled here
+            methods = [m for m in methods if m in _STAT_METHODS][:5]
+            if not methods:
+                methods = ['AutoETS', 'AutoARIMA']
+            series_slice = df[df['unique_id'] == unique_id]
+            work_items.append((unique_id, series_slice, methods, char_row.to_dict()))
 
-            self.logger.info(f"Backtesting: {unique_id} with {methods}")
+        n_series = len(work_items)
+        all_metrics = []
+        all_origin_forecasts = []
 
-            try:
-                # Use the enhanced backtest that also stores per-origin forecasts
-                if hasattr(self.evaluator, 'backtest_series_with_forecasts'):
-                    metrics, origin_forecasts = self.evaluator.backtest_series_with_forecasts(
-                        df=df,
-                        unique_id=unique_id,
-                        forecast_fn=self.stat_forecaster.forecast_single_series,
-                        methods=methods,
-                        characteristics=char_row.to_dict()
-                    )
+        if self.client is not None and DASK_AVAILABLE:
+            # ---- Parallel Dask mode: batched, one future per batch ----
+            # Batching amortises StatisticalForecaster + ForecastEvaluator
+            # init cost across many series per worker task, keeping CPUs busy.
+            batch_size = self.parallel_config.get('batch_size', 130)
+            n_batches = (n_series + batch_size - 1) // batch_size
+            self.logger.info(
+                f"Running parallel backtesting with Dask "
+                f"({n_series} series → {n_batches} batches of ~{batch_size})..."
+            )
+
+            futures = []
+            for b in range(n_batches):
+                batch = work_items[b * batch_size:(b + 1) * batch_size]
+                # Collect all unique_ids in this batch to slice the full df once
+                batch_ids = [uid for uid, _, _, _ in batch]
+                batch_df = df[df['unique_id'].isin(batch_ids)]
+                # Work list: (unique_id, methods, chars_dict) — df is passed separately
+                batch_work = [(uid, methods, chars) for uid, _, methods, chars in batch]
+                future = self.client.submit(
+                    _dask_backtest_batch,
+                    self.config_path,
+                    batch_df,
+                    batch_work,
+                )
+                futures.append(future)
+
+            completed_series = 0
+            for future in as_completed(futures):
+                try:
+                    metrics, origin_forecasts = future.result()
+                    if not metrics.empty:
+                        all_metrics.append(metrics)
+                        completed_series += metrics['unique_id'].nunique() if 'unique_id' in metrics.columns else 0
                     if not origin_forecasts.empty:
                         all_origin_forecasts.append(origin_forecasts)
-                else:
-                    metrics = self.evaluator.backtest_series(
-                        df=df,
-                        unique_id=unique_id,
-                        forecast_fn=self.stat_forecaster.forecast_single_series,
-                        methods=methods,
-                        characteristics=char_row.to_dict()
-                    )
+                except Exception as e:
+                    self.logger.warning(f"Backtest batch failed: {e}")
 
-                if not metrics.empty:
-                    all_metrics.append(metrics)
+            self.logger.info(f"Backtest complete: {completed_series}/{n_series} series processed")
 
-            except Exception as e:
-                self.logger.warning(f"Backtest failed for {unique_id}: {e}")
-                continue
+        else:
+            # ---- Serial fallback ----
+            self.logger.info(f"Running serial backtesting ({n_series} series)...")
+            for idx, (unique_id, series_slice, methods, chars_dict) in enumerate(work_items):
+                self.logger.info(f"Backtesting [{idx+1}/{n_series}]: {unique_id} with {methods}")
+                try:
+                    if hasattr(self.evaluator, 'backtest_series_with_forecasts'):
+                        metrics, origin_forecasts = self.evaluator.backtest_series_with_forecasts(
+                            df=series_slice,
+                            unique_id=unique_id,
+                            forecast_fn=self.stat_forecaster.forecast_single_series,
+                            methods=methods,
+                            characteristics=chars_dict,
+                        )
+                        if not origin_forecasts.empty:
+                            all_origin_forecasts.append(origin_forecasts)
+                    else:
+                        metrics = self.evaluator.backtest_series(
+                            df=series_slice,
+                            unique_id=unique_id,
+                            forecast_fn=self.stat_forecaster.forecast_single_series,
+                            methods=methods,
+                            characteristics=chars_dict,
+                        )
+                    if not metrics.empty:
+                        all_metrics.append(metrics)
+                except Exception as e:
+                    self.logger.warning(f"Backtest failed for {unique_id}: {e}")
 
         # Combine metrics
         metrics_df = pd.concat(all_metrics, ignore_index=True) if all_metrics else pd.DataFrame()
@@ -544,7 +749,37 @@ class ForecastOrchestrator:
             self.logger.warning("No forecasts available for distribution fitting")
             return pd.DataFrame()
 
-        distributions_df = self.dist_fitter.fit_forecast_distributions(forecasts_df)
+        batch_size = self.parallel_config.get('batch_size', 130)
+        n_rows = len(forecasts_df)
+
+        if self.client is not None and DASK_AVAILABLE:
+            n_batches = (n_rows + batch_size - 1) // batch_size
+            self.logger.info(
+                f"Running parallel distribution fitting with Dask "
+                f"({n_rows} rows → {n_batches} batches of ~{batch_size})..."
+            )
+            futures = []
+            for b in range(n_batches):
+                batch = forecasts_df.iloc[b * batch_size:(b + 1) * batch_size]
+                futures.append(self.client.submit(
+                    _dask_distribution_batch,
+                    self.config_path,
+                    batch,
+                ))
+
+            results = []
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if not result.empty:
+                        results.append(result)
+                except Exception as e:
+                    self.logger.warning(f"Distribution batch failed: {e}")
+
+            distributions_df = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
+        else:
+            self.logger.info(f"Running serial distribution fitting ({n_rows} rows)...")
+            distributions_df = self.dist_fitter.fit_forecast_distributions(forecasts_df)
 
         # Save
         output_path = Path(self.output_config['base_path']) / "fitted_distributions.parquet"

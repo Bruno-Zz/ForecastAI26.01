@@ -11,6 +11,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { VegaLite } from 'react-vega';
+import Plot from 'react-plotly.js';
 import axios from 'axios';
 
 const API_BASE_URL = '/api';
@@ -585,6 +586,7 @@ export const TimeSeriesViewer = () => {
     return {
       $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
       width: 'container', height: 300,
+      autosize: { type: 'fit', contains: 'padding' },
       data: { values: filtered },
       mark: { type: 'bar', binSpacing: 1 },
       encoding: {
@@ -625,7 +627,7 @@ export const TimeSeriesViewer = () => {
       layers.push({ transform: [{ filter: "datum.layer === 'band'" }], mark: { type: 'area', opacity: 0.25 }, encoding: { x: { field: 'date', type: 'temporal' }, y: { field: 'lo50', type: 'quantitative' }, y2: { field: 'hi50' }, color: { ...colorScale, legend: null } } });
     }
     layers.push({ transform: [{ filter: "datum.layer === 'line'" }], mark: { type: 'line', point: false, strokeWidth: 2 }, encoding: { x: { field: 'date', type: 'temporal', title: 'Date', axis: { format: '%Y-%m' } }, y: { field: 'value', type: 'quantitative', title: 'Demand', scale: { zero: false } }, color: colorScale, strokeDash: { field: 'type', type: 'nominal', scale: { domain: ['Actual', 'Forecast'], range: [[1, 0], [5, 5]] }, legend: null }, opacity: { condition: { test: "datum.type === 'Actual'", value: 1 }, value: 0.85 }, tooltip: [{ field: 'date', type: 'temporal', title: 'Date' }, { field: 'value', type: 'quantitative', title: 'Value', format: ',.0f' }, { field: 'method', type: 'nominal', title: 'Method' }, { field: 'type', type: 'nominal', title: 'Type' }] } });
-    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: 380, data: { values: filtered }, layer: layers, config: { view: { stroke: null } } };
+    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: 380, autosize: { type: 'fit', contains: 'padding' }, data: { values: filtered }, layer: layers, config: { view: { stroke: null } } };
   }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, activeMethodDomain]);
 
   const racingBarsSpec = useMemo(() => {
@@ -639,7 +641,7 @@ export const TimeSeriesViewer = () => {
       layers.push({ mark: { type: 'rule', color: '#e11d48', strokeWidth: 2, strokeDash: [6, 4] }, encoding: { x: { datum: actualVal } } });
       layers.push({ mark: { type: 'text', align: 'left', dx: 4, dy: -8, color: '#e11d48', fontSize: 11, fontWeight: 'bold' }, encoding: { x: { datum: actualVal }, text: { value: `Actual: ${actualVal.toLocaleString()}` } } });
     }
-    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: Math.max(150, barData.length * 40), data: { values: barData }, layer: layers };
+    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: Math.max(150, barData.length * 40), autosize: { type: 'fit', contains: 'padding' }, data: { values: barData }, layer: layers };
   }, [originForecasts, activeForecasts, selectedPeriod, visibleMethods, activeMethodDomain]);
 
   const targetChartSpec = useMemo(() => {
@@ -649,6 +651,7 @@ export const TimeSeriesViewer = () => {
     const maxPrecision = Math.max(...data.map(d => d.precision), 1);
     return {
       $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: 380,
+      autosize: { type: 'fit', contains: 'padding' },
       layer: [
         { data: { values: [{ x: 0, y: 0, x2: maxAccuracy * 0.5, y2: maxPrecision * 0.5 }] }, mark: { type: 'rect', opacity: 0.06, color: '#16a34a' }, encoding: { x: { field: 'x', type: 'quantitative', scale: { domain: [0, maxAccuracy * 1.15] }, title: '|Bias| (Accuracy)' }, x2: { field: 'x2' }, y: { field: 'y', type: 'quantitative', scale: { domain: [0, maxPrecision * 1.15] }, title: 'RMSE (Precision)' }, y2: { field: 'y2' } } },
         { data: { values: [{ x: maxAccuracy * 0.5, y: maxPrecision * 0.5 }] }, mark: { type: 'rule', strokeDash: [4, 4], color: '#d1d5db', strokeWidth: 1 }, encoding: { x: { field: 'x', type: 'quantitative' } } },
@@ -665,33 +668,78 @@ export const TimeSeriesViewer = () => {
   const compositeScoreSpec = useMemo(() => {
     if (!compositeRanking || Object.keys(compositeRanking).length === 0) return null;
     const data = Object.entries(compositeRanking).map(([method, score]) => ({ method, score: score ?? 999, isBest: bestMethod?.best_method === method })).sort((a, b) => a.score - b.score);
-    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: Math.max(120, data.length * 36), data: { values: data }, mark: { type: 'bar', cornerRadiusEnd: 4 }, encoding: { y: { field: 'method', type: 'nominal', sort: { field: 'score', order: 'ascending' }, title: 'Method' }, x: { field: 'score', type: 'quantitative', title: 'Composite Score (lower is better)' }, color: { field: 'method', type: 'nominal', legend: null, scale: activeMethodDomain }, stroke: { condition: { test: 'datum.isBest', value: '#059669' }, value: null }, strokeWidth: { condition: { test: 'datum.isBest', value: 3 }, value: 0 }, tooltip: [{ field: 'method', type: 'nominal', title: 'Method' }, { field: 'score', type: 'quantitative', title: 'Composite Score', format: '.4f' }] } };
+    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: Math.max(120, data.length * 36), autosize: { type: 'fit', contains: 'padding' }, data: { values: data }, mark: { type: 'bar', cornerRadiusEnd: 4 }, encoding: { y: { field: 'method', type: 'nominal', sort: { field: 'score', order: 'ascending' }, title: 'Method' }, x: { field: 'score', type: 'quantitative', title: 'Composite Score (lower is better)' }, color: { field: 'method', type: 'nominal', legend: null, scale: activeMethodDomain }, stroke: { condition: { test: 'datum.isBest', value: '#059669' }, value: null }, strokeWidth: { condition: { test: 'datum.isBest', value: 3 }, value: 0 }, tooltip: [{ field: 'method', type: 'nominal', title: 'Method' }, { field: 'score', type: 'quantitative', title: 'Composite Score', format: '.4f' }] } };
   }, [compositeRanking, bestMethod, activeMethodDomain]);
 
-  const ridgeChartSpec = useMemo(() => {
+  const ridgePlotData = useMemo(() => {
     if (!distributions || !distributions.horizons || distributions.horizons.length === 0) return null;
-    const data = [];
-    distributions.horizons.forEach(h => {
-      (h.density_points || []).forEach(pt => { data.push({ horizon: `M${h.horizon_month}`, horizonNum: h.horizon_month, x: pt.x, density: pt.y, mean: h.mean, is_bootstrap: h.is_bootstrap }); });
-    });
-    if (data.length === 0) return null;
-    const nHorizons = distributions.horizons.length;
-    const step = nHorizons > 12 ? Math.ceil(nHorizons / 12) : 1;
-    const filteredHorizons = distributions.horizons.filter((_, i) => i % step === 0).map(h => `M${h.horizon_month}`);
-    const filteredData = data.filter(d => filteredHorizons.includes(d.horizon));
-    const rowHeight = 80;
-    const totalHeight = filteredHorizons.length * rowHeight;
-    return {
-      $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container',
-      data: { values: filteredData },
-      facet: { row: { field: 'horizon', type: 'ordinal', sort: { field: 'horizonNum', order: 'ascending' }, header: { labelAngle: 0, labelAlign: 'right', labelFontSize: 11, title: null, labelLimit: 60 } } },
-      spec: { width: 'container', height: rowHeight, layer: [
-        { mark: { type: 'area', interpolate: 'monotone', opacity: 0.65, line: { strokeWidth: 1.5 } }, encoding: { x: { field: 'x', type: 'quantitative', title: 'Forecast Value', axis: { format: ',.0f', labelFontSize: 9 } }, y: { field: 'density', type: 'quantitative', title: null, axis: null, scale: { zero: true } }, color: { field: 'horizonNum', type: 'quantitative', scale: { scheme: 'viridis' }, legend: null }, tooltip: [{ field: 'horizon', type: 'nominal', title: 'Horizon' }, { field: 'x', type: 'quantitative', title: 'Value', format: ',.0f' }, { field: 'density', type: 'quantitative', title: 'Density', format: '.3f' }] } },
-        { mark: { type: 'rule', strokeWidth: 2, color: '#1e293b', strokeDash: [4, 3] }, encoding: { x: { field: 'mean', type: 'quantitative' } } }
-      ] },
-      config: { view: { stroke: '#e5e7eb' }, facet: { spacing: 4 } },
-      resolve: { scale: { x: 'independent', y: 'independent' } }
+    const horizons = distributions.horizons;
+    const nHorizons = horizons.length;
+    const step = nHorizons > 24 ? Math.ceil(nHorizons / 24) : 1;
+    const filtered = horizons.filter((_, i) => i % step === 0);
+    if (filtered.length === 0) return null;
+
+    // Build surface: z[horizonIdx][xIdx] = density
+    // All horizons must share a common x grid for surface — use union of all x values sorted
+    const allXSets = filtered.map(h => (h.density_points || []).map(p => p.x));
+    const nPts = allXSets[0]?.length || 80;
+
+    // For each horizon, build its own x/density arrays (they may differ — use per-row x for surface)
+    // surface trace requires uniform grid: interpolate each row onto a shared x axis
+    const globalXMin = Math.min(...allXSets.map(xs => Math.min(...xs)));
+    const globalXMax = Math.max(...allXSets.map(xs => Math.max(...xs)));
+    const sharedX = Array.from({ length: nPts }, (_, i) => globalXMin + (i / (nPts - 1)) * (globalXMax - globalXMin));
+
+    // Linear interpolation helper
+    const interp = (xs, ys, xNew) => {
+      if (xNew <= xs[0]) return ys[0];
+      if (xNew >= xs[xs.length - 1]) return ys[ys.length - 1];
+      let lo = 0, hi = xs.length - 1;
+      while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (xs[mid] <= xNew) lo = mid; else hi = mid; }
+      const t = (xNew - xs[lo]) / (xs[hi] - xs[lo]);
+      return ys[lo] + t * (ys[hi] - ys[lo]);
     };
+
+    const zRows = filtered.map(h => {
+      const pts = h.density_points || [];
+      const xs = pts.map(p => p.x);
+      const ys = pts.map(p => p.y);
+      return sharedX.map(xv => Math.max(0, interp(xs, ys, xv)));
+    });
+
+    const yLabels = filtered.map(h => `M${h.horizon_month}`);
+    const means = filtered.map(h => h.mean);
+
+    // Surface trace
+    const surface = {
+      type: 'surface',
+      x: sharedX,
+      y: filtered.map(h => h.horizon_month),
+      z: zRows,
+      colorscale: 'Viridis',
+      opacity: 0.85,
+      showscale: true,
+      colorbar: { title: { text: 'Density', side: 'right' }, thickness: 14, len: 0.6 },
+      contours: {
+        z: { show: true, usecolormap: true, highlightcolor: '#fff', project: { z: false } }
+      },
+      hovertemplate: 'Horizon: M%{y}<br>Value: %{x:,.0f}<br>Density: %{z:.4f}<extra></extra>',
+    };
+
+    // Mean lines as scatter3d
+    const meanLines = filtered.map((h, i) => ({
+      type: 'scatter3d',
+      mode: 'lines',
+      x: [h.mean, h.mean],
+      y: [h.horizon_month, h.horizon_month],
+      z: [0, Math.max(...zRows[i]) * 1.05],
+      line: { color: '#1e293b', width: 3, dash: 'dash' },
+      showlegend: i === 0,
+      name: i === 0 ? 'Mean' : '',
+      hovertemplate: `M${h.horizon_month} mean: ${h.mean.toLocaleString(undefined, { maximumFractionDigits: 0 })}<extra></extra>`,
+    }));
+
+    return { traces: [surface, ...meanLines], yLabels, means };
   }, [distributions]);
 
   /* ---------- metrics helpers ---------- */
@@ -875,41 +923,139 @@ export const TimeSeriesViewer = () => {
       </Section>
 
       {/* Method Selection Rationale */}
-      {methodExplanation && (
-        <Section title="Method Selection Rationale" storageKey="tsv_rationale_open" defaultOpen={false}>
-          <div className="mb-3 text-sm bg-blue-50 text-blue-800 px-3 py-2 rounded">
-            Selection category: <span className="font-semibold">{methodExplanation.selection_category}</span>
-            <span className="mx-2">|</span>
-            {methodExplanation.selection_reason}
-            <span className="mx-2">|</span>
-            {methodExplanation.n_observations} observations
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <h3 className="text-sm font-semibold text-emerald-700 mb-2">Applied Methods ({methodExplanation.included?.length || 0})</h3>
-              <div className="space-y-1">
-                {(methodExplanation.included || []).map((m, i) => (
-                  <div key={i} className="flex items-start gap-2 text-sm">
-                    <span className={`mt-0.5 text-xs ${m.status === 'forecasted' ? 'text-emerald-600' : 'text-amber-500'}`}>{m.status === 'forecasted' ? '✓' : '⚠'}</span>
-                    <div><span className="font-medium">{m.method}</span><span className="text-gray-500 ml-1 text-xs">{m.reason}</span></div>
+      {methodExplanation && (() => {
+        const chars = methodExplanation.characteristics || {};
+        const acf   = methodExplanation.acf  || { lags: [], values: [], ci_upper: [], ci_lower: [] };
+        const pacf  = methodExplanation.pacf || { lags: [], values: [] };
+
+        /** Inline SVG bar chart for ACF/PACF */
+        const CorrelogramChart = ({ lags, values, ciUpper, ciLower, label, color }) => {
+          if (!lags || lags.length === 0) return <p className="text-xs text-gray-400 italic">Not enough data to compute {label}.</p>;
+          const W = 340, H = 110, padL = 28, padB = 20, padT = 10, padR = 8;
+          const innerW = W - padL - padR;
+          const innerH = H - padT - padB;
+          const n = lags.length;
+          const allVals = [...values, ...(ciUpper || []).map((u, i) => values[i] + u), ...(ciLower || []).map((l, i) => values[i] - l)];
+          const yMin = Math.min(-0.5, ...allVals);
+          const yMax = Math.max( 0.5, ...allVals);
+          const yRange = yMax - yMin || 1;
+          const toX = (i) => padL + (i + 0.5) * (innerW / n);
+          const toY = (v) => padT + (1 - (v - yMin) / yRange) * innerH;
+          const y0 = toY(0);
+          const barW = Math.max(2, innerW / n - 2);
+          // significance band (95% CI: ±1.96/√n)
+          const sigBand = 1.96 / Math.sqrt(values.length + 1);
+          const ySigPos = toY(sigBand);
+          const ySigNeg = toY(-sigBand);
+
+          return (
+            <svg width={W} height={H} className="overflow-visible">
+              {/* significance band */}
+              <rect x={padL} y={ySigPos} width={innerW} height={ySigNeg - ySigPos}
+                    fill="#dbeafe" fillOpacity={0.5} />
+              <line x1={padL} x2={padL + innerW} y1={ySigPos} y2={ySigPos} stroke="#93c5fd" strokeWidth={1} strokeDasharray="3,2"/>
+              <line x1={padL} x2={padL + innerW} y1={ySigNeg} y2={ySigNeg} stroke="#93c5fd" strokeWidth={1} strokeDasharray="3,2"/>
+              {/* zero line */}
+              <line x1={padL} x2={padL + innerW} y1={y0} y2={y0} stroke="#94a3b8" strokeWidth={1}/>
+              {/* bars */}
+              {values.map((v, i) => {
+                const x  = toX(i) - barW / 2;
+                const yv = toY(v);
+                const significant = Math.abs(v) > sigBand;
+                return (
+                  <g key={i}>
+                    <rect x={x} y={Math.min(yv, y0)} width={barW} height={Math.abs(yv - y0)}
+                          fill={significant ? color : '#cbd5e1'} fillOpacity={0.85} rx={1}/>
+                    <title>Lag {lags[i]}: {v.toFixed(3)}</title>
+                  </g>
+                );
+              })}
+              {/* y-axis ticks */}
+              {[-0.5, 0, 0.5, 1].filter(v => v >= yMin && v <= yMax).map(v => (
+                <g key={v}>
+                  <line x1={padL - 3} x2={padL} y1={toY(v)} y2={toY(v)} stroke="#94a3b8" strokeWidth={1}/>
+                  <text x={padL - 5} y={toY(v) + 3.5} textAnchor="end" fontSize={8} fill="#64748b">{v}</text>
+                </g>
+              ))}
+              {/* x-axis lag labels (every other) */}
+              {lags.map((lg, i) => i % 2 === 0 && (
+                <text key={i} x={toX(i)} y={H - 4} textAnchor="middle" fontSize={8} fill="#64748b">{lg}</text>
+              ))}
+              {/* label */}
+              <text x={padL} y={padT - 2} fontSize={9} fontWeight="600" fill="#475569">{label}</text>
+            </svg>
+          );
+        };
+
+        return (
+          <Section title="Method Selection Rationale" storageKey="tsv_rationale_open" defaultOpen={false}>
+
+            {/* Characteristics summary pills */}
+            <div className="flex flex-wrap gap-2 mb-4">
+              {[
+                { label: `${chars.n_observations} obs`, color: 'bg-slate-100 text-slate-700' },
+                { label: chars.has_seasonality ? `Seasonal (strength ${chars.seasonal_strength?.toFixed(2)})` : 'No seasonality', color: chars.has_seasonality ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-500' },
+                { label: chars.has_trend ? `Trend ${chars.trend_direction}` : 'No trend', color: chars.has_trend ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-500' },
+                { label: chars.is_intermittent ? 'Intermittent' : 'Continuous', color: chars.is_intermittent ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-700' },
+                { label: `Complexity: ${chars.complexity_level}`, color: chars.complexity_level === 'high' ? 'bg-red-100 text-red-700' : chars.complexity_level === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700' },
+              ].map(({ label, color }) => (
+                <span key={label} className={`px-2 py-0.5 rounded-full text-xs font-medium ${color}`}>{label}</span>
+              ))}
+            </div>
+
+            {/* Selection reason banner */}
+            <div className="mb-4 text-sm bg-blue-50 text-blue-800 px-3 py-2 rounded flex flex-wrap gap-x-3 gap-y-1">
+              <span>Category: <span className="font-semibold">{methodExplanation.selection_category}</span></span>
+              <span className="text-blue-300">|</span>
+              <span>{methodExplanation.selection_reason}</span>
+            </div>
+
+            {/* ACF + PACF charts */}
+            {(acf.lags.length > 0 || pacf.lags.length > 0) && (
+              <div className="mb-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                  <p className="text-xs text-gray-500 mb-1">ACF — autocorrelation at each lag. Bars outside the blue band are statistically significant. Spikes at regular intervals suggest seasonality.</p>
+                  <div className="overflow-x-auto">
+                    <CorrelogramChart lags={acf.lags} values={acf.values} ciUpper={acf.ci_upper} ciLower={acf.ci_lower} label="ACF" color="#6366f1" />
                   </div>
-                ))}
+                </div>
+                <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                  <p className="text-xs text-gray-500 mb-1">PACF — partial autocorrelation (removes indirect effects). Spike at lag k only → AR(k). Helps choose ARIMA order.</p>
+                  <div className="overflow-x-auto">
+                    <CorrelogramChart lags={pacf.lags} values={pacf.values} ciUpper={null} ciLower={null} label="PACF" color="#0891b2" />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Included / Excluded methods */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <h3 className="text-sm font-semibold text-emerald-700 mb-2">Applied Methods ({methodExplanation.included?.length || 0})</h3>
+                <div className="space-y-1">
+                  {(methodExplanation.included || []).map((m, i) => (
+                    <div key={i} className="flex items-start gap-2 text-sm">
+                      <span className={`mt-0.5 text-xs ${m.status === 'forecasted' ? 'text-emerald-600' : 'text-amber-500'}`}>{m.status === 'forecasted' ? '✓' : '⚠'}</span>
+                      <div><span className="font-medium">{m.method}</span><span className="text-gray-500 ml-1 text-xs">{m.reason}</span></div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-red-700 mb-2">Excluded Methods ({methodExplanation.excluded?.length || 0})</h3>
+                <div className="space-y-1">
+                  {(methodExplanation.excluded || []).map((m, i) => (
+                    <div key={i} className="flex items-start gap-2 text-sm">
+                      <span className="mt-0.5 text-xs text-red-500">✗</span>
+                      <div><span className="font-medium text-gray-600">{m.method}</span><span className="text-gray-400 ml-1 text-xs">{m.reason}</span></div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
-            <div>
-              <h3 className="text-sm font-semibold text-red-700 mb-2">Excluded Methods ({methodExplanation.excluded?.length || 0})</h3>
-              <div className="space-y-1">
-                {(methodExplanation.excluded || []).map((m, i) => (
-                  <div key={i} className="flex items-start gap-2 text-sm">
-                    <span className="mt-0.5 text-xs text-red-500">✗</span>
-                    <div><span className="font-medium text-gray-600">{m.method}</span><span className="text-gray-400 ml-1 text-xs">{m.reason}</span></div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </Section>
-      )}
+          </Section>
+        );
+      })()}
 
       {/* Scoring Charts */}
       {(targetChartSpec || compositeScoreSpec) && (
@@ -1002,16 +1148,36 @@ export const TimeSeriesViewer = () => {
         </div>
       )}
 
-      {/* Ridge Chart */}
-      {ridgeChartSpec && (
-        <Section title="Forecast Distribution Over Time" storageKey="tsv_ridge_open">
+      {/* 3D Distribution Surface */}
+      {ridgePlotData && (
+        <Section title="Forecast Distribution Over Time (3D)" storageKey="tsv_ridge_open">
           <p className="text-sm text-gray-500 mb-1">
-            Density curves for each horizon month ({distributions?.method || 'best method'}). Dashed line = mean. Color: near-term (cool) → far-term (warm).
+            3D surface of forecast density by horizon ({distributions?.method || 'best method'}). X = forecast value, Y = horizon month, Z = density. Dashed lines = mean per horizon.
           </p>
           {distributions?.horizons?.some(h => h.is_bootstrap) && (
             <p className="text-xs text-amber-600 mb-3">Some horizons use bootstrap distributions — parametric fit was not available.</p>
           )}
-          <div className="w-full overflow-x-auto"><VegaLite spec={ridgeChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+          <div className="w-full" style={{ height: 520 }}>
+            <Plot
+              data={ridgePlotData.traces}
+              layout={{
+                autosize: true,
+                margin: { l: 0, r: 0, t: 10, b: 0 },
+                paper_bgcolor: 'rgba(0,0,0,0)',
+                scene: {
+                  xaxis: { title: { text: 'Forecast Value', font: { size: 11 } }, tickformat: ',.0f', gridcolor: '#e5e7eb', zerolinecolor: '#cbd5e1' },
+                  yaxis: { title: { text: 'Horizon (month)', font: { size: 11 } }, tickformat: 'd', gridcolor: '#e5e7eb', zerolinecolor: '#cbd5e1' },
+                  zaxis: { title: { text: 'Density', font: { size: 11 } }, gridcolor: '#e5e7eb', zerolinecolor: '#cbd5e1' },
+                  camera: { eye: { x: -1.6, y: -1.6, z: 1.0 } },
+                  bgcolor: 'rgba(0,0,0,0)',
+                },
+                legend: { x: 0.02, y: 0.98, bgcolor: 'rgba(255,255,255,0.7)', bordercolor: '#e5e7eb', borderwidth: 1 },
+              }}
+              config={{ responsive: true, displayModeBar: true, displaylogo: false, modeBarButtonsToRemove: ['toImage'] }}
+              style={{ width: '100%', height: '100%' }}
+              useResizeHandler
+            />
+          </div>
         </Section>
       )}
 

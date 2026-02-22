@@ -300,7 +300,7 @@ class TimeSeriesCharacterizer:
             return chars
 
         # ---- Seasonality ----
-        self._detect_seasonality(values, chars)
+        self._detect_seasonality(values, chars, dates)
 
         # ---- Trend ----
         self._detect_trend(values, chars)
@@ -326,15 +326,34 @@ class TimeSeriesCharacterizer:
     # Seasonality
     # ------------------------------------------------------------------
 
-    def _detect_seasonality(self, values: np.ndarray, chars: SeriesCharacteristics) -> None:
+    def _detect_seasonality(
+        self,
+        values: np.ndarray,
+        chars: SeriesCharacteristics,
+        dates: pd.Series,
+    ) -> None:
         """
         Detect seasonality using the autocorrelation function.
+
+        Seasonality is only tested when the date range spans at least 2 years
+        (i.e. last observation is at least 2 years after the first). For shorter
+        histories there is not enough data to distinguish seasonal cycles from
+        noise, so has_seasonality is left False.
 
         For each candidate period in config.seasonality.test_periods, compute
         the ACF at that lag. If the ACF value exceeds min_strength, the period
         is considered seasonal. The overall seasonal_strength is the maximum
         ACF among detected seasonal lags.
         """
+        # Gate: require at least 2 years of history
+        date_span_days = (dates.max() - dates.min()).days
+        min_days_for_seasonality = 2 * 365
+        if date_span_days < min_days_for_seasonality:
+            chars.has_seasonality = False
+            chars.seasonal_periods = []
+            chars.seasonal_strength = 0.0
+            return
+
         test_periods: List[int] = self.seasonality_cfg['test_periods']
         min_strength: float = self.seasonality_cfg['min_strength']
 
@@ -435,14 +454,9 @@ class TimeSeriesCharacterizer:
             ADI         -- average number of periods between non-zero demands.
             CoV         -- coefficient of variation of non-zero demands.
 
-        is_intermittent is flagged when zero_ratio > zero_threshold
-        OR ADI > adi_threshold.
+        is_intermittent is flagged when the total number of periods (weeks)
+        with positive demand across the complete horizon is fewer than 5.
         """
-        zero_threshold = self.intermittency_cfg['zero_threshold']
-        adi_threshold = self.intermittency_cfg['adi_threshold']
-        # cov_threshold available in config but intermittent flag driven by
-        # zero_ratio and ADI per requirements; CoV stored for downstream use.
-
         n = len(values)
         n_zeros = int(np.sum(values == 0))
         chars.zero_ratio = float(n_zeros / n) if n > 0 else 0.0
@@ -466,9 +480,10 @@ class TimeSeriesCharacterizer:
         else:
             chars.cov = 0.0
 
-        chars.is_intermittent = (
-            chars.zero_ratio > zero_threshold or chars.adi > adi_threshold
-        )
+        # Sparsity rule: sparse (intermittent) when fewer than 5 periods have
+        # positive demand over the complete horizon.
+        n_periods_with_demand = int(np.sum(values > 0))
+        chars.is_intermittent = n_periods_with_demand < 5
 
     # ------------------------------------------------------------------
     # Stationarity
