@@ -73,7 +73,6 @@ const Sparkline = ({ historical = [], forecast = [], width = 100, height = 28 })
 export const Dashboard = () => {
   const [series, setSeries] = useState([]);
   const [analytics, setAnalytics] = useState(null);
-  const [bestMethods, setBestMethods] = useState([]);
   const [sparklineData, setSparklineData] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -97,14 +96,12 @@ export const Dashboard = () => {
     setLoading(true);
     setError(null);
     try {
-      const [seriesRes, analyticsRes, bestMethodsRes] = await Promise.allSettled([
+      const [seriesRes, analyticsRes] = await Promise.allSettled([
         axios.get(`${API_BASE_URL}/series`, { params: { limit: 50000 } }),
         axios.get(`${API_BASE_URL}/analytics`),
-        axios.get(`${API_BASE_URL}/best-methods`)
       ]);
       if (seriesRes.status === 'fulfilled') setSeries(seriesRes.value.data);
       if (analyticsRes.status === 'fulfilled') setAnalytics(analyticsRes.value.data);
-      if (bestMethodsRes.status === 'fulfilled') setBestMethods(bestMethodsRes.value.data);
       setLoading(false);
     } catch (err) {
       setError(err.message);
@@ -112,18 +109,8 @@ export const Dashboard = () => {
     }
   };
 
-  const enrichedSeries = useMemo(() => {
-    const bestMethodMap = {};
-    bestMethods.forEach(bm => { bestMethodMap[bm.unique_id] = bm; });
-    return series.map(s => ({
-      ...s,
-      best_method: bestMethodMap[s.unique_id]?.best_method || '-',
-      best_score: bestMethodMap[s.unique_id]?.best_score || null
-    }));
-  }, [series, bestMethods]);
-
   const filteredSeries = useMemo(() => {
-    let result = enrichedSeries;
+    let result = series;
     if (search) {
       const lower = search.toLowerCase();
       result = result.filter(s => s.unique_id.toLowerCase().includes(lower));
@@ -142,7 +129,7 @@ export const Dashboard = () => {
       return 0;
     });
     return result;
-  }, [enrichedSeries, search, complexityFilter, intermittentFilter, sortField, sortDir]);
+  }, [series, search, complexityFilter, intermittentFilter, sortField, sortDir]);
 
   const pagedSeries = filteredSeries.slice(page * pageSize, (page + 1) * pageSize);
   const totalPages = Math.ceil(filteredSeries.length / pageSize);
@@ -351,7 +338,18 @@ export const Dashboard = () => {
                       <span className="bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded text-xs font-medium">{s.n_outliers}</span>
                     ) : <span className="text-gray-300">-</span>}
                   </td>
-                  <td className="px-3 py-2 font-medium whitespace-nowrap">{s.best_method}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {s.best_method ? (
+                      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
+                        s.best_method_source === 'backtested'
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-blue-50 text-blue-600'
+                      }`}>
+                        {s.best_method_source === 'backtested' && <span title="Backtested">✓</span>}
+                        {s.best_method}
+                      </span>
+                    ) : <span className="text-gray-300">-</span>}
+                  </td>
                 </tr>
               ))}
             </tbody>

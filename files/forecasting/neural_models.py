@@ -29,7 +29,7 @@ try:
     NEURALFORECAST_AVAILABLE = True
 except ImportError:
     NEURALFORECAST_AVAILABLE = False
-    logging.warning("NeuralForecast not available. Install with: pip install neuralforecast")
+    logging.debug("NeuralForecast not available (optional). Install with: pip install neuralforecast")
 
 from .statistical_models import ForecastResult
 

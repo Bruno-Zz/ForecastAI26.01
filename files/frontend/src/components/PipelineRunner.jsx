@@ -1,0 +1,516 @@
+/**
+ * PipelineRunner Component
+ *
+ * Lets the user trigger individual pipeline steps (ETL, outlier detection,
+ * forecast, backtest, best-method, distributions) OR the full pipeline in
+ * order, and see live log output via Server-Sent Events.
+ */
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import axios from 'axios';
+
+const API_BASE_URL = '/api';
+
+const STEP_ORDER = ['etl', 'outlier-detection', 'forecast', 'backtest', 'best-method', 'distributions'];
+
+// Parse a UTC ISO timestamp that may or may not already end with 'Z'
+const parseUTC = (s) => new Date(s.endsWith('Z') ? s : s + 'Z');
+
+const ICONS = {
+  'etl':               '🗄️',
+  'outlier-detection': '🔍',
+  'forecast':          '📊',
+  'backtest':          '🔁',
+  'best-method':       '🏆',
+  'distributions':     '📈',
+};
+
+/** Spinner SVG */
+const Spinner = ({ cls = 'w-4 h-4' }) => (
+  <svg className={`animate-spin ${cls}`} viewBox="0 0 24 24" fill="none">
+    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+  </svg>
+);
+
+/** Status badge */
+const StatusBadge = ({ status }) => {
+  const map = {
+    pending:  { cls: 'bg-gray-100 text-gray-600',         label: 'Pending' },
+    running:  { cls: 'bg-blue-100 text-blue-700',         label: 'Running…' },
+    success:  { cls: 'bg-emerald-100 text-emerald-700',   label: 'Success' },
+    error:    { cls: 'bg-red-100 text-red-700',           label: 'Error' },
+  };
+  const { cls, label } = map[status] || { cls: 'bg-gray-100 text-gray-500', label: status };
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
+      {status === 'running' && <Spinner cls="w-3 h-3" />}
+      {status === 'success' && '✓'}
+      {status === 'error'   && '✕'}
+      {label}
+    </span>
+  );
+};
+
+/** Log viewer with auto-scroll */
+const LogViewer = ({ lines, visible }) => {
+  const bottomRef = useRef(null);
+  useEffect(() => {
+    if (visible && bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+  }, [lines, visible]);
+
+  if (!visible) return null;
+
+  const colorLine = (line) => {
+    if (/error|exception|failed|traceback/i.test(line)) return 'text-red-400';
+    if (/warning/i.test(line))                           return 'text-yellow-300';
+    if (/✓|success|complete|done|finished/i.test(line)) return 'text-emerald-400';
+    if (/▶|={3,}/i.test(line))                          return 'text-purple-300 font-semibold';
+    if (/info/i.test(line))                             return 'text-blue-300';
+    return 'text-gray-300';
+  };
+
+  return (
+    <div className="mt-3 bg-gray-900 rounded-lg p-3 max-h-72 overflow-y-auto font-mono text-xs leading-5 border border-gray-700">
+      {lines.length === 0
+        ? <span className="text-gray-500 italic">Waiting for output…</span>
+        : lines.map((l, i) => <div key={i} className={colorLine(l)}>{l || '\u00A0'}</div>)
+      }
+      <div ref={bottomRef} />
+    </div>
+  );
+};
+
+/** Full-pipeline progress bar showing which step is active */
+const PipelineProgress = ({ steps, currentStepId, jobStatus }) => {
+  const stepDone   = (id) => {
+    if (jobStatus === 'success') return true;
+    if (!currentStepId)          return false;
+    return STEP_ORDER.indexOf(id) < STEP_ORDER.indexOf(currentStepId);
+  };
+  const stepActive = (id) => currentStepId === id && jobStatus === 'running';
+  const stepError  = (id) => currentStepId === id && jobStatus === 'error';
+
+  return (
+    <div className="flex items-center gap-1 flex-wrap mt-3">
+      {steps.map((step, i) => (
+        <React.Fragment key={step.id}>
+          <div className="flex flex-col items-center gap-0.5">
+            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border-2 transition-colors ${
+              stepDone(step.id)   ? 'bg-emerald-100 border-emerald-400 text-emerald-700' :
+              stepActive(step.id) ? 'bg-blue-100 border-blue-400 text-blue-700' :
+              stepError(step.id)  ? 'bg-red-100 border-red-400 text-red-700' :
+              'bg-gray-100 border-gray-300 text-gray-400'
+            }`}>
+              {stepDone(step.id) ? '✓' : stepError(step.id) ? '✕' : i + 1}
+            </div>
+            <span className={`text-[9px] font-medium leading-none ${
+              stepActive(step.id) ? 'text-blue-600' :
+              stepDone(step.id)   ? 'text-emerald-600' :
+              stepError(step.id)  ? 'text-red-600' :
+              'text-gray-400'
+            }`}>{step.label.replace(' ', '\u00A0')}</span>
+          </div>
+          {i < steps.length - 1 && (
+            <div className={`h-0.5 w-4 mb-3 flex-shrink-0 rounded ${
+              stepDone(step.id) ? 'bg-emerald-300' : 'bg-gray-200'
+            }`} />
+          )}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+};
+
+/** Full-pipeline card at the top */
+const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs }) => {
+  const isRunning = job?.status === 'running';
+  const isDone    = job?.status === 'success' || job?.status === 'error';
+
+  return (
+    <div className={`bg-white rounded-xl border-2 transition-colors mb-6 ${
+      isRunning        ? 'border-blue-300 shadow-lg' :
+      job?.status === 'success' ? 'border-emerald-300' :
+      job?.status === 'error'   ? 'border-red-300' :
+      'border-indigo-200'
+    }`}>
+      <div className="p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3 min-w-0">
+            <span className="text-2xl flex-shrink-0">🚀</span>
+            <div className="min-w-0">
+              <h3 className="font-bold text-gray-900 text-sm">Run Full Pipeline</h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Run all 6 steps in order: ETL → Outlier Detection → Forecast → Backtest → Best Method → Distributions.
+                Stops automatically if any step fails.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {job && <StatusBadge status={job.status} />}
+            {isRunning && (
+              <button
+                onClick={() => onKill(job.job_id)}
+                className="px-3 py-1.5 rounded-lg text-sm font-medium bg-red-100 text-red-700 hover:bg-red-200 active:scale-95 transition-colors flex items-center gap-1"
+                title="Interrupt the pipeline"
+              >
+                <span>■</span> Stop
+              </button>
+            )}
+            <button
+              onClick={onRun}
+              disabled={isRunning}
+              className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors ${
+                isRunning
+                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  : 'bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95'
+              }`}
+            >
+              {isRunning ? 'Running…' : isDone ? 'Re-run All' : 'Run All'}
+            </button>
+          </div>
+        </div>
+
+        {/* Step progress */}
+        {steps.length > 0 && (
+          <PipelineProgress
+            steps={steps}
+            currentStepId={job?.current_step ?? null}
+            jobStatus={job?.status ?? null}
+          />
+        )}
+
+        {/* Timing */}
+        {job?.started_at && (
+          <div className="mt-2 flex items-center gap-3 text-xs text-gray-400">
+            <span>Started: {parseUTC(job.started_at).toLocaleTimeString()}</span>
+            {job.ended_at && (
+              <span>· Duration: {(
+                (parseUTC(job.ended_at) - parseUTC(job.started_at)) / 1000
+              ).toFixed(1)}s</span>
+            )}
+          </div>
+        )}
+
+        {/* Log toggle */}
+        {job && (
+          <button
+            onClick={onToggleLogs}
+            className="mt-2 text-xs text-blue-500 hover:text-blue-700 flex items-center gap-1"
+          >
+            <span>{showLogs ? '▲ Hide' : '▼ Show'} combined logs</span>
+            <span className="text-gray-400">({job.log_lines?.length ?? 0} lines)</span>
+          </button>
+        )}
+      </div>
+
+      <LogViewer lines={job?.log_lines ?? []} visible={showLogs} />
+      {showLogs && <div className="h-2" />}
+    </div>
+  );
+};
+
+/** Single step card */
+const StepCard = ({ step, onRun, onKill, activeJob, onToggleLogs, showLogs, isFullPipelineRunning }) => {
+  const isRunning = activeJob?.status === 'running';
+  const isDone    = activeJob?.status === 'success' || activeJob?.status === 'error';
+  const hasJob    = !!activeJob;
+  const disabled  = isRunning || isFullPipelineRunning;
+
+  return (
+    <div className={`bg-white rounded-xl border-2 transition-colors ${
+      isRunning           ? 'border-blue-300 shadow-md' :
+      activeJob?.status === 'success' ? 'border-emerald-200' :
+      activeJob?.status === 'error'   ? 'border-red-200' :
+      'border-gray-200'
+    }`}>
+      <div className="p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex items-start gap-3 min-w-0">
+            <span className="text-2xl flex-shrink-0">{ICONS[step.id] || '⚙️'}</span>
+            <div className="min-w-0">
+              <h3 className="font-semibold text-gray-900 text-sm">{step.label}</h3>
+              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{step.desc}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {hasJob && <StatusBadge status={activeJob.status} />}
+            {isRunning && (
+              <button
+                onClick={() => onKill(activeJob.job_id)}
+                className="px-3 py-1.5 rounded-lg text-sm font-medium bg-red-100 text-red-700 hover:bg-red-200 active:scale-95 transition-colors flex items-center gap-1"
+                title="Interrupt running process"
+              >
+                <span>■</span> Stop
+              </button>
+            )}
+            <button
+              onClick={() => onRun(step.id)}
+              disabled={disabled}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                disabled
+                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  : 'bg-blue-600 text-white hover:bg-blue-700 active:scale-95'
+              }`}
+            >
+              {isRunning ? 'Running…' : isDone ? 'Re-run' : 'Run'}
+            </button>
+          </div>
+        </div>
+
+        {/* Timing */}
+        {activeJob?.started_at && (
+          <div className="mt-2 flex items-center gap-3 text-xs text-gray-400">
+            <span>Started: {parseUTC(activeJob.started_at).toLocaleTimeString()}</span>
+            {activeJob.ended_at && (
+              <span>· Duration: {(
+                (parseUTC(activeJob.ended_at) - parseUTC(activeJob.started_at)) / 1000
+              ).toFixed(1)}s</span>
+            )}
+            {activeJob.exit_code != null && activeJob.exit_code !== 0 && (
+              <span className="text-red-400">· Exit code: {activeJob.exit_code}</span>
+            )}
+          </div>
+        )}
+
+        {/* Log toggle */}
+        {hasJob && (
+          <button
+            onClick={() => onToggleLogs(step.id)}
+            className="mt-2 text-xs text-blue-500 hover:text-blue-700 flex items-center gap-1"
+          >
+            <span>{showLogs ? '▲ Hide' : '▼ Show'} logs</span>
+            <span className="text-gray-400">({activeJob.log_lines?.length ?? 0} lines)</span>
+          </button>
+        )}
+      </div>
+
+      <LogViewer lines={activeJob?.log_lines ?? []} visible={showLogs} />
+      {showLogs && <div className="h-2" />}
+    </div>
+  );
+};
+
+export const PipelineRunner = () => {
+  const [steps, setSteps]           = useState([]);
+  const [jobs, setJobs]             = useState({});        // stepId -> latest job object
+  const [fullJob, setFullJob]       = useState(null);      // full-pipeline job object
+  const [showLogs, setShowLogs]     = useState({});        // stepId -> bool
+  const [showFullLogs, setShowFullLogs] = useState(false);
+  const [error, setError]           = useState(null);
+  const eventSources = useRef({});                         // key -> EventSource
+
+  // Load step definitions once
+  useEffect(() => {
+    axios.get(`${API_BASE_URL}/pipeline/steps`)
+      .then(r => setSteps(r.data))
+      .catch(e => setError(e.message));
+  }, []);
+
+  // Poll all running jobs
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      // Individual step jobs
+      const runningEntries = Object.entries(jobs).filter(([, j]) => j.status === 'running' || j.status === 'pending');
+      for (const [stepId, job] of runningEntries) {
+        try {
+          const r = await axios.get(`${API_BASE_URL}/pipeline/jobs/${job.job_id}`);
+          setJobs(prev => ({ ...prev, [stepId]: r.data }));
+        } catch { /* ignore */ }
+      }
+      // Full-pipeline job
+      if (fullJob && (fullJob.status === 'running' || fullJob.status === 'pending')) {
+        try {
+          const r = await axios.get(`${API_BASE_URL}/pipeline/jobs/${fullJob.job_id}`);
+          setFullJob(r.data);
+        } catch { /* ignore */ }
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [jobs, fullJob]);
+
+  const openSSE = useCallback((key, jobId, setter) => {
+    if (eventSources.current[key]) {
+      eventSources.current[key].close();
+      delete eventSources.current[key];
+    }
+
+    const es = new EventSource(`${API_BASE_URL}/pipeline/jobs/${jobId}/stream`);
+
+    es.onmessage = (e) => {
+      try {
+        const { line } = JSON.parse(e.data);
+        setter(prev => {
+          // prev may be an object (jobs map) or a single job object
+          if (prev && typeof prev === 'object' && !prev.job_id) {
+            // jobs map
+            const job = prev[key];
+            if (!job || job.job_id !== jobId) return prev;
+            return { ...prev, [key]: { ...job, log_lines: [...(job.log_lines || []), line] } };
+          } else {
+            // single job object (fullJob)
+            if (!prev || prev.job_id !== jobId) return prev;
+            return { ...prev, log_lines: [...(prev.log_lines || []), line] };
+          }
+        });
+      } catch { /* ignore */ }
+    };
+
+    es.addEventListener('done', (e) => {
+      try {
+        const { status, exit_code } = JSON.parse(e.data);
+        setter(prev => {
+          if (prev && typeof prev === 'object' && !prev.job_id) {
+            const job = prev[key];
+            if (!job || job.job_id !== jobId) return prev;
+            return { ...prev, [key]: { ...job, status, exit_code, ended_at: new Date().toISOString() } };
+          } else {
+            if (!prev || prev.job_id !== jobId) return prev;
+            return { ...prev, status, exit_code, ended_at: new Date().toISOString() };
+          }
+        });
+      } catch { /* ignore */ }
+      es.close();
+      delete eventSources.current[key];
+    });
+
+    es.onerror = () => { es.close(); delete eventSources.current[key]; };
+    eventSources.current[key] = es;
+  }, []);
+
+  // Cleanup SSE on unmount
+  useEffect(() => () => {
+    Object.values(eventSources.current).forEach(es => es.close());
+  }, []);
+
+  const handleRun = async (stepId) => {
+    try {
+      setError(null);
+      const r = await axios.post(`${API_BASE_URL}/pipeline/run/${stepId}`);
+      const job = { ...r.data, log_lines: [], started_at: null, ended_at: null };
+      setJobs(prev => ({ ...prev, [stepId]: job }));
+      setShowLogs(prev => ({ ...prev, [stepId]: true }));
+      openSSE(stepId, r.data.job_id, setJobs);
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message);
+    }
+  };
+
+  const handleRunAll = async () => {
+    try {
+      setError(null);
+      const r = await axios.post(`${API_BASE_URL}/pipeline/run-all`);
+      const job = { ...r.data, log_lines: [], started_at: null, ended_at: null, current_step: null };
+      setFullJob(job);
+      setShowFullLogs(true);
+      openSSE('full-pipeline', r.data.job_id, setFullJob);
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message);
+    }
+  };
+
+  const handleKill = async (jobId) => {
+    try {
+      await axios.post(`${API_BASE_URL}/pipeline/jobs/${jobId}/kill`);
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message);
+    }
+  };
+
+  const toggleLogs = (stepId) => setShowLogs(prev => ({ ...prev, [stepId]: !prev[stepId] }));
+
+  const orderedSteps = STEP_ORDER.map(id => steps.find(s => s.id === id)).filter(Boolean);
+  const isFullPipelineRunning = fullJob?.status === 'running';
+  const anyRunning = isFullPipelineRunning || Object.values(jobs).some(j => j.status === 'running');
+
+  return (
+    <div className="p-4 sm:p-6 max-w-3xl mx-auto">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">Pipeline Runner</h1>
+        <p className="text-sm text-gray-500 mt-1">
+          Run the full pipeline in one click, or trigger individual steps independently.
+        </p>
+      </div>
+
+      {error && (
+        <div className="mb-4 bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700 flex items-start gap-2">
+          <span className="flex-shrink-0 mt-0.5">⚠️</span>
+          <span>{error}</span>
+          <button onClick={() => setError(null)} className="ml-auto text-red-400 hover:text-red-600">✕</button>
+        </div>
+      )}
+
+      {/* Full pipeline card */}
+      <FullPipelineCard
+        steps={orderedSteps}
+        job={fullJob}
+        onRun={handleRunAll}
+        onKill={handleKill}
+        showLogs={showFullLogs}
+        onToggleLogs={() => setShowFullLogs(v => !v)}
+      />
+
+      {/* Divider */}
+      <div className="flex items-center gap-3 mb-4">
+        <div className="flex-1 h-px bg-gray-200" />
+        <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Or run individual steps</span>
+        <div className="flex-1 h-px bg-gray-200" />
+      </div>
+
+      {anyRunning && !isFullPipelineRunning && (
+        <div className="mb-4 bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5 text-sm text-blue-700 flex items-center gap-2">
+          <Spinner />
+          A pipeline step is currently running… Use the <strong className="mx-1">■ Stop</strong> button to interrupt it.
+        </div>
+      )}
+
+      {/* Individual step cards */}
+      <div className="space-y-3">
+        {orderedSteps.map((step, i) => (
+          <div key={step.id} className="flex gap-3 items-stretch">
+            {/* Step number + connector line */}
+            <div className="flex flex-col items-center flex-shrink-0 w-8">
+              <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold border-2 flex-shrink-0 ${
+                jobs[step.id]?.status === 'success' ? 'bg-emerald-100 border-emerald-400 text-emerald-700' :
+                jobs[step.id]?.status === 'error'   ? 'bg-red-100 border-red-400 text-red-700' :
+                jobs[step.id]?.status === 'running' ? 'bg-blue-100 border-blue-400 text-blue-700' :
+                'bg-gray-100 border-gray-300 text-gray-500'
+              }`}>
+                {i + 1}
+              </div>
+              {i < orderedSteps.length - 1 && (
+                <div className="w-0.5 flex-1 mt-1 bg-gray-200 min-h-4" />
+              )}
+            </div>
+
+            <div className="flex-1 min-w-0">
+              <StepCard
+                step={step}
+                onRun={handleRun}
+                onKill={handleKill}
+                activeJob={jobs[step.id] || null}
+                onToggleLogs={toggleLogs}
+                showLogs={!!showLogs[step.id]}
+                isFullPipelineRunning={isFullPipelineRunning}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Notes */}
+      <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
+        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Notes</p>
+        <ul className="text-xs text-gray-500 space-y-1 list-disc list-inside">
+          <li>Individual steps run independently — you can re-run any step without re-running earlier ones.</li>
+          <li><strong>Run All</strong> stops at the first step that fails.</li>
+          <li><strong>ETL</strong> requires a live database connection (see <code>config/config.yaml</code>).</li>
+          <li><strong>Forecast</strong> can take several minutes depending on number of series and models enabled.</li>
+          <li>Restart the API after pipeline runs to reload cached Parquet data.</li>
+        </ul>
+      </div>
+    </div>
+  );
+};
+
+export default PipelineRunner;

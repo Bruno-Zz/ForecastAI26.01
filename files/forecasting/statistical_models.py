@@ -3,6 +3,7 @@ Statistical Forecasting Models - Nixtla StatsForecast
 Fast statistical methods with native prediction intervals
 """
 
+import os
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Any
@@ -82,8 +83,14 @@ class StatisticalForecaster:
         
         # Extract configuration
         self.horizon = self.forecast_config['horizon']
-        self.frequency = self.forecast_config['frequency']
         self.confidence_levels = self.forecast_config['confidence_levels']
+
+        # Translate config frequency shorthand to the pandas 2.x offset aliases
+        # that StatsForecast / utilsforecast expects.  'M' was deprecated in
+        # pandas 2.2 in favour of 'ME' (month-end); 'Q' → 'QE', 'Y'/'A' → 'YE'.
+        _FREQ_ALIAS = {'M': 'ME', 'Q': 'QE', 'Y': 'YE', 'A': 'YE'}
+        raw_freq = self.forecast_config['frequency']
+        self.frequency = _FREQ_ALIAS.get(raw_freq, raw_freq)
         
     def get_model_instance(self, 
                           method_name: str, 
@@ -107,7 +114,15 @@ class StatisticalForecaster:
                 season_length = seasonal_periods[0] if seasonal_periods else 1
             else:
                 season_length = 1
-        
+
+        # Clamp season_length to at least 1
+        season_length = max(1, int(season_length))
+
+        # For MSTL the trend forecaster must be non-seasonal (season_length=1).
+        # Using AutoETS(season_length>1) causes "Trend forecaster should not
+        # adjust seasonal models".  Use AutoARIMA(season_length=1) instead.
+        mstl_trend = AutoARIMA(season_length=1)
+
         # Model mapping with hyperparameter configuration
         model_configs = {
             'AutoARIMA': lambda: AutoARIMA(
@@ -127,7 +142,7 @@ class StatisticalForecaster:
             ),
             'MSTL': lambda: MSTL(
                 season_length=season_length,
-                trend_forecaster=AutoETS(season_length=season_length)
+                trend_forecaster=mstl_trend
             ),
             'CrostonOptimized': lambda: CrostonOptimized(),
             'ADIDA': lambda: ADIDA(),
@@ -146,10 +161,10 @@ class StatisticalForecaster:
                 window_size=2
             )
         }
-        
+
         if method_name not in model_configs:
             raise ValueError(f"Unknown method: {method_name}")
-        
+
         return model_configs[method_name]()
     
     def forecast_single_series(self,
@@ -187,17 +202,35 @@ class StatisticalForecaster:
             seasonal_periods = characteristics.get('seasonal_periods', [])
             if seasonal_periods:
                 # Map frequency to season length
-                freq_map = {'D': 7, 'W': 52, 'M': 12, 'Q': 4, 'Y': 1}
+                freq_map = {'D': 7, 'W': 52, 'M': 12, 'ME': 12, 'Q': 4, 'QE': 4, 'Y': 1, 'YE': 1, 'A': 1}
                 season_length = seasonal_periods[0] if seasonal_periods else freq_map.get(self.frequency, 1)
-        
+
         if season_length is None:
-            freq_map = {'D': 7, 'W': 52, 'M': 12, 'Q': 4, 'Y': 1}
+            freq_map = {'D': 7, 'W': 52, 'M': 12, 'ME': 12, 'Q': 4, 'QE': 4, 'Y': 1, 'YE': 1, 'A': 1}
             season_length = freq_map.get(self.frequency, 1)
         
+        n_obs = len(series_df)
+
         for method in methods:
+            # Pre-flight guard: SeasonalNaive and SeasonalWindowAverage require
+            # at least season_length observations; StatsForecast raises
+            # "number sections must be larger than 0" otherwise.
+            if method in ('SeasonalNaive', 'SeasonalWindowAverage') and n_obs < season_length:
+                self.logger.debug(
+                    f"{unique_id}: skipping {method} — only {n_obs} obs, need >= {season_length}"
+                )
+                continue
+
+            # HistoricAverage also raises the same error when n_obs < 2
+            if method == 'HistoricAverage' and n_obs < 2:
+                self.logger.debug(
+                    f"{unique_id}: skipping HistoricAverage — only {n_obs} obs, need >= 2"
+                )
+                continue
+
             try:
                 start_time = time.time()
-                
+
                 # Get model instance
                 model = self.get_model_instance(method, characteristics, season_length)
                 
@@ -269,7 +302,12 @@ class StatisticalForecaster:
                 self.logger.debug(f"Forecast complete: {unique_id} - {method} ({training_time:.2f}s)")
                 
             except Exception as e:
-                self.logger.warning(f"Failed to forecast {unique_id} with {method}: {str(e)}")
+                # Downgrade "Unknown method" to debug — expected when non-statistical
+                # methods (TimesFM, LightGBM…) are passed in without pre-filtering.
+                if "Unknown method" in str(e):
+                    self.logger.debug(f"{unique_id}: skipping {method} — {e}")
+                else:
+                    self.logger.warning(f"Failed to forecast {unique_id} with {method}: {str(e)}")
                 continue
         
         return results
@@ -279,25 +317,47 @@ class StatisticalForecaster:
                                 characteristics_df: pd.DataFrame,
                                 parallel: bool = False) -> pd.DataFrame:
         """
-        Generate forecasts for multiple time series.
-        
+        Generate forecasts for a batch of time series sequentially.
+        Parallelism across series is handled externally by the Dask orchestrator,
+        which submits batches of this method as separate tasks.
+
         Args:
             df: DataFrame with time series data
             characteristics_df: DataFrame with characteristics and recommended methods
-            parallel: Whether to use parallel processing (handled by caller)
-            
+            parallel: Unused – kept for API compatibility
+
         Returns:
             DataFrame with all forecast results
         """
         all_results = []
-        
+
+        # Methods this forecaster knows how to handle
+        KNOWN_METHODS = {
+            'AutoARIMA', 'AutoETS', 'AutoTheta', 'AutoCES', 'MSTL',
+            'CrostonOptimized', 'ADIDA', 'IMAPA', 'TSB',
+            'SeasonalNaive', 'HistoricAverage', 'Naive', 'SeasonalWindowAverage'
+        }
+
         for _, char_row in characteristics_df.iterrows():
             unique_id = char_row['unique_id']
-            methods = char_row['recommended_methods']
-            
+            all_methods = char_row['recommended_methods']
+
+            # Filter to only methods this statistical forecaster supports
+            methods = [m for m in all_methods if m in KNOWN_METHODS]
+            skipped = [m for m in all_methods if m not in KNOWN_METHODS]
+            if skipped:
+                self.logger.debug(
+                    f"{unique_id}: skipping non-statistical methods: {skipped}"
+                )
+            if not methods:
+                self.logger.warning(
+                    f"{unique_id}: no supported statistical methods found in {all_methods}, skipping"
+                )
+                continue
+
             # Convert characteristics to dict
             characteristics = char_row.to_dict()
-            
+
             # Generate forecasts
             results = self.forecast_single_series(
                 df=df,
@@ -305,15 +365,11 @@ class StatisticalForecaster:
                 methods=methods,
                 characteristics=characteristics
             )
-            
+
             all_results.extend(results)
-        
+
         # Convert to DataFrame
-        results_data = []
-        for result in all_results:
-            result_dict = result.to_dict()
-            results_data.append(result_dict)
-        
+        results_data = [result.to_dict() for result in all_results]
         return pd.DataFrame(results_data)
     
     def generate_features(self, 

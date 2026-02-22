@@ -5,7 +5,7 @@ RESTful API for accessing forecasts, metrics, and visualizations
 
 from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Optional, Dict, Any
 import pandas as pd
 import numpy as np
@@ -15,6 +15,14 @@ from scipy import stats as scipy_stats
 import logging
 import yaml
 import json
+import subprocess
+import sys
+import asyncio
+import uuid
+import threading
+import os
+import signal
+from datetime import datetime
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -64,6 +72,8 @@ class TimeSeriesInfo(BaseModel):
     complexity_level: str
     has_outlier_corrections: Optional[bool] = False
     n_outliers: Optional[int] = 0
+    best_method: Optional[str] = None
+    best_method_source: Optional[str] = None  # 'backtested' or 'recommended'
 
 
 class ForecastData(BaseModel):
@@ -239,11 +249,31 @@ async def get_series_list(
     if data_cache['outliers'] is not None:
         outlier_counts = data_cache['outliers'].groupby('unique_id').size().to_dict()
 
+    # Build best-method lookup: backtested results take priority over recommendations
+    backtested_map = {}
+    if data_cache['best_methods'] is not None:
+        for _, bm_row in data_cache['best_methods'].iterrows():
+            backtested_map[bm_row['unique_id']] = str(bm_row['best_method'])
+
     # Convert to response model
     series_list = []
     for _, row in df.iterrows():
         uid = row['unique_id']
         n_out = outlier_counts.get(uid, 0)
+
+        # Determine best method + source
+        if uid in backtested_map:
+            best_method_val = backtested_map[uid]
+            best_method_source_val = 'backtested'
+        else:
+            rec = row.get('recommended_methods', None)
+            if rec is not None and len(rec) > 0:
+                best_method_val = str(rec[0])
+                best_method_source_val = 'recommended'
+            else:
+                best_method_val = None
+                best_method_source_val = None
+
         series_list.append(TimeSeriesInfo(
             unique_id=uid,
             n_observations=int(row['n_observations']),
@@ -256,6 +286,8 @@ async def get_series_list(
             complexity_level=str(row['complexity_level']),
             has_outlier_corrections=n_out > 0,
             n_outliers=n_out,
+            best_method=best_method_val,
+            best_method_source=best_method_source_val,
         ))
 
     return series_list
@@ -998,7 +1030,7 @@ async def get_vega_spec(unique_id: str):
         if not series_forecasts.empty:
             # Add forecast horizon dates
             last_date = series_df['date'].max()
-            forecast_dates = pd.date_range(start=last_date, periods=len(series_forecasts.iloc[0]['point_forecast']) + 1, freq='M')[1:]
+            forecast_dates = pd.date_range(start=last_date, periods=len(series_forecasts.iloc[0]['point_forecast']) + 1, freq='ME')[1:]
 
             for _, forecast_row in series_forecasts.iterrows():
                 method = forecast_row['method']
@@ -1082,17 +1114,60 @@ async def get_sparklines(unique_ids: List[str] = Body(...)):
         for _, row in best_df.iterrows():
             best_method_map[row['unique_id']] = str(row['best_method'])
 
+    def monthly_to_weekly(dates, values, n_months=12):
+        """Interpolate monthly values to weekly resolution for smoother sparklines."""
+        import numpy as np
+        if len(dates) == 0 or len(values) == 0:
+            return []
+        # Take last n_months
+        dates = dates[-n_months:]
+        values = values[-n_months:]
+        # Convert dates to ordinal for interpolation
+        ordinals = np.array([d.toordinal() if hasattr(d, 'toordinal') else pd.Timestamp(d).toordinal() for d in dates], dtype=float)
+        vals = np.array(values, dtype=float)
+        # Build weekly grid from first to last date
+        start_ord = int(ordinals[0])
+        end_ord = int(ordinals[-1])
+        weekly_ords = np.arange(start_ord, end_ord + 1, 7)
+        if len(weekly_ords) == 0:
+            return [float(v) for v in values]
+        weekly_vals = np.interp(weekly_ords, ordinals, vals)
+        return [float(v) for v in weekly_vals]
+
+    def forecast_to_weekly(last_date, fc_values, n_months=12):
+        """Spread monthly forecast values to weekly resolution."""
+        import numpy as np
+        if not fc_values:
+            return []
+        fc_values = fc_values[:n_months]
+        last_ts = pd.Timestamp(last_date)
+        # Build monthly dates for forecast
+        fc_dates = []
+        for i in range(len(fc_values)):
+            fc_dates.append((last_ts + pd.DateOffset(months=i + 1)).toordinal())
+        start_ord = last_ts.toordinal()
+        end_ord = fc_dates[-1]
+        weekly_ords = np.arange(start_ord, end_ord + 1, 7)[1:]  # skip first (belongs to historical)
+        if len(weekly_ords) == 0:
+            return [float(v) for v in fc_values]
+        # Include last historical ordinal as anchor at fc_values[0] entry
+        all_ords = np.array([start_ord] + fc_dates, dtype=float)
+        all_vals = np.array([fc_values[0]] + fc_values, dtype=float)
+        weekly_vals = np.interp(weekly_ords, all_ords, all_vals)
+        return [float(v) for v in weekly_vals]
+
     result = {}
     for uid in unique_ids:
-        # Historical: last 12 values
-        series = ts_df[ts_df['unique_id'] == uid].sort_values('date')
-        if series.empty:
+        # Historical: last 12 months → interpolated to weekly
+        series_rows = ts_df[ts_df['unique_id'] == uid].sort_values('date')
+        if series_rows.empty:
             continue
-        hist_values = series['y'].tolist()
-        hist_tail = hist_values[-12:] if len(hist_values) > 12 else hist_values
+        hist_dates = series_rows['date'].tolist()
+        hist_values = series_rows['y'].tolist()
+        hist_weekly = monthly_to_weekly(hist_dates, hist_values, n_months=12)
 
-        # Forecast: first 12 values from best method (or first available)
-        fc_values = []
+        # Forecast: first 12 months from best method → interpolated to weekly
+        fc_weekly = []
         if forecasts_df is not None:
             uid_forecasts = forecasts_df[forecasts_df['unique_id'] == uid]
             if not uid_forecasts.empty:
@@ -1106,11 +1181,13 @@ async def get_sparklines(unique_ids: List[str] = Body(...)):
 
                 pf = method_fc.iloc[0]['point_forecast']
                 if isinstance(pf, (list, np.ndarray)):
-                    fc_values = [float(v) for v in pf[:12]]
+                    last_date = hist_dates[-1] if hist_dates else None
+                    if last_date is not None:
+                        fc_weekly = forecast_to_weekly(last_date, [float(v) for v in pf[:12]])
 
         result[uid] = {
-            'historical': [float(v) for v in hist_tail],
-            'forecast': fc_values,
+            'historical': hist_weekly,
+            'forecast': fc_weekly,
         }
 
     return result
@@ -1208,6 +1285,38 @@ async def get_method_explanation(unique_id: str):
         else:
             included.append({'method': method, 'reason': f"Eligible from '{category}' pool but no forecast produced (model may have failed)", 'status': 'eligible_no_result'})
 
+    # ---- ACF / PACF ----
+    acf_values = []
+    pacf_values = []
+    acf_lags = []
+    acf_ci_upper = []
+    acf_ci_lower = []
+
+    try:
+        from statsmodels.tsa.stattools import acf as sm_acf, pacf as sm_pacf
+
+        ts_df = data_cache.get('time_series')
+        if ts_df is not None:
+            uid_ts = ts_df[ts_df['unique_id'] == unique_id].sort_values('date')
+            y_vals = uid_ts['y'].values.astype(float)
+
+            if len(y_vals) >= 6:
+                n_lags = min(24, len(y_vals) // 2 - 1)
+                # ACF with confidence interval
+                acf_out, confint = sm_acf(y_vals, nlags=n_lags, fft=True,
+                                          alpha=0.05, missing='conservative')
+                acf_values = [round(float(v), 4) for v in acf_out[1:]]   # skip lag-0
+                acf_lags = list(range(1, len(acf_values) + 1))
+                acf_ci_upper = [round(float(confint[i+1][1] - acf_out[i+1]), 4) for i in range(len(acf_values))]
+                acf_ci_lower = [round(float(acf_out[i+1] - confint[i+1][0]), 4) for i in range(len(acf_values))]
+
+                # PACF
+                n_lags_pacf = min(n_lags, (len(y_vals) - 1) // 2)
+                pacf_out = sm_pacf(y_vals, nlags=n_lags_pacf, method='ywm')
+                pacf_values = [round(float(v), 4) for v in pacf_out[1:]]
+    except Exception as exc:
+        logger.debug(f"ACF/PACF computation failed for {unique_id}: {exc}")
+
     return {
         'unique_id': unique_id,
         'selection_category': category,
@@ -1215,6 +1324,30 @@ async def get_method_explanation(unique_id: str):
         'n_observations': n_obs,
         'included': included,
         'excluded': excluded,
+        'acf': {
+            'lags': acf_lags,
+            'values': acf_values,
+            'ci_upper': acf_ci_upper,
+            'ci_lower': acf_ci_lower,
+        },
+        'pacf': {
+            'lags': acf_lags[:len(pacf_values)],
+            'values': pacf_values,
+        },
+        'characteristics': {
+            'n_observations': n_obs,
+            'is_intermittent': is_intermittent,
+            'has_seasonality': has_seasonality,
+            'complexity_level': complexity_level,
+            'seasonal_strength': float(char.get('seasonal_strength', 0)),
+            'seasonal_periods': char.get('seasonal_periods', []),
+            'has_trend': bool(char.get('has_trend', False)),
+            'trend_direction': str(char.get('trend_direction', 'none')),
+            'zero_ratio': float(char.get('zero_ratio', 0)),
+            'adi': float(char.get('adi', 0)),
+            'date_range_start': str(char.get('date_range_start', '')),
+            'date_range_end': str(char.get('date_range_end', '')),
+        },
     }
 
 
@@ -1384,6 +1517,316 @@ async def get_series_distributions(unique_id: str):
         'n_horizons': len(horizons),
         'horizons': horizons,
     }
+
+
+# ---------------------------------------------------------------------------
+# Pipeline Runner
+# ---------------------------------------------------------------------------
+
+# In-memory job store: job_id -> {status, step, log_lines, started_at, ended_at}
+_pipeline_jobs: Dict[str, Dict] = {}
+_pipeline_lock = threading.Lock()
+
+PIPELINE_STEPS = {
+    "etl":               {"label": "ETL",               "arg": "etl",               "desc": "Extract data from the database and save to Parquet"},
+    "outlier-detection": {"label": "Outlier Detection",  "arg": "outlier-detection", "desc": "Detect and correct outliers in the time series"},
+    "forecast":          {"label": "Forecast",           "arg": "forecast",          "desc": "Run all forecasting models (statistical, ML, neural, foundation)"},
+    "backtest":          {"label": "Backtest",           "arg": "backtest",          "desc": "Rolling-window backtesting and metric computation"},
+    "best-method":       {"label": "Best Method",        "arg": "best-method",       "desc": "Select the best method per series using composite scoring"},
+    "distributions":     {"label": "Distributions",      "arg": "distributions",     "desc": "Fit forecast distributions for MEIO safety-stock computation"},
+}
+
+
+PIPELINE_STEP_ORDER = ["etl", "outlier-detection", "forecast", "backtest", "best-method", "distributions"]
+
+
+def _run_pipeline_step_thread(job_id: str, step_arg: str):
+    """Run a pipeline step in a background thread, capturing output line by line."""
+    files_dir = Path(__file__).parent.parent  # files/ directory
+    cmd = [sys.executable, "run_pipeline.py", "--only", step_arg, "--log-level", "INFO"]
+
+    with _pipeline_lock:
+        _pipeline_jobs[job_id]["status"] = "running"
+        _pipeline_jobs[job_id]["started_at"] = datetime.utcnow().isoformat()
+
+    try:
+        # On Unix, start a new process group so we can kill the whole tree
+        popen_kwargs = dict(
+            cwd=str(files_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        if sys.platform != "win32":
+            popen_kwargs["start_new_session"] = True  # new process group for killpg
+
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+        with _pipeline_lock:
+            _pipeline_jobs[job_id]["pid"] = proc.pid
+
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            with _pipeline_lock:
+                # If job was killed externally, stop reading stdout
+                if _pipeline_jobs[job_id].get("status") == "error" and _pipeline_jobs[job_id].get("exit_code") == -1:
+                    proc.kill()
+                    break
+                _pipeline_jobs[job_id]["log_lines"].append(line)
+
+        proc.wait()
+        exit_code = proc.returncode
+
+        with _pipeline_lock:
+            # Don't overwrite status if already marked as killed
+            if _pipeline_jobs[job_id].get("exit_code") != -1:
+                _pipeline_jobs[job_id]["exit_code"] = exit_code
+                _pipeline_jobs[job_id]["status"] = "success" if exit_code == 0 else "error"
+                _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
+
+    except Exception as exc:
+        with _pipeline_lock:
+            _pipeline_jobs[job_id]["log_lines"].append(f"[ERROR] {exc}")
+            _pipeline_jobs[job_id]["status"] = "error"
+            _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
+
+
+def _run_full_pipeline_thread(job_id: str):
+    """
+    Run all pipeline steps in order, sequentially.
+    Stops immediately if any step exits with a non-zero code.
+    All log lines are collected into a single job entry; the 'current_step'
+    field is updated as execution advances.
+    """
+    files_dir = Path(__file__).parent.parent
+
+    with _pipeline_lock:
+        _pipeline_jobs[job_id]["status"] = "running"
+        _pipeline_jobs[job_id]["started_at"] = datetime.utcnow().isoformat()
+
+    for step_id in PIPELINE_STEP_ORDER:
+        step_arg  = PIPELINE_STEPS[step_id]["arg"]
+        step_label = PIPELINE_STEPS[step_id]["label"]
+
+        with _pipeline_lock:
+            _pipeline_jobs[job_id]["current_step"] = step_id
+            _pipeline_jobs[job_id]["log_lines"].append(
+                f"\n{'='*60}\n▶ Starting: {step_label}\n{'='*60}"
+            )
+
+        cmd = [sys.executable, "run_pipeline.py", "--only", step_arg, "--log-level", "INFO"]
+        popen_kwargs = dict(
+            cwd=str(files_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        if sys.platform != "win32":
+            popen_kwargs["start_new_session"] = True
+
+        try:
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+            with _pipeline_lock:
+                _pipeline_jobs[job_id]["pid"] = proc.pid
+
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                with _pipeline_lock:
+                    # Abort if killed externally
+                    if _pipeline_jobs[job_id].get("exit_code") == -1:
+                        proc.kill()
+                        return
+                    _pipeline_jobs[job_id]["log_lines"].append(line)
+
+            proc.wait()
+            exit_code = proc.returncode
+
+        except Exception as exc:
+            with _pipeline_lock:
+                _pipeline_jobs[job_id]["log_lines"].append(f"[ERROR] {exc}")
+                _pipeline_jobs[job_id]["status"] = "error"
+                _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
+            return
+
+        if exit_code != 0:
+            with _pipeline_lock:
+                _pipeline_jobs[job_id]["log_lines"].append(
+                    f"\n✕ Step '{step_label}' failed with exit code {exit_code}. Pipeline aborted."
+                )
+                _pipeline_jobs[job_id]["exit_code"] = exit_code
+                _pipeline_jobs[job_id]["status"] = "error"
+                _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
+            return
+
+        with _pipeline_lock:
+            _pipeline_jobs[job_id]["log_lines"].append(f"✓ {step_label} complete")
+
+    # All steps succeeded
+    with _pipeline_lock:
+        _pipeline_jobs[job_id]["log_lines"].append(
+            f"\n{'='*60}\n✓ Full pipeline complete!\n{'='*60}"
+        )
+        _pipeline_jobs[job_id]["exit_code"] = 0
+        _pipeline_jobs[job_id]["status"] = "success"
+        _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
+        _pipeline_jobs[job_id]["current_step"] = None
+
+
+@app.post("/api/pipeline/run-all")
+async def run_full_pipeline():
+    """Launch all pipeline steps in order as a single background job."""
+    # Reject if any step or full-pipeline job is already running
+    with _pipeline_lock:
+        for job in _pipeline_jobs.values():
+            if job.get("status") == "running":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"A pipeline job is already running (job {job['job_id']})"
+                )
+
+    job_id = str(uuid.uuid4())[:8]
+    with _pipeline_lock:
+        _pipeline_jobs[job_id] = {
+            "job_id": job_id,
+            "step": "full-pipeline",
+            "step_label": "Full Pipeline",
+            "current_step": None,
+            "status": "pending",
+            "log_lines": [],
+            "started_at": None,
+            "ended_at": None,
+            "pid": None,
+            "exit_code": None,
+        }
+
+    t = threading.Thread(target=_run_full_pipeline_thread, args=(job_id,), daemon=True)
+    t.start()
+
+    return {"job_id": job_id, "step": "full-pipeline", "status": "pending"}
+
+
+@app.get("/api/pipeline/steps")
+async def get_pipeline_steps():
+    """Return the list of available pipeline steps."""
+    return [{"id": k, **v} for k, v in PIPELINE_STEPS.items()]
+
+
+@app.post("/api/pipeline/run/{step}")
+async def run_pipeline_step(step: str):
+    """Launch a pipeline step as a background subprocess. Returns a job_id."""
+    if step not in PIPELINE_STEPS:
+        raise HTTPException(status_code=400, detail=f"Unknown step '{step}'. Valid: {list(PIPELINE_STEPS)}")
+
+    # Reject if same step is already running
+    with _pipeline_lock:
+        for job in _pipeline_jobs.values():
+            if job.get("step") == step and job.get("status") == "running":
+                raise HTTPException(status_code=409, detail=f"Step '{step}' is already running (job {job['job_id']})")
+
+    job_id = str(uuid.uuid4())[:8]
+    with _pipeline_lock:
+        _pipeline_jobs[job_id] = {
+            "job_id": job_id,
+            "step": step,
+            "step_label": PIPELINE_STEPS[step]["label"],
+            "status": "pending",
+            "log_lines": [],
+            "started_at": None,
+            "ended_at": None,
+            "pid": None,
+            "exit_code": None,
+        }
+
+    t = threading.Thread(target=_run_pipeline_step_thread, args=(job_id, PIPELINE_STEPS[step]["arg"]), daemon=True)
+    t.start()
+
+    return {"job_id": job_id, "step": step, "status": "pending"}
+
+
+@app.get("/api/pipeline/jobs")
+async def get_pipeline_jobs():
+    """Return all recent pipeline jobs (latest first)."""
+    with _pipeline_lock:
+        jobs = list(_pipeline_jobs.values())
+    return sorted(jobs, key=lambda j: j.get("started_at") or "", reverse=True)
+
+
+@app.get("/api/pipeline/jobs/{job_id}")
+async def get_pipeline_job(job_id: str):
+    """Return status + full log for a specific job."""
+    with _pipeline_lock:
+        job = _pipeline_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return job
+
+
+@app.post("/api/pipeline/jobs/{job_id}/kill")
+async def kill_pipeline_job(job_id: str):
+    """Interrupt (kill) a running pipeline job."""
+    with _pipeline_lock:
+        job = _pipeline_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    if job.get("status") != "running":
+        raise HTTPException(status_code=409, detail=f"Job {job_id} is not running (status: {job.get('status')})")
+
+    pid = job.get("pid")
+    if not pid:
+        raise HTTPException(status_code=409, detail="Job has no PID yet — it may still be starting")
+
+    try:
+        if sys.platform == "win32":
+            # On Windows use taskkill to kill the process tree
+            subprocess.call(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except Exception as exc:
+        # Process may have already ended
+        pass
+
+    with _pipeline_lock:
+        _pipeline_jobs[job_id]["status"] = "error"
+        _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
+        _pipeline_jobs[job_id]["log_lines"].append("[INTERRUPTED] Process killed by user")
+        _pipeline_jobs[job_id]["exit_code"] = -1
+
+    return {"job_id": job_id, "status": "error", "message": "Job interrupted"}
+
+
+@app.get("/api/pipeline/jobs/{job_id}/stream")
+async def stream_pipeline_logs(job_id: str):
+    """
+    Server-Sent Events stream of log lines for a running/completed job.
+    The client receives lines as they are produced and a final 'done' event.
+    """
+    with _pipeline_lock:
+        if job_id not in _pipeline_jobs:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    async def event_generator():
+        sent = 0
+        while True:
+            with _pipeline_lock:
+                job = _pipeline_jobs.get(job_id, {})
+                lines = job.get("log_lines", [])
+                status = job.get("status", "pending")
+
+            # Send any new lines
+            while sent < len(lines):
+                line = lines[sent]
+                yield f"data: {json.dumps({'line': line})}\n\n"
+                sent += 1
+
+            if status in ("success", "error") and sent >= len(lines):
+                yield f"event: done\ndata: {json.dumps({'status': status, 'exit_code': job.get('exit_code')})}\n\n"
+                break
+
+            await asyncio.sleep(0.3)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 if __name__ == "__main__":

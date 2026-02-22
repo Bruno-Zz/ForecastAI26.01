@@ -103,7 +103,15 @@ def run_single_step(step: str, config_path: str, data_path: str = None, output_d
         output_base = output_dir or orchestrator.config['output']['base_path']
         df = pd.read_parquet(data_file)
         chars_df = pd.read_parquet(str(Path(output_base) / "time_series_characteristics.parquet"))
-        forecasts_df = orchestrator.step_forecast(df, chars_df)
+        # Start Dask for parallel batch processing (mirrors run_complete_pipeline behaviour)
+        from utils.orchestrator import DASK_AVAILABLE
+        if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
+            orchestrator.start_dask_client()
+        try:
+            forecasts_df = orchestrator.step_forecast(df, chars_df)
+        finally:
+            if orchestrator.client:
+                orchestrator.stop_dask_client()
         print(f"Forecasting complete: {len(forecasts_df)} forecasts generated")
 
     elif step == 'backtest':
@@ -111,7 +119,15 @@ def run_single_step(step: str, config_path: str, data_path: str = None, output_d
         output_base = output_dir or orchestrator.config['output']['base_path']
         df = pd.read_parquet(data_file)
         chars_df = pd.read_parquet(str(Path(output_base) / "time_series_characteristics.parquet"))
-        metrics_df, origin_df = orchestrator.step_backtest(df, chars_df)
+        # Start Dask for parallel backtesting (mirrors forecast step behaviour)
+        from utils.orchestrator import DASK_AVAILABLE
+        if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
+            orchestrator.start_dask_client()
+        try:
+            metrics_df, origin_df = orchestrator.step_backtest(df, chars_df)
+        finally:
+            if orchestrator.client:
+                orchestrator.stop_dask_client()
         print(f"Backtesting complete: {len(metrics_df)} metric rows, {len(origin_df)} origin forecast rows")
 
     elif step == 'best-method':
@@ -123,7 +139,15 @@ def run_single_step(step: str, config_path: str, data_path: str = None, output_d
     elif step == 'distributions':
         output_base = output_dir or orchestrator.config['output']['base_path']
         forecasts_df = pd.read_parquet(str(Path(output_base) / "forecasts_all_methods.parquet"))
-        dist_df = orchestrator.step_fit_distributions(forecasts_df)
+        # Start Dask for parallel distribution fitting (mirrors forecast/backtest steps)
+        from utils.orchestrator import DASK_AVAILABLE
+        if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
+            orchestrator.start_dask_client()
+        try:
+            dist_df = orchestrator.step_fit_distributions(forecasts_df)
+        finally:
+            if orchestrator.client:
+                orchestrator.stop_dask_client()
         print(f"Distribution fitting complete: {len(dist_df)} distributions fitted")
 
     else:
