@@ -3,6 +3,7 @@ import { Routes, Route, Link, useLocation } from 'react-router-dom';
 import Dashboard from './components/Dashboard';
 import TimeSeriesViewer from './components/TimeSeriesViewer';
 import PipelineRunner from './components/PipelineRunner';
+import ProcessLog from './components/ProcessLog';
 
 function Sidebar({ open, onToggle }) {
   const location = useLocation();
@@ -69,6 +70,7 @@ function Sidebar({ open, onToggle }) {
           : navLink('/', '📈', 'Time Series', true)
         }
         {navLink('/pipeline', '⚙️', 'Pipeline')}
+        {navLink('/logs', '📋', 'Process Log')}
       </nav>
 
       {/* Footer */}
@@ -137,6 +139,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/series/:uniqueId" element={<TimeSeriesViewer />} />
             <Route path="/pipeline" element={<PipelineRunner />} />
+            <Route path="/logs" element={<ProcessLog />} />
           </Routes>
         </main>
       </div>

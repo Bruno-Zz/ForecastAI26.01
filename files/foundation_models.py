@@ -17,7 +17,7 @@ try:
     TIMESFM_AVAILABLE = True
 except ImportError:
     TIMESFM_AVAILABLE = False
-    logging.warning("TimesFM not available. Install with: pip install timesfm")
+    logging.debug("TimesFM not available (optional). Install with: pip install timesfm")
 
 from forecasting.statistical_models import ForecastResult
 
@@ -37,7 +37,7 @@ class FoundationForecaster:
         self.logger = logging.getLogger(__name__)
         
         if not TIMESFM_AVAILABLE:
-            self.logger.warning("TimesFM not available. Skipping foundation model forecasting.")
+            self.logger.debug("TimesFM not available. Skipping foundation model forecasting.")
             self.model = None
             return
         

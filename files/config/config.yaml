@@ -6,19 +6,22 @@ data_source:
   
   # PostgreSQL configuration
   postgres:
-    host: "ep-gentle-rain-a5ba1hxu.us-east-2.aws.neon.tech"
+    host: "localhost"
     port: 5432
-    database: "scenario"
-    schema: "plan"
-    user: "ketteq"
-    password: "Zpg2TBlQydP1"
-    sslmode: "require"
+    database: "postgres"
+    schema: "zcube"
+    user: "postgres"
+    password: "postgres"
+    sslmode: "disable"
 
     # Table mappings
     tables:
-      item: "plan.item"
-      site: "plan.site"
-      demand_actual: "dp_plan.calc_dp_actual"
+      item: "zcube.item"
+      site: "zcube.site"
+      demand_actual: "zcube.demand_actuals"
+      forecast_results: "zcube.forecast_results"
+      forecast_adjustments: "zcube.forecast_adjustments"
+      process_log: "zcube.process_log"
   
   # S3 configuration (alternative)
   s3:
@@ -111,7 +114,7 @@ characterization:
   data_sufficiency:
     min_for_ml: 100
     min_for_deep_learning: 200
-    min_for_seasonal: 24  # 2 full seasonal cycles
+    sparse_obs_per_year: 5  # Fewer than 5 obs/year → sparse_data methods
 
 # Forecasting Configuration
 forecasting:

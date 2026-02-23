@@ -22,7 +22,19 @@ import uuid
 import threading
 import os
 import signal
-from datetime import datetime
+from datetime import datetime, date as date_type
+
+# DB helpers — adjust sys.path so we can import from the files/ tree
+_files_dir = Path(__file__).resolve().parent.parent
+if str(_files_dir) not in sys.path:
+    sys.path.insert(0, str(_files_dir))
+
+try:
+    from db.db import get_conn, init_schema as _init_db_schema
+    _DB_AVAILABLE = True
+except Exception as _db_import_err:
+    _DB_AVAILABLE = False
+    logging.warning(f"db.db import failed: {_db_import_err}")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -178,10 +190,23 @@ def _get_config():
     return data_cache.get('config') or {}
 
 
+def _api_config_path() -> str:
+    """Return the path to config.yaml as a string."""
+    p = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+    return str(p)
+
+
 @app.on_event("startup")
 async def startup_event():
-    """Load data on startup."""
+    """Load data on startup and ensure DB schema exists."""
     logger.info("Starting API server...")
+    # Ensure local DB schema is up-to-date
+    if _DB_AVAILABLE:
+        try:
+            _init_db_schema(_api_config_path())
+            logger.info("DB schema initialised")
+        except Exception as exc:
+            logger.warning(f"DB schema init failed (non-fatal): {exc}")
     load_data()
 
 
@@ -1217,14 +1242,27 @@ async def get_method_explanation(unique_id: str):
     complexity_level = str(char.get('complexity_level', 'low'))
     sufficient_ml = bool(char.get('sufficient_for_ml', False))
     sufficient_dl = bool(char.get('sufficient_for_deep_learning', False))
-    min_for_seasonal = sufficiency.get('min_for_seasonal', 24)
+    sparse_obs_per_year = sufficiency.get('sparse_obs_per_year', 5)
     min_for_ml = sufficiency.get('min_for_ml', 100)
     min_for_dl = sufficiency.get('min_for_deep_learning', 200)
 
+    # Sparse: fewer than sparse_obs_per_year observations per year on average
+    try:
+        date_start = pd.Timestamp(str(char.get('date_range_start', '')))
+        date_end   = pd.Timestamp(str(char.get('date_range_end', '')))
+        span_years = max((date_end - date_start).days / 365.25, 1 / 12)
+        obs_per_year = n_obs / span_years
+        is_sparse = obs_per_year < sparse_obs_per_year
+    except Exception:
+        is_sparse = n_obs < sparse_obs_per_year
+
     # Determine which selection category was used
-    if n_obs < min_for_seasonal:
+    if is_sparse:
         category = 'sparse_data'
-        category_reason = f"Series has only {n_obs} observations (< {min_for_seasonal} required for seasonal models)"
+        category_reason = (
+            f"Series has only {obs_per_year:.1f} observations/year "
+            f"(threshold: < {sparse_obs_per_year} obs/year)"
+        )
     elif is_intermittent:
         category = 'intermittent'
         category_reason = f"Series classified as intermittent (zero_ratio={char.get('zero_ratio', 0):.2f}, ADI={char.get('adi', 0):.2f})"
@@ -1335,18 +1373,39 @@ async def get_method_explanation(unique_id: str):
             'values': pacf_values,
         },
         'characteristics': {
+            # Identity / size
             'n_observations': n_obs,
-            'is_intermittent': is_intermittent,
-            'has_seasonality': has_seasonality,
-            'complexity_level': complexity_level,
-            'seasonal_strength': float(char.get('seasonal_strength', 0)),
-            'seasonal_periods': char.get('seasonal_periods', []),
-            'has_trend': bool(char.get('has_trend', False)),
-            'trend_direction': str(char.get('trend_direction', 'none')),
-            'zero_ratio': float(char.get('zero_ratio', 0)),
-            'adi': float(char.get('adi', 0)),
             'date_range_start': str(char.get('date_range_start', '')),
             'date_range_end': str(char.get('date_range_end', '')),
+            # Basic stats
+            'mean': float(char.get('mean', 0) or 0),
+            'std': float(char.get('std', 0) or 0),
+            # Seasonality
+            'has_seasonality': has_seasonality,
+            'seasonal_strength': float(char.get('seasonal_strength', 0) or 0),
+            'seasonal_periods': char.get('seasonal_periods', []),
+            # Trend
+            'has_trend': bool(char.get('has_trend', False)),
+            'trend_direction': str(char.get('trend_direction', 'none')),
+            'trend_strength': float(char.get('trend_strength', 0) or 0),
+            # Intermittency
+            'is_intermittent': is_intermittent,
+            'zero_ratio': float(char.get('zero_ratio', 0) or 0),
+            'adi': float(char.get('adi', 0) or 0),
+            'cov': float(char.get('cov', 0) or 0),
+            # Stationarity
+            'is_stationary': bool(char.get('is_stationary', False)),
+            'adf_pvalue': float(char.get('adf_pvalue', 1.0) if char.get('adf_pvalue') is not None and not (isinstance(char.get('adf_pvalue'), float) and np.isnan(char.get('adf_pvalue'))) else 1.0),
+            # Complexity
+            'complexity_level': complexity_level,
+            'complexity_score': float(char.get('complexity_score', 0) or 0),
+            # Data sufficiency
+            'sufficient_for_ml': sufficient_ml,
+            'sufficient_for_deep_learning': sufficient_dl,
+            # Sparse check
+            'obs_per_year': round(obs_per_year, 2),
+            'sparse_obs_per_year_threshold': sparse_obs_per_year,
+            'is_sparse': is_sparse,
         },
     }
 
@@ -1827,6 +1886,339 @@ async def stream_pipeline_logs(job_id: str):
 
     return StreamingResponse(event_generator(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ===========================================================================
+# PROCESS LOG endpoints
+# ===========================================================================
+
+def _require_db():
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+
+@app.get("/api/process-log")
+async def get_process_log(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    step: Optional[str] = None,
+    status: Optional[str] = None,
+    run_id: Optional[str] = None,
+):
+    """
+    Return process log entries, newest first.
+    Optional filters: step_name, status, run_id.
+    """
+    _require_db()
+    conn = get_conn(_api_config_path())
+    try:
+        where_parts = []
+        params: list = []
+        if step:
+            where_parts.append("step_name = %s")
+            params.append(step)
+        if status:
+            where_parts.append("status = %s")
+            params.append(status)
+        if run_id:
+            where_parts.append("run_id = %s")
+            params.append(run_id)
+
+        where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+        query = f"""
+            SELECT id, run_id, step_name, status,
+                   started_at, ended_at, duration_s,
+                   rows_processed, error_message
+            FROM zcube.process_log
+            {where_sql}
+            ORDER BY started_at DESC
+            LIMIT %s OFFSET %s
+        """
+        params += [limit, offset]
+
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+
+        result = []
+        for row in rows:
+            entry = dict(zip(cols, row))
+            # Serialise timestamps
+            for k in ("started_at", "ended_at"):
+                if entry.get(k) is not None:
+                    entry[k] = entry[k].isoformat()
+            # Coerce numeric
+            if entry.get("duration_s") is not None:
+                entry["duration_s"] = float(entry["duration_s"])
+            result.append(entry)
+
+        # Also get total count
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM zcube.process_log {where_sql}",
+                        params[:-2] if params else [])
+            total = cur.fetchone()[0]
+
+        return {"total": total, "offset": offset, "limit": limit, "items": result}
+    finally:
+        conn.close()
+
+
+@app.get("/api/process-log/runs")
+async def get_process_log_runs():
+    """
+    Return one summary row per run_id: step count, total duration, status.
+    """
+    _require_db()
+    conn = get_conn(_api_config_path())
+    try:
+        query = """
+            SELECT
+                run_id,
+                MIN(started_at)  AS run_started_at,
+                MAX(COALESCE(ended_at, NOW())) AS run_ended_at,
+                SUM(COALESCE(duration_s, 0)) AS total_duration_s,
+                COUNT(*)         AS step_count,
+                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)   AS error_count,
+                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+                SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count
+            FROM zcube.process_log
+            GROUP BY run_id
+            ORDER BY MIN(started_at) DESC
+            LIMIT 100
+        """
+        with conn.cursor() as cur:
+            cur.execute(query)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+
+        result = []
+        for row in rows:
+            entry = dict(zip(cols, row))
+            for k in ("run_started_at", "run_ended_at"):
+                if entry.get(k) is not None:
+                    entry[k] = entry[k].isoformat()
+            for k in ("total_duration_s",):
+                if entry.get(k) is not None:
+                    entry[k] = float(entry[k])
+            # Overall status
+            if entry["running_count"] > 0:
+                entry["overall_status"] = "running"
+            elif entry["error_count"] > 0:
+                entry["overall_status"] = "error"
+            else:
+                entry["overall_status"] = "success"
+            result.append(entry)
+        return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/process-log/{run_id}/steps")
+async def get_run_steps(run_id: str):
+    """Return all steps for a specific run_id."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, run_id, step_name, status,
+                       started_at, ended_at, duration_s,
+                       rows_processed, error_message,
+                       (log_tail IS NOT NULL AND log_tail <> '') AS has_log_tail
+                FROM zcube.process_log
+                WHERE run_id = %s
+                ORDER BY started_at
+                """,
+                (run_id,),
+            )
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+
+        result = []
+        for row in rows:
+            entry = dict(zip(cols, row))
+            for k in ("started_at", "ended_at"):
+                if entry.get(k) is not None:
+                    entry[k] = entry[k].isoformat()
+            if entry.get("duration_s") is not None:
+                entry["duration_s"] = float(entry["duration_s"])
+            result.append(entry)
+        return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/process-log/step/{step_id}/tail")
+async def get_step_log_tail(step_id: int):
+    """Return the captured log_tail for a specific step row (polling endpoint)."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, step_name, status, log_tail FROM zcube.process_log WHERE id = %s",
+                (step_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Step {step_id} not found")
+        return {
+            "id": row[0],
+            "step_name": row[1],
+            "status": row[2],
+            "log_tail": row[3] or "",
+        }
+    finally:
+        conn.close()
+
+
+# ===========================================================================
+# ADJUSTMENTS endpoints
+# ===========================================================================
+
+class AdjustmentIn(BaseModel):
+    forecast_date: str          # "YYYY-MM-DD"
+    adjustment_type: str        # "adjustment" | "override"
+    value: float
+    note: Optional[str] = None
+    created_by: Optional[str] = "planner"
+
+
+@app.get("/api/adjustments/{unique_id}")
+async def get_adjustments(unique_id: str):
+    """Return all adjustments for a series."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, unique_id, forecast_date, adjustment_type,
+                       value, note, created_by, created_at, updated_at
+                FROM zcube.forecast_adjustments
+                WHERE unique_id = %s
+                ORDER BY forecast_date, adjustment_type
+                """,
+                (unique_id,),
+            )
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+
+        result = []
+        for row in rows:
+            entry = dict(zip(cols, row))
+            for k in ("forecast_date", "created_at", "updated_at"):
+                if entry.get(k) is not None:
+                    entry[k] = entry[k].isoformat() if hasattr(entry[k], 'isoformat') else str(entry[k])
+            entry["value"] = float(entry["value"])
+            result.append(entry)
+        return result
+    finally:
+        conn.close()
+
+
+@app.post("/api/adjustments/{unique_id}", status_code=200)
+async def upsert_adjustment(unique_id: str, body: AdjustmentIn):
+    """
+    Create or update an adjustment / override for a series + date.
+    Uses INSERT ... ON CONFLICT DO UPDATE (upsert).
+    """
+    _require_db()
+    if body.adjustment_type not in ("adjustment", "override"):
+        raise HTTPException(status_code=400, detail="adjustment_type must be 'adjustment' or 'override'")
+
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO zcube.forecast_adjustments
+                    (unique_id, forecast_date, adjustment_type, value, note, created_by, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (unique_id, forecast_date, adjustment_type)
+                DO UPDATE SET
+                    value      = EXCLUDED.value,
+                    note       = EXCLUDED.note,
+                    created_by = EXCLUDED.created_by,
+                    updated_at = NOW()
+                RETURNING id, forecast_date, adjustment_type, value, note, updated_at
+                """,
+                (
+                    unique_id,
+                    body.forecast_date,
+                    body.adjustment_type,
+                    body.value,
+                    body.note,
+                    body.created_by or "planner",
+                ),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return {
+            "id": row[0],
+            "unique_id": unique_id,
+            "forecast_date": row[1].isoformat() if hasattr(row[1], 'isoformat') else str(row[1]),
+            "adjustment_type": row[2],
+            "value": float(row[3]),
+            "note": row[4],
+            "updated_at": row[5].isoformat() if hasattr(row[5], 'isoformat') else str(row[5]),
+        }
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/adjustments/{unique_id}/{forecast_date}/{adjustment_type}", status_code=204)
+async def delete_adjustment(unique_id: str, forecast_date: str, adjustment_type: str):
+    """Delete a single adjustment row."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM zcube.forecast_adjustments
+                WHERE unique_id = %s
+                  AND forecast_date = %s
+                  AND adjustment_type = %s
+                """,
+                (unique_id, forecast_date, adjustment_type),
+            )
+            deleted = cur.rowcount
+        conn.commit()
+        if deleted == 0:
+            raise HTTPException(status_code=404, detail="Adjustment not found")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/adjustments/{unique_id}", status_code=204)
+async def delete_all_adjustments(unique_id: str):
+    """Delete ALL adjustments for a series (reset)."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM zcube.forecast_adjustments WHERE unique_id = %s",
+                (unique_id,),
+            )
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

@@ -49,8 +49,48 @@ const parseUniqueId = (uid) => {
   return { item: uid.slice(0, idx), site: uid.slice(idx + 1) };
 };
 
-// ---- Collapsible section (same pattern as Method Rationale) ----
-const Section = ({ title, storageKey, defaultOpen = true, children, badge }) => {
+// ---- Section order — persisted drag-and-drop ----
+const SECTION_ORDER_KEY = 'tsv_section_order';
+const DEFAULT_SECTION_ORDER = [
+  'toggles', 'main_chart', 'forecast_table', 'outlier',
+  'rationale', 'scoring', 'metrics', 'ridge', 'evolution',
+];
+
+function useSectionOrder() {
+  const [order, setOrder] = useState(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(SECTION_ORDER_KEY) || 'null');
+      if (Array.isArray(stored) && stored.length > 0) {
+        // Merge: keep stored order, append any new sections not yet in storage
+        const merged = [...stored, ...DEFAULT_SECTION_ORDER.filter(s => !stored.includes(s))];
+        return merged;
+      }
+    } catch { /* ignore */ }
+    return DEFAULT_SECTION_ORDER;
+  });
+
+  const reorder = (dragId, overId) => {
+    if (dragId === overId) return;
+    setOrder(prev => {
+      const next = [...prev];
+      const from = next.indexOf(dragId);
+      const to   = next.indexOf(overId);
+      if (from === -1 || to === -1) return prev;
+      next.splice(from, 1);
+      next.splice(to, 0, dragId);
+      localStorage.setItem(SECTION_ORDER_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  return { order, reorder };
+}
+
+// ---- Collapsible section with drag-and-drop handle ----
+const Section = ({
+  title, storageKey, defaultOpen = true, children, badge,
+  dragId, dragOver, onDragStart, onDragOver, onDrop, onDragEnd,
+}) => {
   const [open, setOpen] = useState(() => {
     const stored = localStorage.getItem(storageKey);
     return stored === null ? defaultOpen : stored === 'true';
@@ -60,18 +100,39 @@ const Section = ({ title, storageKey, defaultOpen = true, children, badge }) => 
     localStorage.setItem(storageKey, String(next));
     return next;
   });
+
+  const isDragTarget = dragOver === dragId;
+
   return (
-    <div className="mb-6 bg-white rounded-lg shadow">
-      <button
-        onClick={toggle}
-        className="w-full flex items-center justify-between p-4 text-left hover:bg-gray-50 transition-colors rounded-lg"
-      >
-        <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold">{title}</h2>
-          {badge && <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{badge}</span>}
-        </div>
-        <span className="text-gray-400 text-xl flex-shrink-0">{open ? '▲' : '▼'}</span>
-      </button>
+    <div
+      className={`mb-6 bg-white rounded-lg shadow transition-all ${isDragTarget ? 'ring-2 ring-blue-400 ring-offset-1' : ''}`}
+      draggable={!!dragId}
+      onDragStart={dragId ? (e) => { e.dataTransfer.effectAllowed = 'move'; onDragStart(dragId); } : undefined}
+      onDragOver={dragId ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; onDragOver(dragId); } : undefined}
+      onDrop={dragId ? (e) => { e.preventDefault(); onDrop(dragId); } : undefined}
+      onDragEnd={dragId ? onDragEnd : undefined}
+    >
+      <div className="flex items-center rounded-t-lg hover:bg-gray-50 transition-colors">
+        {/* Drag handle */}
+        {dragId && (
+          <span
+            className="pl-3 pr-1 py-4 text-gray-300 hover:text-gray-500 cursor-grab active:cursor-grabbing select-none text-lg flex-shrink-0"
+            title="Drag to reorder"
+          >
+            ⠿
+          </span>
+        )}
+        <button
+          onClick={toggle}
+          className="flex-1 flex items-center justify-between px-4 py-4 text-left"
+        >
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold">{title}</h2>
+            {badge && <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{badge}</span>}
+          </div>
+          <span className="text-gray-400 text-xl flex-shrink-0">{open ? '▲' : '▼'}</span>
+        </button>
+      </div>
       {open && <div className="px-4 pb-4 sm:px-6 sm:pb-6">{children}</div>}
     </div>
   );
@@ -197,6 +258,316 @@ const SearchableDropdown = ({ label, values = [], onChange, options, recentOptio
 };
 
 
+// ── Forecast table with embedded adjustment rows ──────────────────────────────
+//
+// Renders the full forecast point values table.
+// For the best (selected) method, two extra collapsible rows appear directly
+// below the method row:
+//   • "Adjustment (±)" — additive delta inputs, one cell per horizon month
+//   • "Override"       — full-replacement inputs, one cell per horizon month
+// Both rows fold under a single toggle button in the method label cell.
+// Typing and leaving a cell auto-saves (400 ms debounce via saveAdjustment).
+
+function ForecastTableWithAdjustments({
+  activeForecasts, forecastDates, bestMethod, historicalData,
+  isMultiMode, horizonLength, adjustments, adjSaving,
+  saveAdjustment, resetAllAdjustments,
+}) {
+  const bestMethodName = bestMethod?.best_method;
+  const [adjRowsOpen, setAdjRowsOpen] = React.useState(false);
+
+  // Keep adj rows open automatically if there are any saved values
+  const hasAnyAdj = Object.keys(adjustments).length > 0;
+  React.useEffect(() => {
+    if (hasAnyAdj) setAdjRowsOpen(true);
+  }, [hasAnyAdj]);
+
+  // ---- Live draft state for instant Consensus updates ----
+  // Keyed by dateStr, value is a raw string from the input (may be empty/"")
+  const [draftAdj, setDraftAdj] = React.useState({});
+  const [draftOv, setDraftOv] = React.useState({});
+
+  // Sync drafts whenever the persisted adjustments change (load, save, reset)
+  React.useEffect(() => {
+    const adjMap = {};
+    const ovMap  = {};
+    Object.entries(adjustments).forEach(([key, entry]) => {
+      const [date, type] = key.split('|');
+      if (type === 'adjustment') adjMap[date] = String(entry.value);
+      if (type === 'override')   ovMap[date]  = String(entry.value);
+    });
+    setDraftAdj(adjMap);
+    setDraftOv(ovMap);
+  }, [adjustments]);
+
+  // Resolve base date from historical tail
+  const lastDate = historicalData?.date?.length
+    ? new Date(historicalData.date[historicalData.date.length - 1])
+    : null;
+
+  // The best-method (or first) forecast used as base for adjustments
+  const bestFc = activeForecasts.find(f => f.method === bestMethodName) || activeForecasts[0];
+
+  // Build per-month date strings (same logic as allData memo)
+  const monthDates = React.useMemo(() => {
+    if (!lastDate || !bestFc) return [];
+    return bestFc.point_forecast.map((_, i) => {
+      const d = new Date(lastDate);
+      d.setUTCMonth(d.getUTCMonth() + i + 1);
+      return d.toISOString().split('T')[0];
+    });
+  }, [lastDate?.toISOString(), bestFc?.method, bestFc?.point_forecast?.length]);
+
+  // Compute consensus value for a given period index (uses live drafts)
+  const consensusValue = React.useCallback((modelVal, dateStr) => {
+    if (!dateStr) return modelVal;
+    const ovRaw  = draftOv[dateStr];
+    const adjRaw = draftAdj[dateStr];
+    const ovNum  = ovRaw  !== undefined && ovRaw  !== '' ? parseFloat(ovRaw)  : null;
+    const adjNum = adjRaw !== undefined && adjRaw !== '' ? parseFloat(adjRaw) : null;
+    if (ovNum !== null && !isNaN(ovNum))  return ovNum;
+    if (adjNum !== null && !isNaN(adjNum)) return (modelVal || 0) + adjNum;
+    return modelVal;
+  }, [draftAdj, draftOv]);
+
+  // Is the consensus value different from the raw model for a given period?
+  const consensusModified = React.useCallback((modelVal, dateStr) => {
+    const cv = consensusValue(modelVal, dateStr);
+    return cv !== modelVal;
+  }, [consensusValue]);
+
+  const adjCount = Object.keys(adjustments).length;
+
+  return (
+    <Section
+      title={`Forecast Point Values${isMultiMode ? ' (aggregated sum)' : ''} (${horizonLength} months)`}
+      storageKey="tsv_forecast_table_open"
+    >
+      {/* Reset button + adj count badge */}
+      {!isMultiMode && adjCount > 0 && (
+        <div className="flex items-center justify-end gap-3 mb-2">
+          <span className="text-xs text-gray-400">{adjCount} adjustment{adjCount !== 1 ? 's' : ''} active</span>
+          <button
+            onClick={resetAllAdjustments}
+            className="px-2.5 py-1 text-xs bg-red-50 text-red-700 border border-red-200 rounded hover:bg-red-100"
+          >
+            ✕ Reset all adjustments
+          </button>
+        </div>
+      )}
+
+      <div className="overflow-x-auto max-h-[32rem]">
+        <table className="min-w-full divide-y divide-gray-200 text-sm">
+          <thead className="sticky top-0 bg-gray-50 z-10">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase sticky left-0 bg-gray-50 z-20 min-w-[9rem]">
+                Method
+              </th>
+              {forecastDates.map((d, i) => (
+                <th key={i} className="px-2 py-2 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">
+                  {d}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-200">
+            {activeForecasts.map((f, idx) => {
+              const isBest = f.method === bestMethodName;
+              const rowBg  = isBest ? 'bg-emerald-50' : '';
+              const stickyBg = isBest ? '#ecfdf5' : 'white';
+
+              return (
+                <React.Fragment key={f.method}>
+                  {/* ── Forecast row ── */}
+                  <tr className={rowBg}>
+                    <td
+                      className="px-3 py-2 font-medium whitespace-nowrap sticky left-0 z-10"
+                      style={{ backgroundColor: stickyBg }}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className="inline-block w-2.5 h-2.5 rounded-full flex-shrink-0"
+                          style={{ backgroundColor: getMethodColor(f.method) }}
+                        />
+                        <span>{f.method}</span>
+                        {/* Toggle adj rows — only for the best/selected method */}
+                        {isBest && !isMultiMode && (
+                          <button
+                            onClick={() => setAdjRowsOpen(o => !o)}
+                            title={adjRowsOpen ? 'Hide adjustment rows' : 'Show adjustment rows'}
+                            className="ml-1 text-gray-400 hover:text-indigo-600 text-xs leading-none"
+                          >
+                            {adjRowsOpen ? '▲' : '▼'}
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                    {f.point_forecast.map((v, i) => {
+                      // For the best method, show the final (adjusted) value in the cell
+                      if (isBest && monthDates[i]) {
+                        const dateStr = monthDates[i];
+                        const adj = adjustments[`${dateStr}|adjustment`];
+                        const ov  = adjustments[`${dateStr}|override`];
+                        const finalVal = ov
+                          ? Number(ov.value)
+                          : adj
+                            ? v + Number(adj.value)
+                            : v;
+                        const isMod = ov || adj;
+                        const saving = adjSaving[`${dateStr}|adjustment`] || adjSaving[`${dateStr}|override`];
+                        return (
+                          <td
+                            key={i}
+                            className={`px-2 py-2 text-right font-mono text-xs ${ov ? 'text-red-700 font-semibold' : adj ? 'text-orange-700 font-semibold' : ''}`}
+                          >
+                            {saving && <span className="text-gray-300 mr-0.5 text-[10px]">⟳</span>}
+                            {finalVal?.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                          </td>
+                        );
+                      }
+                      return (
+                        <td key={i} className="px-2 py-2 text-right font-mono text-xs text-gray-600">
+                          {v?.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                        </td>
+                      );
+                    })}
+                  </tr>
+
+                  {/* ── Adjustment rows (only under best method, collapsible) ── */}
+                  {isBest && !isMultiMode && adjRowsOpen && monthDates.length > 0 && (
+                    <>
+                      {/* Row 1: Adjustment (±) */}
+                      <tr className="bg-orange-50/60">
+                        <td
+                          className="px-3 py-1 text-xs font-medium text-orange-700 whitespace-nowrap sticky left-0 z-10 bg-orange-50"
+                          title="Additive delta applied on top of model forecast"
+                        >
+                          <span className="flex items-center gap-1">
+                            <span className="w-2 h-2 rounded-full bg-orange-400 inline-block flex-shrink-0" />
+                            Adjustment (±)
+                          </span>
+                        </td>
+                        {f.point_forecast.map((modelVal, i) => {
+                          const dateStr = monthDates[i];
+                          if (!dateStr) return <td key={i} />;
+                          const adj = adjustments[`${dateStr}|adjustment`];
+                          return (
+                            <td key={i} className="px-1 py-0.5">
+                              <input
+                                type="number"
+                                step="1"
+                                value={draftAdj[dateStr] ?? ''}
+                                placeholder="±"
+                                onChange={e => setDraftAdj(prev => ({ ...prev, [dateStr]: e.target.value }))}
+                                onBlur={e => saveAdjustment(dateStr, 'adjustment', e.target.value, adj?.note)}
+                                className="w-full min-w-[3.5rem] text-right border border-orange-200 rounded px-1.5 py-0.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-orange-400 bg-white"
+                              />
+                            </td>
+                          );
+                        })}
+                      </tr>
+
+                      {/* Row 2: Override */}
+                      <tr className="bg-red-50/60">
+                        <td
+                          className="px-3 py-1 text-xs font-medium text-red-700 whitespace-nowrap sticky left-0 z-10 bg-red-50"
+                          title="Fully replaces the model forecast for this period"
+                        >
+                          <span className="flex items-center gap-1">
+                            <span className="w-2 h-2 bg-red-500 inline-block flex-shrink-0 rounded-sm" />
+                            Override
+                          </span>
+                        </td>
+                        {f.point_forecast.map((_, i) => {
+                          const dateStr = monthDates[i];
+                          if (!dateStr) return <td key={i} />;
+                          const ov = adjustments[`${dateStr}|override`];
+                          return (
+                            <td key={i} className="px-1 py-0.5">
+                              <input
+                                type="number"
+                                step="1"
+                                value={draftOv[dateStr] ?? ''}
+                                placeholder="—"
+                                onChange={e => setDraftOv(prev => ({ ...prev, [dateStr]: e.target.value }))}
+                                onBlur={e => saveAdjustment(dateStr, 'override', e.target.value, ov?.note)}
+                                className="w-full min-w-[3.5rem] text-right border border-red-200 rounded px-1.5 py-0.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-red-400 bg-white"
+                              />
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    </>
+                  )}
+                </React.Fragment>
+              );
+            })}
+
+            {/* ── Consensus row — always visible when not in multi-mode ── */}
+            {!isMultiMode && bestFc && monthDates.length > 0 && (
+              <tr className="border-t-2 border-indigo-200 bg-indigo-50/70">
+                <td
+                  className="px-3 py-2 text-xs font-semibold text-indigo-800 whitespace-nowrap sticky left-0 z-10 bg-indigo-50"
+                  title="Model forecast with adjustments and overrides applied"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 inline-block flex-shrink-0" />
+                    Consensus
+                  </span>
+                </td>
+                {bestFc.point_forecast.map((modelVal, i) => {
+                  const dateStr = monthDates[i];
+                  if (!dateStr) return <td key={i} />;
+                  const cv = consensusValue(modelVal, dateStr);
+                  const modified = cv !== modelVal;
+                  const isOv  = draftOv[dateStr]  !== undefined && draftOv[dateStr]  !== '';
+                  const isAdj = !isOv && draftAdj[dateStr] !== undefined && draftAdj[dateStr] !== '';
+                  return (
+                    <td
+                      key={i}
+                      className={`px-2 py-2 text-right font-mono text-xs font-semibold
+                        ${isOv  ? 'text-red-700'    : ''}
+                        ${isAdj ? 'text-orange-700'  : ''}
+                        ${!modified ? 'text-indigo-700' : ''}
+                      `}
+                    >
+                      {cv != null ? cv.toLocaleString(undefined, { maximumFractionDigits: 0 }) : '—'}
+                    </td>
+                  );
+                })}
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Legend */}
+      {!isMultiMode && (
+        <div className="flex items-center gap-4 mt-2 text-xs text-gray-400 flex-wrap">
+          <span className="flex items-center gap-1">
+            <span className="inline-block w-2.5 h-2.5 rounded-full bg-indigo-500" />
+            Consensus: final value (model + adjustments/overrides)
+          </span>
+          {adjRowsOpen && (
+            <>
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-2 h-2 rounded-full bg-orange-400" />
+                Adjustment: additive ± delta (value shown in orange)
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block w-2 h-2 bg-red-500 rounded-sm" />
+                Override: replaces model entirely (value shown in red)
+              </span>
+              <span className="text-gray-300">· leave blank to clear</span>
+            </>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+
 export const TimeSeriesViewer = () => {
   const { uniqueId } = useParams();
   const decodedId = decodeURIComponent(uniqueId);
@@ -250,6 +621,26 @@ export const TimeSeriesViewer = () => {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // ---- Planner adjustments ----
+  // key: "YYYY-MM-DD|type" → {id, forecast_date, adjustment_type, value, note}
+  const [adjustments, setAdjustments] = useState({});
+  const [adjSaving, setAdjSaving] = useState({}); // key → true while saving
+  const adjDebounceRef = useRef({});             // key → timeout id
+
+  // ---- Section drag-and-drop order ----
+  const { order: sectionOrder, reorder: reorderSections } = useSectionOrder();
+  const [draggingId, setDraggingId] = useState(null);
+  const [dragOverId, setDragOverId] = useState(null);
+
+  const handleDragStart = useCallback((id) => setDraggingId(id), []);
+  const handleDragOver  = useCallback((id) => setDragOverId(id), []);
+  const handleDrop      = useCallback((overId) => {
+    if (draggingId && overId && draggingId !== overId) reorderSections(draggingId, overId);
+    setDraggingId(null);
+    setDragOverId(null);
+  }, [draggingId, reorderSections]);
+  const handleDragEnd   = useCallback(() => { setDraggingId(null); setDragOverId(null); }, []);
 
   // ---- Load all series list for dropdowns (once) ----
   useEffect(() => {
@@ -472,6 +863,73 @@ export const TimeSeriesViewer = () => {
     }
   };
 
+  // ---- Load / save adjustments ----
+  const loadAdjustments = useCallback(async () => {
+    try {
+      const res = await axios.get(`${API_BASE_URL}/adjustments/${encodeURIComponent(decodedId)}`);
+      const map = {};
+      (res.data || []).forEach(a => {
+        map[`${a.forecast_date}|${a.adjustment_type}`] = a;
+      });
+      setAdjustments(map);
+    } catch { /* non-fatal */ }
+  }, [decodedId]);
+
+  useEffect(() => { loadAdjustments(); }, [loadAdjustments]);
+
+  const saveAdjustment = useCallback((forecastDate, adjType, value, note) => {
+    const key = `${forecastDate}|${adjType}`;
+    // Cancel pending debounce for this key
+    if (adjDebounceRef.current[key]) clearTimeout(adjDebounceRef.current[key]);
+
+    const strVal = String(value).trim();
+    const isEmpty = strVal === '' || strVal === null;
+    const numVal = isEmpty ? NaN : Number(strVal);
+    const isInvalid = isEmpty || isNaN(numVal);
+
+    if (isInvalid) {
+      // Empty field → delete existing adjustment (if any)
+      adjDebounceRef.current[key] = setTimeout(async () => {
+        try {
+          await axios.delete(
+            `${API_BASE_URL}/adjustments/${encodeURIComponent(decodedId)}/${forecastDate}/${adjType}`
+          );
+          setAdjustments(prev => {
+            const next = { ...prev };
+            delete next[key];
+            return next;
+          });
+        } catch { /* non-fatal — row may not exist */ }
+      }, 400);
+      return;
+    }
+
+    // Upsert with debounce
+    adjDebounceRef.current[key] = setTimeout(async () => {
+      setAdjSaving(prev => ({ ...prev, [key]: true }));
+      try {
+        const res = await axios.post(
+          `${API_BASE_URL}/adjustments/${encodeURIComponent(decodedId)}`,
+          { forecast_date: forecastDate, adjustment_type: adjType, value: numVal, note: note || null }
+        );
+        // Immediately update local state so chart re-renders without waiting for a reload
+        setAdjustments(prev => ({ ...prev, [key]: { ...res.data, forecast_date: forecastDate, adjustment_type: adjType, value: numVal } }));
+      } catch (e) {
+        console.error('saveAdjustment failed:', e?.response?.data || e.message);
+      } finally {
+        setAdjSaving(prev => { const n = { ...prev }; delete n[key]; return n; });
+      }
+    }, 400);
+  }, [decodedId]);
+
+  const resetAllAdjustments = useCallback(async () => {
+    if (!window.confirm('Reset ALL adjustments and overrides for this series?')) return;
+    try {
+      await axios.delete(`${API_BASE_URL}/adjustments/${encodeURIComponent(decodedId)}`);
+      setAdjustments({});
+    } catch { /* non-fatal */ }
+  }, [decodedId]);
+
   useEffect(() => {
     if (origins.length === 0) return;
     const origin = origins[selectedOriginIdx];
@@ -523,8 +981,14 @@ export const TimeSeriesViewer = () => {
       dateSet.add(date);
       data.push({ date, value: activeHistoricalData.value[i], type: 'Actual', method: 'Historical', lo90: null, hi90: null, lo50: null, hi50: null, layer: 'line' });
     });
+
+    // Forecast data + adjustment/override marker points
     if (activeForecasts.length > 0) {
       const lastDate = new Date(activeHistoricalData.date[activeHistoricalData.date.length - 1]);
+
+      // Use only the best method's forecast to compute base values for adjustments
+      const bestFc = activeForecasts.find(f => f.method === bestMethod?.best_method) || activeForecasts[0];
+
       activeForecasts.forEach(forecast => {
         const quantiles = forecast.quantiles || {};
         forecast.point_forecast.forEach((value, i) => {
@@ -538,10 +1002,33 @@ export const TimeSeriesViewer = () => {
             data.push({ date: dateStr, value: null, type: 'Band', method: forecast.method, lo90, hi90, lo50: quantiles['0.25']?.[i] ?? lo90, hi50: quantiles['0.75']?.[i] ?? hi90, layer: 'band' });
         });
       });
+
+      // Add adjustment / override marker data points (plotted over forecast)
+      if (bestFc) {
+        bestFc.point_forecast.forEach((baseValue, i) => {
+          const d = new Date(lastDate); d.setUTCMonth(d.getUTCMonth() + i + 1);
+          const dateStr = fmtDate(d);
+          const adjKey = `${dateStr}|adjustment`;
+          const ovKey  = `${dateStr}|override`;
+          const adj = adjustments[adjKey];
+          const ov  = adjustments[ovKey];
+          if (ov) {
+            data.push({ date: dateStr, value: Number(ov.value), type: 'Override', method: 'Override',
+              lo90: null, hi90: null, lo50: null, hi50: null, layer: 'marker',
+              adjNote: ov.note || '' });
+          }
+          if (adj) {
+            const adjVal = baseValue + Number(adj.value);
+            data.push({ date: dateStr, value: adjVal, type: 'Adjustment', method: 'Adjustment',
+              lo90: null, hi90: null, lo50: null, hi50: null, layer: 'marker',
+              adjNote: adj.note || '', adjDelta: Number(adj.value) });
+          }
+        });
+      }
     }
     const sortedDates = [...dateSet].sort();
     return { allData: data, allDates: sortedDates };
-  }, [activeHistoricalData, activeForecasts]);
+  }, [activeHistoricalData, activeForecasts, adjustments, bestMethod]);
 
   useEffect(() => {
     if (allDates.length > 0) { setZoomStart(0); setZoomEnd(allDates.length - 1); }
@@ -627,6 +1114,71 @@ export const TimeSeriesViewer = () => {
       layers.push({ transform: [{ filter: "datum.layer === 'band'" }], mark: { type: 'area', opacity: 0.25 }, encoding: { x: { field: 'date', type: 'temporal' }, y: { field: 'lo50', type: 'quantitative' }, y2: { field: 'hi50' }, color: { ...colorScale, legend: null } } });
     }
     layers.push({ transform: [{ filter: "datum.layer === 'line'" }], mark: { type: 'line', point: false, strokeWidth: 2 }, encoding: { x: { field: 'date', type: 'temporal', title: 'Date', axis: { format: '%Y-%m' } }, y: { field: 'value', type: 'quantitative', title: 'Demand', scale: { zero: false } }, color: colorScale, strokeDash: { field: 'type', type: 'nominal', scale: { domain: ['Actual', 'Forecast'], range: [[1, 0], [5, 5]] }, legend: null }, opacity: { condition: { test: "datum.type === 'Actual'", value: 1 }, value: 0.85 }, tooltip: [{ field: 'date', type: 'temporal', title: 'Date' }, { field: 'value', type: 'quantitative', title: 'Value', format: ',.0f' }, { field: 'method', type: 'nominal', title: 'Method' }, { field: 'type', type: 'nominal', title: 'Type' }] } });
+
+    // "Final Forecast" line — only drawn when any adjustments/overrides exist.
+    // It uses the best-method forecast as base, applies adjustments/overrides.
+    const hasFinalOverlay = filtered.some(d => d.type === 'Adjustment' || d.type === 'Override');
+    if (hasFinalOverlay) {
+      // Build the final-forecast line from the existing marker values
+      // (they already have the final value baked in from allData memo)
+      const finalLineData = filtered
+        .filter(d => d.type === 'Adjustment' || d.type === 'Override')
+        .map(d => ({ date: d.date, value: d.value, type: 'Final Forecast', method: 'Final Forecast' }));
+      if (finalLineData.length > 0) {
+        layers.push({
+          data: { values: finalLineData },
+          mark: { type: 'line', strokeWidth: 2.5, strokeDash: [3, 2], color: '#7c3aed', point: false },
+          encoding: {
+            x: { field: 'date', type: 'temporal' },
+            y: { field: 'value', type: 'quantitative' },
+            tooltip: [
+              { field: 'date', type: 'temporal', title: 'Date', format: '%Y-%m-%d' },
+              { field: 'value', type: 'quantitative', title: 'Final forecast', format: ',.0f' },
+            ]
+          }
+        });
+      }
+    }
+
+    // Adjustment markers (orange circle ●) — use transform filter on shared data
+    const hasAdjMarkers = filtered.some(d => d.type === 'Adjustment');
+    if (hasAdjMarkers) {
+      layers.push({
+        transform: [{ filter: "datum.type === 'Adjustment'" }],
+        mark: { type: 'point', shape: 'triangle-up', size: 160, filled: true, opacity: 1 },
+        encoding: {
+          x: { field: 'date', type: 'temporal' },
+          y: { field: 'value', type: 'quantitative' },
+          color: { value: '#f97316' },
+          tooltip: [
+            { field: 'date', type: 'temporal', title: 'Date', format: '%Y-%m-%d' },
+            { field: 'value', type: 'quantitative', title: 'Adjusted forecast', format: ',.0f' },
+            { field: 'adjDelta', type: 'quantitative', title: 'Δ (delta)', format: '+,.0f' },
+            { field: 'adjNote', type: 'nominal', title: 'Note' },
+          ]
+        }
+      });
+    }
+
+    // Override markers (red square ■) — use transform filter on shared data
+    const hasOvMarkers = filtered.some(d => d.type === 'Override');
+    if (hasOvMarkers) {
+      layers.push({
+        transform: [{ filter: "datum.type === 'Override'" }],
+        mark: { type: 'point', shape: 'square', size: 160, filled: true, opacity: 1 },
+        encoding: {
+          x: { field: 'date', type: 'temporal' },
+          y: { field: 'value', type: 'quantitative' },
+          color: { value: '#dc2626' },
+          tooltip: [
+            { field: 'date', type: 'temporal', title: 'Date', format: '%Y-%m-%d' },
+            { field: 'value', type: 'quantitative', title: 'Override value', format: ',.0f' },
+            { field: 'adjNote', type: 'nominal', title: 'Note' },
+          ]
+        }
+      });
+    }
+
     return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: 380, autosize: { type: 'fit', contains: 'padding' }, data: { values: filtered }, layer: layers, config: { view: { stroke: null } } };
   }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, activeMethodDomain]);
 
@@ -886,397 +1438,485 @@ export const TimeSeriesViewer = () => {
         )}
       </div>
 
-      {/* Method Toggles */}
-      {activeForecasts.length > 0 && (
-        <Section title="Method Toggles" storageKey="tsv_toggles_open">
-          <div className="flex flex-wrap gap-2">
-            {activeForecasts.map(f => (
-              <button key={f.method} onClick={() => toggleMethod(f.method)}
-                className={`px-3 py-1.5 rounded-full text-sm font-medium border-2 transition-all ${visibleMethods[f.method] ? 'text-white border-transparent' : 'bg-white text-gray-400 border-gray-200'}`}
-                style={visibleMethods[f.method] ? { backgroundColor: getMethodColor(f.method), borderColor: getMethodColor(f.method) } : {}}>
-                {f.method}{bestMethod?.best_method === f.method && ' ★'}
-              </button>
-            ))}
-          </div>
-        </Section>
-      )}
+      {/* ── Draggable sections — rendered in user-defined order ── */}
+      {(() => {
+        // Helper: returns drag props for a section
+        const dp = (id) => ({
+          dragId: id,
+          dragOver: dragOverId,
+          onDragStart: handleDragStart,
+          onDragOver: handleDragOver,
+          onDrop: handleDrop,
+          onDragEnd: handleDragEnd,
+        });
 
-      {/* Outlier Before/After Chart */}
-      {hasOutlierCorrections && outlierChartSpec && (
-        <Section title="Demand Before & After Correction" storageKey="tsv_outlier_open" badge={`${nOutliers} outlier${nOutliers !== 1 ? 's' : ''}`}>
-          <p className="text-sm text-gray-500 mb-4">
-            Detected via <span className="font-medium">{outlierInfo?.detection_method || 'IQR'}</span>, corrected with <span className="font-medium">{outlierInfo?.correction_method || 'clip'}</span>.
-            Gray dashed = original, blue solid = corrected, red dots = outlier points.
-          </p>
-          <div className="w-full overflow-x-auto"><VegaLite spec={outlierChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
-          <ZoomSlider dates={outlierDates} start={outlierZoomStart} end={outlierZoomEnd} onStartChange={setOutlierZoomStart} onEndChange={setOutlierZoomEnd} />
-        </Section>
-      )}
+        // Build map of section id → JSX (null = not applicable, skip)
+        const sectionNodes = {};
 
-      {/* Main Chart */}
-      <Section title={`Historical Data & Forecasts${horizonLength ? ` (${horizonLength}-month horizon)` : ''}`} storageKey="tsv_main_chart_open">
-        <p className="text-sm text-gray-500 mb-4">Shaded bands: 50% (dark) and 90% (light) prediction intervals.</p>
-        {mainChartSpec ? (
-          <div className="w-full overflow-x-auto"><VegaLite spec={mainChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
-        ) : <div className="text-gray-400 py-8 text-center">No data available</div>}
-        <ZoomSlider dates={allDates} start={zoomStart} end={zoomEnd} onStartChange={setZoomStart} onEndChange={setZoomEnd} />
-      </Section>
-
-      {/* Method Selection Rationale */}
-      {methodExplanation && (() => {
-        const chars = methodExplanation.characteristics || {};
-        const acf   = methodExplanation.acf  || { lags: [], values: [], ci_upper: [], ci_lower: [] };
-        const pacf  = methodExplanation.pacf || { lags: [], values: [] };
-
-        /** Inline SVG bar chart for ACF/PACF */
-        const CorrelogramChart = ({ lags, values, ciUpper, ciLower, label, color }) => {
-          if (!lags || lags.length === 0) return <p className="text-xs text-gray-400 italic">Not enough data to compute {label}.</p>;
-          const W = 340, H = 110, padL = 28, padB = 20, padT = 10, padR = 8;
-          const innerW = W - padL - padR;
-          const innerH = H - padT - padB;
-          const n = lags.length;
-          const allVals = [...values, ...(ciUpper || []).map((u, i) => values[i] + u), ...(ciLower || []).map((l, i) => values[i] - l)];
-          const yMin = Math.min(-0.5, ...allVals);
-          const yMax = Math.max( 0.5, ...allVals);
-          const yRange = yMax - yMin || 1;
-          const toX = (i) => padL + (i + 0.5) * (innerW / n);
-          const toY = (v) => padT + (1 - (v - yMin) / yRange) * innerH;
-          const y0 = toY(0);
-          const barW = Math.max(2, innerW / n - 2);
-          // significance band (95% CI: ±1.96/√n)
-          const sigBand = 1.96 / Math.sqrt(values.length + 1);
-          const ySigPos = toY(sigBand);
-          const ySigNeg = toY(-sigBand);
-
-          return (
-            <svg width={W} height={H} className="overflow-visible">
-              {/* significance band */}
-              <rect x={padL} y={ySigPos} width={innerW} height={ySigNeg - ySigPos}
-                    fill="#dbeafe" fillOpacity={0.5} />
-              <line x1={padL} x2={padL + innerW} y1={ySigPos} y2={ySigPos} stroke="#93c5fd" strokeWidth={1} strokeDasharray="3,2"/>
-              <line x1={padL} x2={padL + innerW} y1={ySigNeg} y2={ySigNeg} stroke="#93c5fd" strokeWidth={1} strokeDasharray="3,2"/>
-              {/* zero line */}
-              <line x1={padL} x2={padL + innerW} y1={y0} y2={y0} stroke="#94a3b8" strokeWidth={1}/>
-              {/* bars */}
-              {values.map((v, i) => {
-                const x  = toX(i) - barW / 2;
-                const yv = toY(v);
-                const significant = Math.abs(v) > sigBand;
-                return (
-                  <g key={i}>
-                    <rect x={x} y={Math.min(yv, y0)} width={barW} height={Math.abs(yv - y0)}
-                          fill={significant ? color : '#cbd5e1'} fillOpacity={0.85} rx={1}/>
-                    <title>Lag {lags[i]}: {v.toFixed(3)}</title>
-                  </g>
-                );
-              })}
-              {/* y-axis ticks */}
-              {[-0.5, 0, 0.5, 1].filter(v => v >= yMin && v <= yMax).map(v => (
-                <g key={v}>
-                  <line x1={padL - 3} x2={padL} y1={toY(v)} y2={toY(v)} stroke="#94a3b8" strokeWidth={1}/>
-                  <text x={padL - 5} y={toY(v) + 3.5} textAnchor="end" fontSize={8} fill="#64748b">{v}</text>
-                </g>
+        /* toggles */
+        sectionNodes['toggles'] = activeForecasts.length > 0 ? (
+          <Section key="toggles" title="Method Toggles" storageKey="tsv_toggles_open" {...dp('toggles')}>
+            <div className="flex flex-wrap gap-2">
+              {activeForecasts.map(f => (
+                <button key={f.method} onClick={() => toggleMethod(f.method)}
+                  className={`px-3 py-1.5 rounded-full text-sm font-medium border-2 transition-all ${visibleMethods[f.method] ? 'text-white border-transparent' : 'bg-white text-gray-400 border-gray-200'}`}
+                  style={visibleMethods[f.method] ? { backgroundColor: getMethodColor(f.method), borderColor: getMethodColor(f.method) } : {}}>
+                  {f.method}{bestMethod?.best_method === f.method && ' ★'}
+                </button>
               ))}
-              {/* x-axis lag labels (every other) */}
-              {lags.map((lg, i) => i % 2 === 0 && (
-                <text key={i} x={toX(i)} y={H - 4} textAnchor="middle" fontSize={8} fill="#64748b">{lg}</text>
-              ))}
-              {/* label */}
-              <text x={padL} y={padT - 2} fontSize={9} fontWeight="600" fill="#475569">{label}</text>
-            </svg>
-          );
-        };
-
-        return (
-          <Section title="Method Selection Rationale" storageKey="tsv_rationale_open" defaultOpen={false}>
-
-            {/* Characteristics summary pills */}
-            <div className="flex flex-wrap gap-2 mb-4">
-              {[
-                { label: `${chars.n_observations} obs`, color: 'bg-slate-100 text-slate-700' },
-                { label: chars.has_seasonality ? `Seasonal (strength ${chars.seasonal_strength?.toFixed(2)})` : 'No seasonality', color: chars.has_seasonality ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-500' },
-                { label: chars.has_trend ? `Trend ${chars.trend_direction}` : 'No trend', color: chars.has_trend ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-500' },
-                { label: chars.is_intermittent ? 'Intermittent' : 'Continuous', color: chars.is_intermittent ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-700' },
-                { label: `Complexity: ${chars.complexity_level}`, color: chars.complexity_level === 'high' ? 'bg-red-100 text-red-700' : chars.complexity_level === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700' },
-              ].map(({ label, color }) => (
-                <span key={label} className={`px-2 py-0.5 rounded-full text-xs font-medium ${color}`}>{label}</span>
-              ))}
-            </div>
-
-            {/* Selection reason banner */}
-            <div className="mb-4 text-sm bg-blue-50 text-blue-800 px-3 py-2 rounded flex flex-wrap gap-x-3 gap-y-1">
-              <span>Category: <span className="font-semibold">{methodExplanation.selection_category}</span></span>
-              <span className="text-blue-300">|</span>
-              <span>{methodExplanation.selection_reason}</span>
-            </div>
-
-            {/* ACF + PACF charts */}
-            {(acf.lags.length > 0 || pacf.lags.length > 0) && (
-              <div className="mb-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
-                  <p className="text-xs text-gray-500 mb-1">ACF — autocorrelation at each lag. Bars outside the blue band are statistically significant. Spikes at regular intervals suggest seasonality.</p>
-                  <div className="overflow-x-auto">
-                    <CorrelogramChart lags={acf.lags} values={acf.values} ciUpper={acf.ci_upper} ciLower={acf.ci_lower} label="ACF" color="#6366f1" />
-                  </div>
-                </div>
-                <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
-                  <p className="text-xs text-gray-500 mb-1">PACF — partial autocorrelation (removes indirect effects). Spike at lag k only → AR(k). Helps choose ARIMA order.</p>
-                  <div className="overflow-x-auto">
-                    <CorrelogramChart lags={pacf.lags} values={pacf.values} ciUpper={null} ciLower={null} label="PACF" color="#0891b2" />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Included / Excluded methods */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <h3 className="text-sm font-semibold text-emerald-700 mb-2">Applied Methods ({methodExplanation.included?.length || 0})</h3>
-                <div className="space-y-1">
-                  {(methodExplanation.included || []).map((m, i) => (
-                    <div key={i} className="flex items-start gap-2 text-sm">
-                      <span className={`mt-0.5 text-xs ${m.status === 'forecasted' ? 'text-emerald-600' : 'text-amber-500'}`}>{m.status === 'forecasted' ? '✓' : '⚠'}</span>
-                      <div><span className="font-medium">{m.method}</span><span className="text-gray-500 ml-1 text-xs">{m.reason}</span></div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold text-red-700 mb-2">Excluded Methods ({methodExplanation.excluded?.length || 0})</h3>
-                <div className="space-y-1">
-                  {(methodExplanation.excluded || []).map((m, i) => (
-                    <div key={i} className="flex items-start gap-2 text-sm">
-                      <span className="mt-0.5 text-xs text-red-500">✗</span>
-                      <div><span className="font-medium text-gray-600">{m.method}</span><span className="text-gray-400 ml-1 text-xs">{m.reason}</span></div>
-                    </div>
-                  ))}
-                </div>
-              </div>
             </div>
           </Section>
+        ) : null;
+
+        /* outlier */
+        sectionNodes['outlier'] = (hasOutlierCorrections && outlierChartSpec) ? (
+          <Section key="outlier" title="Demand Before & After Correction" storageKey="tsv_outlier_open" badge={`${nOutliers} outlier${nOutliers !== 1 ? 's' : ''}`} {...dp('outlier')}>
+            <p className="text-sm text-gray-500 mb-4">
+              Detected via <span className="font-medium">{outlierInfo?.detection_method || 'IQR'}</span>, corrected with <span className="font-medium">{outlierInfo?.correction_method || 'clip'}</span>.
+              Gray dashed = original, blue solid = corrected, red dots = outlier points.
+            </p>
+            <div className="w-full overflow-x-auto"><VegaLite spec={outlierChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+            <ZoomSlider dates={outlierDates} start={outlierZoomStart} end={outlierZoomEnd} onStartChange={setOutlierZoomStart} onEndChange={setOutlierZoomEnd} />
+          </Section>
+        ) : null;
+
+        /* main_chart */
+        sectionNodes['main_chart'] = (
+          <Section key="main_chart" title={`Historical Data & Forecasts${horizonLength ? ` (${horizonLength}-month horizon)` : ''}`} storageKey="tsv_main_chart_open" {...dp('main_chart')}>
+            <p className="text-sm text-gray-500 mb-4">Shaded bands: 50% (dark) and 90% (light) prediction intervals.</p>
+            {mainChartSpec ? (
+              <div className="w-full overflow-x-auto"><VegaLite spec={mainChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+            ) : <div className="text-gray-400 py-8 text-center">No data available</div>}
+            <ZoomSlider dates={allDates} start={zoomStart} end={zoomEnd} onStartChange={setZoomStart} onEndChange={setZoomEnd} />
+          </Section>
         );
-      })()}
 
-      {/* Scoring Charts */}
-      {(targetChartSpec || compositeScoreSpec) && (
-        <Section title="Accuracy vs Precision & Composite Score" storageKey="tsv_scoring_open">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {targetChartSpec && (
-              <div>
-                <h3 className="text-sm font-semibold text-gray-600 mb-1">Accuracy vs Precision</h3>
-                <p className="text-xs text-gray-400 mb-3">Bottom-left = best (low bias, low RMSE). Star = winner.</p>
-                <div className="w-full overflow-x-auto"><VegaLite spec={targetChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
-              </div>
-            )}
-            {compositeScoreSpec && (
-              <div>
-                <h3 className="text-sm font-semibold text-gray-600 mb-1">Composite Score Ranking</h3>
-                <p className="text-xs text-gray-400 mb-1">Weighted score: lower is better. Green border = winner.</p>
-                {compositeWeights && (
-                  <p className="text-xs text-gray-400 mb-3">
-                    Weights: {Object.entries(compositeWeights).map(([k, v]) => `${k}=${(v * 100).toFixed(0)}%`).join(', ')}
-                  </p>
-                )}
-                <div className="w-full overflow-x-auto"><VegaLite spec={compositeScoreSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
-              </div>
-            )}
-          </div>
-        </Section>
-      )}
+        /* rationale */
+        if (methodExplanation) {
+          const chars = methodExplanation.characteristics || {};
+          const acf   = methodExplanation.acf  || { lags: [], values: [], ci_upper: [], ci_lower: [] };
+          const pacf  = methodExplanation.pacf || { lags: [], values: [] };
 
-      {/* Comprehensive Metrics Table */}
-      {activeMetrics.length > 0 && (
-        <Section title={`Comprehensive Metrics Comparison${isMultiMode ? ' (weighted avg)' : ''}`} storageKey="tsv_metrics_open">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200 text-sm">
-              <thead><tr className="bg-gray-50">
-                {[
-                  ['method', 'Method', false],
-                  ['mae', 'MAE', true], ['rmse', 'RMSE', true],
-                  ['bias', 'Bias', true], ['mape', 'MAPE', true], ['smape', 'sMAPE', true],
-                  ['mase', 'MASE', true],
-                  ['crps', 'CRPS', true], ['winkler_score', 'Winkler', true],
-                  ['coverage_50', 'Cov50', true], ['coverage_80', 'Cov80', true],
-                  ['coverage_90', 'Cov90', true], ['coverage_95', 'Cov95', true],
-                  ['quantile_loss', 'QLoss', true],
-                  ['n_windows', 'Win', false],
-                ].map(([field, label, sortable]) => (
-                  <th key={field} onClick={sortable ? () => handleMetricsSort(field) : undefined}
-                    className={`px-2 py-2 text-xs font-medium text-gray-500 uppercase whitespace-nowrap ${field === 'method' ? 'text-left' : 'text-right'} ${sortable ? 'cursor-pointer hover:bg-gray-100 select-none' : ''}`}>
-                    {label}{sortable ? metricsSortIndicator(field) : ''}
-                  </th>
-                ))}
-                {compositeRanking && (
-                  <th onClick={() => handleMetricsSort('composite')}
-                    className="px-2 py-2 text-right text-xs font-medium text-gray-500 uppercase cursor-pointer hover:bg-gray-100 whitespace-nowrap select-none">
-                    Score{metricsSortIndicator('composite')}
-                  </th>
-                )}
-              </tr></thead>
-              <tbody className="divide-y divide-gray-200">
-                {sortedMetrics.map((m, idx) => {
-                  const isBest = bestMethod?.best_method === m.method;
+          const CorrelogramChart = ({ lags, values, ciUpper, ciLower, label, color }) => {
+            if (!lags || lags.length === 0) return <p className="text-xs text-gray-400 italic">Not enough data to compute {label}.</p>;
+            const W = 340, H = 110, padL = 28, padB = 20, padT = 10, padR = 8;
+            const innerW = W - padL - padR;
+            const innerH = H - padT - padB;
+            const n = lags.length;
+            const allVals = [...values, ...(ciUpper || []).map((u, i) => values[i] + u), ...(ciLower || []).map((l, i) => values[i] - l)];
+            const yMin = Math.min(-0.5, ...allVals);
+            const yMax = Math.max( 0.5, ...allVals);
+            const yRange = yMax - yMin || 1;
+            const toX = (i) => padL + (i + 0.5) * (innerW / n);
+            const toY = (v) => padT + (1 - (v - yMin) / yRange) * innerH;
+            const y0 = toY(0);
+            const barW = Math.max(2, innerW / n - 2);
+            const sigBand = 1.96 / Math.sqrt(values.length + 1);
+            const ySigPos = toY(sigBand);
+            const ySigNeg = toY(-sigBand);
+            return (
+              <svg width={W} height={H} className="overflow-visible">
+                <rect x={padL} y={ySigPos} width={innerW} height={ySigNeg - ySigPos} fill="#dbeafe" fillOpacity={0.5} />
+                <line x1={padL} x2={padL + innerW} y1={ySigPos} y2={ySigPos} stroke="#93c5fd" strokeWidth={1} strokeDasharray="3,2"/>
+                <line x1={padL} x2={padL + innerW} y1={ySigNeg} y2={ySigNeg} stroke="#93c5fd" strokeWidth={1} strokeDasharray="3,2"/>
+                <line x1={padL} x2={padL + innerW} y1={y0} y2={y0} stroke="#94a3b8" strokeWidth={1}/>
+                {values.map((v, i) => {
+                  const x  = toX(i) - barW / 2;
+                  const yv = toY(v);
+                  const significant = Math.abs(v) > sigBand;
                   return (
-                    <tr key={idx} className={isBest ? 'bg-emerald-50' : ''}>
-                      <td className="px-2 py-2 font-medium whitespace-nowrap text-left">
-                        <span className="inline-block w-2.5 h-2.5 rounded-full mr-1.5" style={{ backgroundColor: getMethodColor(m.method) }}></span>
-                        {m.method}
-                        {isBest && <span className="ml-1.5 text-xs bg-emerald-200 text-emerald-800 px-1 py-0.5 rounded font-semibold">Best</span>}
-                      </td>
-                      {['mae', 'rmse'].map(f => (<td key={f} className={`px-2 py-2 text-right font-mono ${isBestVal(f, m[f]) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m[f])}</td>))}
-                      <td className={`px-2 py-2 text-right font-mono ${isBestVal('bias', m.bias) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m.bias)}</td>
-                      {['mape', 'smape'].map(f => (<td key={f} className={`px-2 py-2 text-right font-mono ${isBestVal(f, m[f]) ? 'text-emerald-700 font-bold' : ''}`}>{m[f] != null ? m[f].toFixed(1) + '%' : '-'}</td>))}
-                      <td className={`px-2 py-2 text-right font-mono ${isBestVal('mase', m.mase) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m.mase)}</td>
-                      {['crps', 'winkler_score'].map(f => (<td key={f} className={`px-2 py-2 text-right font-mono ${isBestVal(f, m[f]) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m[f])}</td>))}
-                      {['coverage_50', 'coverage_80', 'coverage_90', 'coverage_95'].map(f => (<td key={f} className={`px-2 py-2 text-right font-mono ${isBestVal(f, m[f]) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m[f], true)}</td>))}
-                      <td className={`px-2 py-2 text-right font-mono ${isBestVal('quantile_loss', m.quantile_loss) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m.quantile_loss)}</td>
-                      <td className="px-2 py-2 text-right">{m.n_windows}</td>
-                      {compositeRanking && (<td className={`px-2 py-2 text-right font-mono font-semibold ${isBest ? 'text-emerald-700' : ''}`}>{compositeRanking[m.method] != null ? compositeRanking[m.method].toFixed(4) : '-'}</td>)}
-                    </tr>
+                    <g key={i}>
+                      <rect x={x} y={Math.min(yv, y0)} width={barW} height={Math.abs(yv - y0)}
+                            fill={significant ? color : '#cbd5e1'} fillOpacity={0.85} rx={1}/>
+                      <title>Lag {lags[i]}: {v.toFixed(3)}</title>
+                    </g>
                   );
                 })}
-              </tbody>
-            </table>
+                {[-0.5, 0, 0.5, 1].filter(v => v >= yMin && v <= yMax).map(v => (
+                  <g key={v}>
+                    <line x1={padL - 3} x2={padL} y1={toY(v)} y2={toY(v)} stroke="#94a3b8" strokeWidth={1}/>
+                    <text x={padL - 5} y={toY(v) + 3.5} textAnchor="end" fontSize={8} fill="#64748b">{v}</text>
+                  </g>
+                ))}
+                {lags.map((lg, i) => i % 2 === 0 && (
+                  <text key={i} x={toX(i)} y={H - 4} textAnchor="middle" fontSize={8} fill="#64748b">{lg}</text>
+                ))}
+                <text x={padL} y={padT - 2} fontSize={9} fontWeight="600" fill="#475569">{label}</text>
+              </svg>
+            );
+          };
+
+          const GaugeBar = ({ value, max = 1, color, bgColor = '#e5e7eb', height = 8 }) => {
+            const pct = Math.min(1, Math.max(0, value / max)) * 100;
+            return (
+              <div style={{ background: bgColor, borderRadius: 4, height, overflow: 'hidden', width: '100%' }}>
+                <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 4, transition: 'width 0.4s' }} />
+              </div>
+            );
+          };
+
+          const StatCard = ({ label, value, sub, color, badge, badgeColor, gauge, gaugeMax, gaugeColor }) => (
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 flex flex-col gap-1.5">
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-xs text-gray-500 font-medium">{label}</span>
+                {badge && (
+                  <span className={`text-xs px-1.5 py-0.5 rounded-full font-semibold ${badgeColor || 'bg-gray-100 text-gray-600'}`}>{badge}</span>
+                )}
+              </div>
+              <div className="flex items-baseline gap-1.5">
+                <span className="text-lg font-bold" style={{ color: color || '#111827' }}>{value}</span>
+                {sub && <span className="text-xs text-gray-400">{sub}</span>}
+              </div>
+              {gauge !== undefined && (
+                <GaugeBar value={gauge} max={gaugeMax || 1} color={gaugeColor || '#6366f1'} />
+              )}
+            </div>
+          );
+
+          const complexityColor = chars.complexity_level === 'high' ? '#dc2626' : chars.complexity_level === 'medium' ? '#d97706' : '#16a34a';
+          const complexityBadgeColor = chars.complexity_level === 'high' ? 'bg-red-100 text-red-700' : chars.complexity_level === 'medium' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700';
+          const adfColor = chars.adf_pvalue <= 0.05 ? '#16a34a' : '#dc2626';
+          const adfBadge = chars.is_stationary ? 'Stationary' : 'Non-stationary';
+          const adfBadgeColor = chars.is_stationary ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700';
+          const trendBadgeColor = chars.has_trend ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-500';
+          const seasonalBadgeColor = chars.has_seasonality ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-500';
+          const intermittentBadgeColor = chars.is_intermittent ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700';
+          const cvLabel = chars.mean > 0 ? (chars.std / chars.mean).toFixed(2) : '—';
+
+          sectionNodes['rationale'] = (
+            <Section key="rationale" title="Method Selection Rationale" storageKey="tsv_rationale_open" defaultOpen={false} {...dp('rationale')}>
+              {/* ── Demand Characteristics Grid ── */}
+              <div className="mb-5">
+                <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                  Demand Characteristics
+                  <span className="text-xs font-normal text-gray-400">All signals used to select forecasting methods</span>
+                </h3>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+                  <StatCard label="Observations" value={chars.n_observations} sub={`${chars.date_range_start?.slice(0,7)} → ${chars.date_range_end?.slice(0,7)}`} color="#111827" />
+                  <StatCard label="Mean Demand" value={chars.mean != null ? chars.mean.toFixed(1) : '—'} sub="units/period" color="#2563eb" />
+                  <StatCard label="Std Deviation" value={chars.std != null ? chars.std.toFixed(1) : '—'} sub="units/period" color="#7c3aed" />
+                  <StatCard label="Coeff. of Variation" value={cvLabel} sub="σ / μ  (volatility)" color={parseFloat(cvLabel) > 1 ? '#dc2626' : parseFloat(cvLabel) > 0.5 ? '#d97706' : '#16a34a'} gauge={Math.min(parseFloat(cvLabel) || 0, 2)} gaugeMax={2} gaugeColor={parseFloat(cvLabel) > 1 ? '#dc2626' : parseFloat(cvLabel) > 0.5 ? '#d97706' : '#16a34a'} />
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+                  <StatCard label="Zero Ratio" value={`${((chars.zero_ratio || 0) * 100).toFixed(1)}%`} sub="% periods with zero demand" color={chars.zero_ratio > 0.5 ? '#dc2626' : chars.zero_ratio > 0.2 ? '#d97706' : '#374151'} badge={chars.is_intermittent ? 'Intermittent' : 'Continuous'} badgeColor={intermittentBadgeColor} gauge={chars.zero_ratio || 0} gaugeMax={1} gaugeColor={chars.zero_ratio > 0.5 ? '#dc2626' : chars.zero_ratio > 0.2 ? '#d97706' : '#6b7280'} />
+                  <StatCard label="ADI" value={(chars.adi || 0).toFixed(2)} sub="Avg Demand Interval (periods)" color={chars.adi > 1.32 ? '#dc2626' : '#374151'} gauge={Math.min(chars.adi || 0, 5)} gaugeMax={5} gaugeColor={chars.adi > 1.32 ? '#f59e0b' : '#6b7280'} />
+                  <StatCard label="CoV (non-zero)" value={(chars.cov || 0).toFixed(2)} sub="Coeff. of Variation of demand sizes" color={chars.cov > 0.49 ? '#d97706' : '#374151'} gauge={Math.min(chars.cov || 0, 2)} gaugeMax={2} gaugeColor={chars.cov > 0.49 ? '#f59e0b' : '#6b7280'} />
+                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 flex flex-col gap-1.5">
+                    <span className="text-xs text-gray-500 font-medium">Demand Pattern</span>
+                    <div className="flex flex-col gap-1 mt-1">
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2 h-2 rounded-full flex-shrink-0 ${chars.is_intermittent ? 'bg-amber-400' : 'bg-emerald-400'}`}/>
+                        <span className="text-xs font-semibold">{chars.is_intermittent ? 'Intermittent' : 'Continuous'}</span>
+                      </div>
+                      <div className="text-xs text-gray-400">ADI &gt; 1.32 or &lt; 5 demand periods → intermittent</div>
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+                  <StatCard label="Trend" value={chars.has_trend ? `${chars.trend_direction === 'up' ? '↑' : '↓'} ${chars.trend_direction}` : 'None'} sub={`Kendall's τ = ${(chars.trend_strength || 0).toFixed(3)}`} color={chars.has_trend ? '#ea580c' : '#6b7280'} badge={chars.has_trend ? 'Trending' : 'No trend'} badgeColor={trendBadgeColor} gauge={chars.trend_strength || 0} gaugeMax={1} gaugeColor={chars.has_trend ? '#ea580c' : '#d1d5db'} />
+                  <StatCard label="Seasonality" value={chars.has_seasonality ? `Periods: ${(chars.seasonal_periods || []).join(', ')}` : 'None detected'} sub={`ACF strength: ${(chars.seasonal_strength || 0).toFixed(3)}`} color={chars.has_seasonality ? '#7c3aed' : '#6b7280'} badge={chars.has_seasonality ? 'Seasonal' : 'Non-seasonal'} badgeColor={seasonalBadgeColor} gauge={chars.seasonal_strength || 0} gaugeMax={1} gaugeColor={chars.has_seasonality ? '#7c3aed' : '#d1d5db'} />
+                  <StatCard label="ADF p-value" value={(chars.adf_pvalue != null ? chars.adf_pvalue : 1).toFixed(4)} sub="Augmented Dickey-Fuller test" color={adfColor} badge={adfBadge} badgeColor={adfBadgeColor} gauge={Math.max(0, 1 - (chars.adf_pvalue || 1))} gaugeMax={1} gaugeColor={adfColor} />
+                  <StatCard label="Complexity Score" value={(chars.complexity_score || 0).toFixed(3)} sub="0 = simple · 1 = highly complex" color={complexityColor} badge={`${chars.complexity_level} complexity`} badgeColor={complexityBadgeColor} gauge={chars.complexity_score || 0} gaugeMax={1} gaugeColor={complexityColor} />
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="col-span-2 sm:col-span-2 bg-gray-50 border border-gray-200 rounded-lg p-3">
+                    <span className="text-xs text-gray-500 font-medium block mb-2">Data Sufficiency</span>
+                    <div className="flex flex-col gap-1.5">
+                      {[
+                        { label: 'Statistical models', ok: true, note: 'Always available' },
+                        { label: 'Sparse check (obs/year)', ok: !chars.is_sparse, note: `${chars.obs_per_year != null ? chars.obs_per_year.toFixed(1) : '—'} obs/yr — threshold < ${chars.sparse_obs_per_year_threshold ?? 5}` },
+                        { label: 'ML models (LightGBM, XGBoost)', ok: chars.sufficient_for_ml, note: `≥100 obs — has ${chars.n_observations}` },
+                        { label: 'Deep Learning (NHITS, NBEATS…)', ok: chars.sufficient_for_deep_learning, note: `≥200 obs — has ${chars.n_observations}` },
+                      ].map(({ label, ok, note }) => (
+                        <div key={label} className="flex items-center gap-2">
+                          <span className={`flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-xs ${ok ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-500'}`}>
+                            {ok ? '✓' : '✗'}
+                          </span>
+                          <span className="text-xs font-medium text-gray-700">{label}</span>
+                          <span className="text-xs text-gray-400 ml-auto">{note}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="col-span-2 sm:col-span-2 bg-blue-50 border border-blue-100 rounded-lg p-3">
+                    <span className="text-xs font-medium text-blue-700 block mb-1">
+                      Selection Category: <span className="font-bold">{methodExplanation.selection_category}</span>
+                    </span>
+                    <p className="text-xs text-blue-600 leading-relaxed">{methodExplanation.selection_reason}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* ── ACF + PACF charts ── */}
+              {(acf.lags.length > 0 || pacf.lags.length > 0) && (
+                <div className="mb-5">
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                    Autocorrelation Analysis
+                    <span className="text-xs font-normal text-gray-400">Bars outside blue band are statistically significant (95% CI)</span>
+                  </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                      <p className="text-xs text-gray-500 mb-2 font-medium">ACF — Autocorrelation Function</p>
+                      <p className="text-xs text-gray-400 mb-2">Spikes at regular lags → seasonal pattern. Slow decay → trend or non-stationarity.</p>
+                      <div className="overflow-x-auto">
+                        <CorrelogramChart lags={acf.lags} values={acf.values} ciUpper={acf.ci_upper} ciLower={acf.ci_lower} label="ACF" color="#6366f1" />
+                      </div>
+                    </div>
+                    <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                      <p className="text-xs text-gray-500 mb-2 font-medium">PACF — Partial Autocorrelation Function</p>
+                      <p className="text-xs text-gray-400 mb-2">Removes indirect lag effects. Spike only at lag k → AR(k). Helps determine ARIMA order.</p>
+                      <div className="overflow-x-auto">
+                        <CorrelogramChart lags={pacf.lags} values={pacf.values} ciUpper={null} ciLower={null} label="PACF" color="#0891b2" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Included / Excluded methods ── */}
+              <div>
+                <h3 className="text-sm font-semibold text-gray-700 mb-3">Method Eligibility</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-emerald-700 mb-2">Applied Methods ({methodExplanation.included?.length || 0})</h3>
+                    <div className="space-y-1">
+                      {(methodExplanation.included || []).map((m, i) => (
+                        <div key={i} className="flex items-start gap-2 text-sm">
+                          <span className={`mt-0.5 text-xs ${m.status === 'forecasted' ? 'text-emerald-600' : 'text-amber-500'}`}>{m.status === 'forecasted' ? '✓' : '⚠'}</span>
+                          <div><span className="font-medium text-gray-700">{m.method}</span><span className="text-gray-400 ml-1 text-xs">{m.reason}</span></div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-red-600 mb-2">Excluded Methods ({methodExplanation.excluded?.length || 0})</h3>
+                    <div className="space-y-1">
+                      {(methodExplanation.excluded || []).map((m, i) => (
+                        <div key={i} className="flex items-start gap-2 text-sm">
+                          <span className="mt-0.5 text-xs text-red-400">✗</span>
+                          <div><span className="font-medium text-gray-600">{m.method}</span><span className="text-gray-400 ml-1 text-xs">{m.reason}</span></div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </Section>
+          );
+        } else {
+          sectionNodes['rationale'] = null;
+        }
+
+        /* scoring */
+        sectionNodes['scoring'] = (targetChartSpec || compositeScoreSpec) ? (
+          <Section key="scoring" title="Accuracy vs Precision & Composite Score" storageKey="tsv_scoring_open" {...dp('scoring')}>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {targetChartSpec && (
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-600 mb-1">Accuracy vs Precision</h3>
+                  <p className="text-xs text-gray-400 mb-3">Bottom-left = best (low bias, low RMSE). Star = winner.</p>
+                  <div className="w-full overflow-x-auto"><VegaLite spec={targetChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+                </div>
+              )}
+              {compositeScoreSpec && (
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-600 mb-1">Composite Score Ranking</h3>
+                  <p className="text-xs text-gray-400 mb-1">Weighted score: lower is better. Green border = winner.</p>
+                  {compositeWeights && (
+                    <p className="text-xs text-gray-400 mb-3">
+                      Weights: {Object.entries(compositeWeights).map(([k, v]) => `${k}=${(v * 100).toFixed(0)}%`).join(', ')}
+                    </p>
+                  )}
+                  <div className="w-full overflow-x-auto"><VegaLite spec={compositeScoreSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+                </div>
+              )}
+            </div>
+          </Section>
+        ) : null;
+
+        /* metrics */
+        sectionNodes['metrics'] = activeMetrics.length > 0 ? (
+          <Section key="metrics" title={`Comprehensive Metrics Comparison${isMultiMode ? ' (weighted avg)' : ''}`} storageKey="tsv_metrics_open" {...dp('metrics')}>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200 text-sm">
+                <thead><tr className="bg-gray-50">
+                  {[
+                    ['method', 'Method', false],
+                    ['mae', 'MAE', true], ['rmse', 'RMSE', true],
+                    ['bias', 'Bias', true], ['mape', 'MAPE', true], ['smape', 'sMAPE', true],
+                    ['mase', 'MASE', true],
+                    ['crps', 'CRPS', true], ['winkler_score', 'Winkler', true],
+                    ['coverage_50', 'Cov50', true], ['coverage_80', 'Cov80', true],
+                    ['coverage_90', 'Cov90', true], ['coverage_95', 'Cov95', true],
+                    ['quantile_loss', 'QLoss', true],
+                    ['n_windows', 'Win', false],
+                  ].map(([field, label, sortable]) => (
+                    <th key={field} onClick={sortable ? () => handleMetricsSort(field) : undefined}
+                      className={`px-2 py-2 text-xs font-medium text-gray-500 uppercase whitespace-nowrap ${field === 'method' ? 'text-left' : 'text-right'} ${sortable ? 'cursor-pointer hover:bg-gray-100 select-none' : ''}`}>
+                      {label}{sortable ? metricsSortIndicator(field) : ''}
+                    </th>
+                  ))}
+                  {compositeRanking && (
+                    <th onClick={() => handleMetricsSort('composite')}
+                      className="px-2 py-2 text-right text-xs font-medium text-gray-500 uppercase cursor-pointer hover:bg-gray-100 whitespace-nowrap select-none">
+                      Score{metricsSortIndicator('composite')}
+                    </th>
+                  )}
+                </tr></thead>
+                <tbody className="divide-y divide-gray-200">
+                  {sortedMetrics.map((m, idx) => {
+                    const isBest = bestMethod?.best_method === m.method;
+                    return (
+                      <tr key={idx} className={isBest ? 'bg-emerald-50' : ''}>
+                        <td className="px-2 py-2 font-medium whitespace-nowrap text-left">
+                          <span className="inline-block w-2.5 h-2.5 rounded-full mr-1.5" style={{ backgroundColor: getMethodColor(m.method) }}></span>
+                          {m.method}
+                          {isBest && <span className="ml-1.5 text-xs bg-emerald-200 text-emerald-800 px-1 py-0.5 rounded font-semibold">Best</span>}
+                        </td>
+                        {['mae', 'rmse'].map(f => (<td key={f} className={`px-2 py-2 text-right font-mono ${isBestVal(f, m[f]) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m[f])}</td>))}
+                        <td className={`px-2 py-2 text-right font-mono ${isBestVal('bias', m.bias) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m.bias)}</td>
+                        {['mape', 'smape'].map(f => (<td key={f} className={`px-2 py-2 text-right font-mono ${isBestVal(f, m[f]) ? 'text-emerald-700 font-bold' : ''}`}>{m[f] != null ? m[f].toFixed(1) + '%' : '-'}</td>))}
+                        <td className={`px-2 py-2 text-right font-mono ${isBestVal('mase', m.mase) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m.mase)}</td>
+                        {['crps', 'winkler_score'].map(f => (<td key={f} className={`px-2 py-2 text-right font-mono ${isBestVal(f, m[f]) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m[f])}</td>))}
+                        {['coverage_50', 'coverage_80', 'coverage_90', 'coverage_95'].map(f => (<td key={f} className={`px-2 py-2 text-right font-mono ${isBestVal(f, m[f]) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m[f], true)}</td>))}
+                        <td className={`px-2 py-2 text-right font-mono ${isBestVal('quantile_loss', m.quantile_loss) ? 'text-emerald-700 font-bold' : ''}`}>{fmtMetric(m.quantile_loss)}</td>
+                        <td className="px-2 py-2 text-right">{m.n_windows}</td>
+                        {compositeRanking && (<td className={`px-2 py-2 text-right font-mono font-semibold ${isBest ? 'text-emerald-700' : ''}`}>{compositeRanking[m.method] != null ? compositeRanking[m.method].toFixed(4) : '-'}</td>)}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </Section>
+        ) : null;
+
+        /* ridge */
+        sectionNodes['ridge'] = ridgePlotData ? (
+          <Section key="ridge" title="Forecast Distribution Over Time (3D)" storageKey="tsv_ridge_open" {...dp('ridge')}>
+            <p className="text-sm text-gray-500 mb-1">
+              3D surface of forecast density by horizon ({distributions?.method || 'best method'}). X = forecast value, Y = horizon month, Z = density. Dashed lines = mean per horizon.
+            </p>
+            {distributions?.horizons?.some(h => h.is_bootstrap) && (
+              <p className="text-xs text-amber-600 mb-3">Some horizons use bootstrap distributions — parametric fit was not available.</p>
+            )}
+            <div className="w-full" style={{ height: 520 }}>
+              <Plot
+                data={ridgePlotData.traces}
+                layout={{
+                  autosize: true,
+                  margin: { l: 0, r: 0, t: 10, b: 0 },
+                  paper_bgcolor: 'rgba(0,0,0,0)',
+                  scene: {
+                    xaxis: { title: { text: 'Forecast Value', font: { size: 11 } }, tickformat: ',.0f', gridcolor: '#e5e7eb', zerolinecolor: '#cbd5e1' },
+                    yaxis: { title: { text: 'Horizon (month)', font: { size: 11 } }, tickformat: 'd', gridcolor: '#e5e7eb', zerolinecolor: '#cbd5e1' },
+                    zaxis: { title: { text: 'Density', font: { size: 11 } }, gridcolor: '#e5e7eb', zerolinecolor: '#cbd5e1' },
+                    camera: { eye: { x: -1.6, y: -1.6, z: 1.0 } },
+                    bgcolor: 'rgba(0,0,0,0)',
+                  },
+                  legend: { x: 0.02, y: 0.98, bgcolor: 'rgba(255,255,255,0.7)', bordercolor: '#e5e7eb', borderwidth: 1 },
+                }}
+                config={{ responsive: true, displayModeBar: true, displaylogo: false, modeBarButtonsToRemove: ['toImage'] }}
+                style={{ width: '100%', height: '100%' }}
+                useResizeHandler
+              />
+            </div>
+          </Section>
+        ) : null;
+
+        /* evolution */
+        if (isMultiMode && activeForecasts.length > 0) {
+          sectionNodes['evolution'] = (
+            <Section key="evolution" title="Method Comparison (aggregated)" storageKey="tsv_evolution_open" {...dp('evolution')}>
+              <div className="flex items-center gap-2 mb-4 flex-wrap">
+                <span className="text-sm text-gray-600">Horizon month:</span>
+                {[1, 3, 6, 12, 18, 24].filter(p => p <= horizonLength).map(p => (
+                  <button key={p} onClick={() => setSelectedPeriod(p)}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${selectedPeriod === p ? 'bg-blue-500 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
+                    M{p}
+                  </button>
+                ))}
+              </div>
+              {racingBarsSpec
+                ? <div className="w-full overflow-x-auto"><VegaLite spec={racingBarsSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+                : <div className="text-gray-400 py-4 text-center text-sm">No comparison data</div>
+              }
+            </Section>
+          );
+        } else if (origins.length > 0 || activeForecasts.length > 0) {
+          sectionNodes['evolution'] = (
+            <Section key="evolution" title={origins.length > 0 ? 'Forecast Evolution Over Time' : 'Method Comparison'} storageKey="tsv_evolution_open" {...dp('evolution')}>
+              <p className="text-sm text-gray-500 mb-4">{origins.length > 0 ? 'See how forecasts changed at different points in time.' : 'Compare forecast values across methods for each horizon month.'}</p>
+              {origins.length > 0 && (
+                <div className="flex items-center gap-3 mb-4 flex-wrap">
+                  <button onClick={togglePlay} className={`px-4 py-2 rounded-lg text-white text-sm font-medium transition-colors ${isPlaying ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'}`}>
+                    {isPlaying ? '■ Stop' : '▶ Play'}
+                  </button>
+                  <div className="flex-1 min-w-32">
+                    <input type="range" min={0} max={origins.length - 1} value={selectedOriginIdx} onChange={e => setSelectedOriginIdx(parseInt(e.target.value))} className="w-full accent-blue-500" />
+                  </div>
+                  <div className="text-sm font-mono bg-blue-50 text-blue-800 px-3 py-1.5 rounded-lg min-w-28 text-center font-medium">{origins[selectedOriginIdx] || '-'}</div>
+                </div>
+              )}
+              <div className="flex items-center gap-2 mb-4 flex-wrap">
+                <span className="text-sm text-gray-600">Horizon month:</span>
+                {horizonLength <= 12
+                  ? Array.from({ length: horizonLength }, (_, i) => i + 1).map(p => (
+                      <button key={p} onClick={() => setSelectedPeriod(p)}
+                        className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${selectedPeriod === p ? 'bg-blue-500 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
+                        M{p}
+                      </button>
+                    ))
+                  : (
+                    <>
+                      {[1, 3, 6, 12, 18, 24].filter(p => p <= horizonLength).map(p => (
+                        <button key={p} onClick={() => setSelectedPeriod(p)}
+                          className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${selectedPeriod === p ? 'bg-blue-500 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
+                          M{p}
+                        </button>
+                      ))}
+                      <input type="range" min={1} max={horizonLength} value={selectedPeriod} onChange={e => setSelectedPeriod(parseInt(e.target.value))} className="w-28 accent-blue-500 ml-2" />
+                      <span className="text-xs font-mono text-gray-500">M{selectedPeriod}</span>
+                    </>
+                  )
+                }
+              </div>
+              {racingBarsSpec
+                ? <div className="w-full overflow-x-auto"><VegaLite spec={racingBarsSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+                : <div className="text-gray-400 py-4 text-center text-sm">No comparison data</div>
+              }
+            </Section>
+          );
+        } else {
+          sectionNodes['evolution'] = null;
+        }
+
+        /* forecast_table */
+        sectionNodes['forecast_table'] = activeForecasts.length > 0 ? (
+          <div key="forecast_table">
+            <ForecastTableWithAdjustments
+              activeForecasts={activeForecasts}
+              forecastDates={forecastDates}
+              bestMethod={bestMethod}
+              historicalData={historicalData}
+              isMultiMode={isMultiMode}
+              horizonLength={horizonLength}
+              adjustments={adjustments}
+              adjSaving={adjSaving}
+              saveAdjustment={saveAdjustment}
+              resetAllAdjustments={resetAllAdjustments}
+            />
           </div>
-        </Section>
-      )}
+        ) : null;
+
+        return sectionOrder.map(id => sectionNodes[id] || null);
+      })()}
 
       {activeMetrics.length === 0 && activeForecasts.length > 0 && !isMultiMode && (
         <div className="mb-6 bg-white rounded-lg shadow p-6">
           <h2 className="text-lg font-semibold mb-2">Backtest Metrics</h2>
           <p className="text-gray-500 text-sm">This series has insufficient history for rolling-window backtesting (needs {12 + horizonLength}+ monthly observations). Forecasts are still generated.</p>
         </div>
-      )}
-
-      {/* 3D Distribution Surface */}
-      {ridgePlotData && (
-        <Section title="Forecast Distribution Over Time (3D)" storageKey="tsv_ridge_open">
-          <p className="text-sm text-gray-500 mb-1">
-            3D surface of forecast density by horizon ({distributions?.method || 'best method'}). X = forecast value, Y = horizon month, Z = density. Dashed lines = mean per horizon.
-          </p>
-          {distributions?.horizons?.some(h => h.is_bootstrap) && (
-            <p className="text-xs text-amber-600 mb-3">Some horizons use bootstrap distributions — parametric fit was not available.</p>
-          )}
-          <div className="w-full" style={{ height: 520 }}>
-            <Plot
-              data={ridgePlotData.traces}
-              layout={{
-                autosize: true,
-                margin: { l: 0, r: 0, t: 10, b: 0 },
-                paper_bgcolor: 'rgba(0,0,0,0)',
-                scene: {
-                  xaxis: { title: { text: 'Forecast Value', font: { size: 11 } }, tickformat: ',.0f', gridcolor: '#e5e7eb', zerolinecolor: '#cbd5e1' },
-                  yaxis: { title: { text: 'Horizon (month)', font: { size: 11 } }, tickformat: 'd', gridcolor: '#e5e7eb', zerolinecolor: '#cbd5e1' },
-                  zaxis: { title: { text: 'Density', font: { size: 11 } }, gridcolor: '#e5e7eb', zerolinecolor: '#cbd5e1' },
-                  camera: { eye: { x: -1.6, y: -1.6, z: 1.0 } },
-                  bgcolor: 'rgba(0,0,0,0)',
-                },
-                legend: { x: 0.02, y: 0.98, bgcolor: 'rgba(255,255,255,0.7)', bordercolor: '#e5e7eb', borderwidth: 1 },
-              }}
-              config={{ responsive: true, displayModeBar: true, displaylogo: false, modeBarButtonsToRemove: ['toImage'] }}
-              style={{ width: '100%', height: '100%' }}
-              useResizeHandler
-            />
-          </div>
-        </Section>
-      )}
-
-      {/* Multi-mode method comparison bar chart */}
-      {isMultiMode && activeForecasts.length > 0 && (
-        <Section title="Method Comparison (aggregated)" storageKey="tsv_evolution_open">
-          <div className="flex items-center gap-2 mb-4 flex-wrap">
-            <span className="text-sm text-gray-600">Horizon month:</span>
-            {[1, 3, 6, 12, 18, 24].filter(p => p <= horizonLength).map(p => (
-              <button key={p} onClick={() => setSelectedPeriod(p)}
-                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${selectedPeriod === p ? 'bg-blue-500 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
-                M{p}
-              </button>
-            ))}
-          </div>
-          {racingBarsSpec
-            ? <div className="w-full overflow-x-auto"><VegaLite spec={racingBarsSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
-            : <div className="text-gray-400 py-4 text-center text-sm">No comparison data</div>
-          }
-        </Section>
-      )}
-
-      {/* Forecast Evolution / Racing Bars */}
-      {(origins.length > 0 || activeForecasts.length > 0) && !isMultiMode && (
-        <Section title={origins.length > 0 ? 'Forecast Evolution Over Time' : 'Method Comparison'} storageKey="tsv_evolution_open">
-          <p className="text-sm text-gray-500 mb-4">{origins.length > 0 ? 'See how forecasts changed at different points in time.' : 'Compare forecast values across methods for each horizon month.'}</p>
-
-          {origins.length > 0 && (
-            <div className="flex items-center gap-3 mb-4 flex-wrap">
-              <button onClick={togglePlay} className={`px-4 py-2 rounded-lg text-white text-sm font-medium transition-colors ${isPlaying ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'}`}>
-                {isPlaying ? '■ Stop' : '▶ Play'}
-              </button>
-              <div className="flex-1 min-w-32">
-                <input type="range" min={0} max={origins.length - 1} value={selectedOriginIdx} onChange={e => setSelectedOriginIdx(parseInt(e.target.value))} className="w-full accent-blue-500" />
-              </div>
-              <div className="text-sm font-mono bg-blue-50 text-blue-800 px-3 py-1.5 rounded-lg min-w-28 text-center font-medium">{origins[selectedOriginIdx] || '-'}</div>
-            </div>
-          )}
-
-          <div className="flex items-center gap-2 mb-4 flex-wrap">
-            <span className="text-sm text-gray-600">Horizon month:</span>
-            {horizonLength <= 12
-              ? Array.from({ length: horizonLength }, (_, i) => i + 1).map(p => (
-                  <button key={p} onClick={() => setSelectedPeriod(p)}
-                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${selectedPeriod === p ? 'bg-blue-500 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
-                    M{p}
-                  </button>
-                ))
-              : (
-                <>
-                  {[1, 3, 6, 12, 18, 24].filter(p => p <= horizonLength).map(p => (
-                    <button key={p} onClick={() => setSelectedPeriod(p)}
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${selectedPeriod === p ? 'bg-blue-500 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
-                      M{p}
-                    </button>
-                  ))}
-                  <input type="range" min={1} max={horizonLength} value={selectedPeriod} onChange={e => setSelectedPeriod(parseInt(e.target.value))} className="w-28 accent-blue-500 ml-2" />
-                  <span className="text-xs font-mono text-gray-500">M{selectedPeriod}</span>
-                </>
-              )
-            }
-          </div>
-
-          {racingBarsSpec
-            ? <div className="w-full overflow-x-auto"><VegaLite spec={racingBarsSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
-            : <div className="text-gray-400 py-4 text-center text-sm">No comparison data</div>
-          }
-        </Section>
-      )}
-
-      {/* Forecast Values Table */}
-      {activeForecasts.length > 0 && (
-        <Section title={`Forecast Point Values${isMultiMode ? ' (aggregated sum)' : ''} (${horizonLength} months)`} storageKey="tsv_forecast_table_open">
-          <div className="overflow-x-auto max-h-96">
-            <table className="min-w-full divide-y divide-gray-200 text-sm">
-              <thead className="sticky top-0 bg-gray-50 z-10">
-                <tr>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase sticky left-0 bg-gray-50 z-20">Method</th>
-                  {forecastDates.map((d, i) => (
-                    <th key={i} className="px-2 py-2 text-right text-xs font-medium text-gray-500 uppercase whitespace-nowrap">{d}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200">
-                {activeForecasts.map((f, idx) => (
-                  <tr key={idx} className={bestMethod?.best_method === f.method ? 'bg-emerald-50' : ''}>
-                    <td className="px-3 py-2 font-medium whitespace-nowrap sticky left-0 bg-white z-10" style={bestMethod?.best_method === f.method ? { backgroundColor: '#ecfdf5' } : {}}>
-                      <span className="inline-block w-2.5 h-2.5 rounded-full mr-2" style={{ backgroundColor: getMethodColor(f.method) }}></span>
-                      {f.method}
-                    </td>
-                    {f.point_forecast.map((v, i) => (
-                      <td key={i} className="px-2 py-2 text-right font-mono text-xs">{v?.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Section>
       )}
 
       {activeForecasts.length === 0 && activeMetrics.length === 0 && (

@@ -101,7 +101,7 @@ characterization:
   data_sufficiency:
     min_for_ml: 100
     min_for_deep_learning: 200
-    min_for_seasonal: 24  # 2 full seasonal cycles
+    sparse_obs_per_year: 5  # Fewer than 5 obs/year → sparse_data methods
 
 # Forecasting Configuration
 forecasting:

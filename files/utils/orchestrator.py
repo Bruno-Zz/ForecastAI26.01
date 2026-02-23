@@ -15,6 +15,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional
 import logging
+import uuid
 import yaml
 from pathlib import Path
 import time
@@ -43,6 +44,7 @@ from etl.etl import ETLPipeline
 from characterization.characterization import TimeSeriesCharacterizer
 from selection.best_method import MethodSelector
 from outlier.detection import OutlierDetector
+from utils.process_logger import ProcessLogger, ListHandler
 
 
 def _dask_forecast_batch(config_path: str,
@@ -330,6 +332,48 @@ class ForecastOrchestrator:
         if self.client:
             self.client.close()
             self.client = None
+
+    # -- ProcessLogger helpers --
+
+    def _make_process_logger(self) -> "ProcessLogger":
+        """Create a new ProcessLogger for this pipeline run."""
+        return ProcessLogger(self.config_path, run_id=str(uuid.uuid4()))
+
+    def _run_step(self, pl: "ProcessLogger", step_name: str, fn, *args, **kwargs):
+        """
+        Execute *fn(*args, **kwargs)* wrapped with process-log start/end.
+
+        Attaches a ListHandler to the root logger so that all log output
+        emitted during *fn* is captured and stored in zcube.process_log.
+
+        Returns:
+            The return value of fn, or raises the exception.
+        """
+        # Attach a list-handler to capture log lines for this step
+        handler = ListHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s — %(message)s"))
+        root_logger = logging.getLogger()
+        root_logger.addHandler(handler)
+
+        log_id = pl.start_step(step_name)
+        rows_out = None
+        try:
+            result = fn(*args, **kwargs)
+            # Try to infer row count from result
+            if isinstance(result, pd.DataFrame):
+                rows_out = len(result)
+            elif isinstance(result, tuple):
+                for item in result:
+                    if isinstance(item, pd.DataFrame) and not item.empty:
+                        rows_out = len(item)
+                        break
+            pl.end_step(log_id, "success", rows=rows_out, log_tail=handler.get_tail())
+            return result
+        except Exception as exc:
+            pl.end_step(log_id, "error", error=str(exc), log_tail=handler.get_tail())
+            raise
+        finally:
+            root_logger.removeHandler(handler)
 
     # -- Pipeline steps --
 
@@ -824,6 +868,10 @@ class ForecastOrchestrator:
         self.logger.info(f"Time: {datetime.now().isoformat()}")
         self.logger.info("=" * 80)
 
+        # Create process logger for this run
+        pl = self._make_process_logger()
+        self.logger.info(f"Process run_id: {pl.run_id}")
+
         # Start Dask if configured
         if self.parallel_config['backend'] == 'dask' and DASK_AVAILABLE:
             self.start_dask_client()
@@ -838,7 +886,7 @@ class ForecastOrchestrator:
                 self.logger.info(f"Skipping ETL, loading from default: {default_path}")
                 df = pd.read_parquet(default_path)
             else:
-                df = self.step_etl()
+                df = self._run_step(pl, "etl", self.step_etl)
                 output_paths['time_series'] = self.config['etl']['output_path']
 
             self.logger.info(f"Data: {len(df)} rows, {df['unique_id'].nunique()} series")
@@ -846,7 +894,7 @@ class ForecastOrchestrator:
             # Step 1b: Outlier Detection & Correction
             outlier_config = self.config.get('outlier_detection', {})
             if not skip_outlier_detection and outlier_config.get('enabled', False):
-                df, outliers_df = self.step_outlier_detection(df)
+                df, outliers_df = self._run_step(pl, "outlier_detection", self.step_outlier_detection, df)
                 output_paths['outliers'] = str(output_base / "detected_outliers.parquet")
                 corrected_path = str(Path(self.config['etl']['output_path']).parent / "time_series_corrected.parquet")
                 output_paths['time_series_corrected'] = corrected_path
@@ -862,12 +910,12 @@ class ForecastOrchestrator:
                 self.logger.info(f"Skipping characterization, loading from: {default_char_path}")
                 characteristics_df = pd.read_parquet(default_char_path)
             else:
-                characteristics_df = self.step_characterize(df)
+                characteristics_df = self._run_step(pl, "characterization", self.step_characterize, df)
                 output_paths['characteristics'] = str(output_base / "time_series_characteristics.parquet")
 
             # Step 3: Forecasting
             if not skip_forecasting:
-                forecasts_df = self.step_forecast(df, characteristics_df)
+                forecasts_df = self._run_step(pl, "forecasting", self.step_forecast, df, characteristics_df)
                 output_paths['forecasts'] = str(output_base / "forecasts_all_methods.parquet")
             else:
                 self.logger.info("Skipping forecasting step")
@@ -876,7 +924,7 @@ class ForecastOrchestrator:
 
             # Step 4: Backtesting
             if not skip_backtest:
-                metrics_df, origin_df = self.step_backtest(df, characteristics_df)
+                metrics_df, origin_df = self._run_step(pl, "backtesting", self.step_backtest, df, characteristics_df)
                 if not metrics_df.empty:
                     output_paths['metrics'] = str(output_base / "backtest_metrics.parquet")
                 if not origin_df.empty:
@@ -888,14 +936,14 @@ class ForecastOrchestrator:
 
             # Step 5: Best method selection
             if not skip_best_method and not metrics_df.empty:
-                best_methods_df = self.step_select_best_methods(metrics_df)
+                best_methods_df = self._run_step(pl, "best_method_selection", self.step_select_best_methods, metrics_df)
                 output_paths['best_methods'] = str(output_base / "best_method_per_series.parquet")
             else:
                 self.logger.info("Skipping best method selection")
 
             # Step 6: Distribution fitting
             if not skip_distributions and not forecasts_df.empty:
-                distributions_df = self.step_fit_distributions(forecasts_df)
+                distributions_df = self._run_step(pl, "distribution_fitting", self.step_fit_distributions, forecasts_df)
                 output_paths['distributions'] = str(output_base / "fitted_distributions.parquet")
             else:
                 self.logger.info("Skipping distribution fitting")

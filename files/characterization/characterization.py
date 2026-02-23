@@ -631,7 +631,7 @@ class TimeSeriesCharacterizer:
         Select forecasting methods based on detected characteristics.
 
         Decision logic (in priority order):
-            1. Very short series (< min_for_seasonal) -> sparse_data methods.
+            1. Sparse data (< 5 obs/year on average) -> sparse_data methods.
             2. Intermittent demand -> intermittent methods.
             3. High complexity -> complex methods (filtered by data sufficiency).
             4. Seasonal patterns -> seasonal methods (filtered by data sufficiency).
@@ -639,14 +639,30 @@ class TimeSeriesCharacterizer:
 
         Deep-learning and ML methods are excluded when data is insufficient.
         """
-        min_for_seasonal = self.sufficiency_cfg.get('min_for_seasonal', 24)
+        sparse_obs_per_year = self.sufficiency_cfg.get('sparse_obs_per_year', 5)
 
         # Methods that require substantial data
         ml_methods = {'LightGBM', 'XGBoost'}
         dl_methods = {'NHITS', 'NBEATS', 'PatchTST', 'TFT', 'DeepAR'}
 
-        # ----- 1. Sparse data -----
-        if chars.n_observations < min_for_seasonal:
+        # ----- 1. Sparse data: fewer than 5 observations per year on average -----
+        # Compute the span in years from the stored date range; fall back to
+        # a period-count estimate if dates are unavailable.
+        is_sparse = False
+        try:
+            if chars.date_range_start and chars.date_range_end:
+                start = pd.Timestamp(chars.date_range_start)
+                end   = pd.Timestamp(chars.date_range_end)
+                span_years = max((end - start).days / 365.25, 1 / 12)
+                obs_per_year = chars.n_observations / span_years
+                is_sparse = obs_per_year < sparse_obs_per_year
+            else:
+                # Fallback: assume monthly — fewer than 5 obs means < 5 months
+                is_sparse = chars.n_observations < sparse_obs_per_year
+        except Exception:
+            is_sparse = chars.n_observations < sparse_obs_per_year
+
+        if is_sparse:
             methods = list(self.method_selection.get('sparse_data', []))
             return self._filter_by_sufficiency(methods, chars, ml_methods, dl_methods)
 
