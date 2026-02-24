@@ -14,7 +14,7 @@ import axios from 'axios';
 const API_BASE_URL = '/api';
 
 /** Collapsible section wrapper — matches Method Selection Rationale pattern */
-const Section = ({ title, storageKey, defaultOpen = true, children }) => {
+const Section = ({ title, storageKey, defaultOpen = true, children, id }) => {
   const [open, setOpen] = useState(() => {
     const stored = localStorage.getItem(storageKey);
     return stored === null ? defaultOpen : stored === 'true';
@@ -27,7 +27,7 @@ const Section = ({ title, storageKey, defaultOpen = true, children }) => {
     });
   };
   return (
-    <div className="mb-6 bg-white rounded-lg shadow">
+    <div id={id} className="mb-6 bg-white rounded-lg shadow">
       <button
         onClick={toggle}
         className="w-full flex items-center justify-between p-4 text-left hover:bg-gray-50 transition-colors rounded-lg"
@@ -209,7 +209,7 @@ export const Dashboard = () => {
 
       {/* Summary Cards */}
       {analytics && (
-        <Section title="Summary" storageKey="dash_summary_open">
+        <Section title="Summary" storageKey="dash_summary_open" id="dash-summary">
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-3">
             {[
               { label: 'Total Series', value: analytics.total_series?.toLocaleString(), color: 'text-blue-600' },
@@ -231,7 +231,7 @@ export const Dashboard = () => {
 
       {/* Charts */}
       {(complexitySpec || bestMethodSpec) && (
-        <Section title="Charts" storageKey="dash_charts_open">
+        <Section title="Charts" storageKey="dash_charts_open" id="dash-charts">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {complexitySpec && (
               <div>
@@ -250,9 +250,9 @@ export const Dashboard = () => {
       )}
 
       {/* Series Table */}
-      <Section title={`Series Table (${filteredSeries.length} series)`} storageKey="dash_table_open">
+      <Section title={`Series Table (${filteredSeries.length} series)`} storageKey="dash_table_open" id="dash-table">
         {/* Filters */}
-        <div className="flex flex-wrap gap-3 mb-4">
+        <div id="dash-filters" className="flex flex-wrap gap-3 mb-4">
           <input
             type="text"
             placeholder="Search by ID..."

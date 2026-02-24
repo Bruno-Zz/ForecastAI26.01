@@ -1,9 +1,16 @@
 """
 ETL Pipeline for Demand Forecasting System
-Extracts data from local PostgreSQL (zcube schema) via psycopg2,
-joins zcube.item, zcube.site, and zcube.demand_actuals tables,
-transforms into standardized time series format, and loads to Parquet.
-Also bulk-inserts into zcube.demand_actuals for persistence.
+
+Two-database architecture:
+  * **Source DB** (Neon remote) — ``dp_plan.calc_dp_actual``
+    Contains the raw demand actuals that are the single source of truth.
+  * **Local DB** (localhost / zcube) — ``zcube.demand_actuals``
+    Working copy populated by this ETL and consumed by every downstream
+    pipeline step (characterization, forecasting, evaluation, API).
+
+The extract step reads from the source DB; the load step writes to the
+local DB.  If source_db is not configured the pipeline falls back to
+extracting from the local DB (self-reload mode).
 """
 
 import psycopg2
@@ -27,10 +34,10 @@ from db.db import get_conn, init_schema
 
 class ETLPipeline:
     """
-    ETL pipeline that extracts demand data from local PostgreSQL via psycopg2,
-    transforms it into a standardized time series format (unique_id, date, y),
-    and saves it as a Parquet file.  Also writes the clean data back to
-    zcube.demand_actuals for downstream consumers.
+    ETL pipeline that extracts demand data from a remote source database
+    (dp_plan.calc_dp_actual on Neon), transforms it into a standardized
+    time series format (unique_id, date, y), and loads it into the local
+    working table (zcube.demand_actuals) for downstream consumers.
     """
 
     # Frequency mapping from config shorthand to pandas offset aliases
@@ -77,7 +84,23 @@ class ETLPipeline:
         self.query_config = self.etl_config["query"]
         self.agg_config = self.etl_config.get("aggregation", {})
 
-        # Table mappings from config
+        # ── Source DB (remote Neon) — for extraction ──
+        self.source_db_config = self.config["data_source"].get("source_db")
+        if self.source_db_config:
+            self.source_demand_table = self.source_db_config.get(
+                "demand_table", "dp_plan.calc_dp_actual"
+            )
+            # Column mapping — allows the remote table to have different names
+            src_cols = self.source_db_config.get("columns", {})
+            self.src_col_item_id = src_cols.get("item_id", "item_id")
+            self.src_col_site_id = src_cols.get("site_id", "site_id")
+            self.src_col_date    = src_cols.get("date", "date")
+            self.src_col_qty     = src_cols.get("qty", "qty")
+            self.src_col_channel = src_cols.get("channel", "channel")  # None = skip
+        else:
+            self.source_demand_table = None
+
+        # ── Local DB tables (for load + downstream) ──
         self.tables = self.pg_config.get("tables", {
             "item": "zcube.item",
             "site": "zcube.site",
@@ -87,7 +110,7 @@ class ETLPipeline:
             "process_log": "zcube.process_log",
         })
 
-        # Column name overrides from config
+        # Column name overrides from config (used during transform)
         self.date_column = self.query_config.get("date_column", "date")
         self.value_column = self.query_config.get("value_column", "qty")
         self.id_column = self.query_config.get("id_column", "item_id")
@@ -101,15 +124,14 @@ class ETLPipeline:
         self.frequency = self.agg_config.get("frequency", "M")
         self.agg_method = self.agg_config.get("method", "sum")
 
-        # Output path (relative to files/ directory)
-        files_dir = Path(__file__).resolve().parent.parent
-        raw_output = self.etl_config.get("output_path", "./data/time_series.parquet")
-        self.output_path = files_dir / raw_output
+        # Output table (PostgreSQL — no parquet)
+        self.output_table = self.tables.get("demand_actual", "zcube.demand_actuals")
 
-        self.logger.info("ETLPipeline initialized (psycopg2 / local PostgreSQL)")
-        self.logger.info(f"  Config: {self.config_path}")
-        self.logger.info(f"  Tables: {self.tables}")
-        self.logger.info(f"  Output: {self.output_path}")
+        src_label = self.source_demand_table or "(local fallback)"
+        self.logger.info("ETLPipeline initialized")
+        self.logger.info(f"  Config : {self.config_path}")
+        self.logger.info(f"  Source : {src_label}")
+        self.logger.info(f"  Output : {self.output_table}")
 
     # ------------------------------------------------------------------
     # Schema initialisation
@@ -125,10 +147,75 @@ class ETLPipeline:
     # Extraction
     # ------------------------------------------------------------------
 
-    def _build_extract_query(self) -> str:
+    # ------------------------------------------------------------------
+    # Source DB connection helper
+    # ------------------------------------------------------------------
+
+    def _get_source_conn(self):
         """
-        Build the SQL query that joins item, site, and demand_actuals.
-        Returns a parameterised query with %s placeholders for date bounds.
+        Return a psycopg2 connection to the **source** database (remote Neon).
+        Falls back to the local DB if source_db is not configured.
+        """
+        cfg = self.source_db_config
+        if cfg:
+            return psycopg2.connect(
+                host=cfg["host"],
+                port=cfg.get("port", 5432),
+                database=cfg["database"],
+                user=cfg["user"],
+                password=cfg["password"],
+                sslmode=cfg.get("sslmode", "require"),
+            )
+        # Fallback: use local DB
+        return get_conn(str(self.config_path))
+
+    # ------------------------------------------------------------------
+    # Query builders
+    # ------------------------------------------------------------------
+
+    def _build_source_extract_query(self) -> str:
+        """
+        Build the SQL query for the *remote* source table
+        (dp_plan.calc_dp_actual).  No joins — the source table is a flat
+        fact table; we construct unique_id from item_id || '_' || site_id.
+        """
+        tbl = self.source_demand_table
+        col_item = self.src_col_item_id
+        col_site = self.src_col_site_id
+        col_date = self.src_col_date
+        col_qty  = self.src_col_qty
+        col_chan  = self.src_col_channel
+
+        where_clauses: List[str] = []
+        if self.min_date:
+            where_clauses.append(f"d.{col_date} >= %(min_date)s")
+        if self.max_date:
+            where_clauses.append(f"d.{col_date} <= %(max_date)s")
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        channel_expr = f"d.{col_chan}" if col_chan else "''"
+
+        query = f"""
+            SELECT
+                CAST(d.{col_item} AS TEXT) || '_' || CAST(d.{col_site} AS TEXT)
+                    AS unique_id,
+                d.{col_item}  AS item_id,
+                d.{col_site}  AS site_id,
+                {channel_expr} AS channel,
+                d.{col_date}  AS date,
+                d.{col_qty}   AS y,
+                ''            AS item_name,
+                ''            AS site_name
+            FROM {tbl} d
+            {where_sql}
+            ORDER BY 1, d.{col_date}
+        """
+        return query
+
+    def _build_local_extract_query(self) -> str:
+        """
+        Fallback query when source_db is not configured — reads from the
+        local zcube.demand_actuals table (self-reload mode).
         """
         demand_table = self.tables.get("demand_actual", "zcube.demand_actuals")
         item_table   = self.tables.get("item",           "zcube.item")
@@ -139,19 +226,20 @@ class ETLPipeline:
             where_clauses.append(f"d.{self.date_column} >= %(min_date)s")
         if self.max_date:
             where_clauses.append(f"d.{self.date_column} <= %(max_date)s")
-
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
         query = f"""
             SELECT
-                CAST(d.item_id AS TEXT) || '_' || CAST(d.site_id AS TEXT) AS unique_id,
+                COALESCE(d.unique_id,
+                         CAST(d.item_id AS TEXT) || '_' || CAST(d.site_id AS TEXT)
+                ) AS unique_id,
                 d.item_id,
                 d.site_id,
                 d.channel,
                 d.{self.date_column}  AS date,
                 d.{self.value_column} AS y,
-                COALESCE(i.name, '') AS item_name,
-                COALESCE(s.name, '') AS site_name
+                COALESCE(d.item_name, i.name, '') AS item_name,
+                COALESCE(d.site_name, s.name, '') AS site_name
             FROM {demand_table} d
             LEFT JOIN {item_table} i ON d.item_id = i.id
             LEFT JOIN {site_table} s ON d.site_id = s.id
@@ -160,9 +248,17 @@ class ETLPipeline:
         """
         return query
 
+    # ------------------------------------------------------------------
+    # Extraction
+    # ------------------------------------------------------------------
+
     def extract(self) -> pd.DataFrame:
         """
-        Extract data from local PostgreSQL via psycopg2.
+        Extract demand data.
+
+        When ``source_db`` is configured, connects to the remote Neon
+        database and reads from ``dp_plan.calc_dp_actual``.  Otherwise
+        falls back to the local ``zcube.demand_actuals`` table.
 
         Returns:
             Raw DataFrame with columns:
@@ -174,11 +270,18 @@ class ETLPipeline:
         if self.max_date:
             params["max_date"] = self.max_date
 
-        query = self._build_extract_query()
-        self.logger.info("Executing extraction query against local PostgreSQL...")
+        use_remote = self.source_db_config is not None
+        if use_remote:
+            query = self._build_source_extract_query()
+            label = f"remote ({self.source_demand_table})"
+        else:
+            query = self._build_local_extract_query()
+            label = f"local ({self.output_table})"
+
+        self.logger.info(f"Extracting from {label}...")
         self.logger.debug(f"Query:\n{query}")
 
-        conn = get_conn(str(self.config_path))
+        conn = self._get_source_conn()
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute(query, params or None)
@@ -186,7 +289,7 @@ class ETLPipeline:
                 cols = [desc[0] for desc in cur.description]
             df = pd.DataFrame(rows, columns=cols)
         except Exception as e:
-            self.logger.error(f"Extraction failed: {e}")
+            self.logger.error(f"Extraction from {label} failed: {e}")
             raise
         finally:
             conn.close()
@@ -395,33 +498,19 @@ class ETLPipeline:
 
     def load(self, df: pd.DataFrame) -> Path:
         """
-        Save the transformed DataFrame to Parquet and write to local DB.
+        Write the transformed DataFrame to PostgreSQL (zcube.demand_actuals).
 
         Args:
             df: Transformed DataFrame.
 
         Returns:
-            Path to the saved Parquet file.
+            The DataFrame (for downstream pipeline consumption).
         """
-        # --- Parquet ---
-        output = Path(self.output_path)
-        output.parent.mkdir(parents=True, exist_ok=True)
-
-        compression = self.config.get("output", {}).get("compression", "snappy")
-
-        # Parquet gets the y column (not qty) — keep it clean
-        parquet_df = df[["unique_id", "date", "y"]].copy()
-        parquet_df.to_parquet(output, index=False, compression=compression)
-        file_size_mb = output.stat().st_size / (1024 * 1024)
-        self.logger.info(f"Saved Parquet: {output} ({file_size_mb:.2f} MB)")
-
-        # --- Database ---
-        try:
-            rows_inserted = self._load_to_db(df)
-        except Exception as e:
-            self.logger.warning(f"DB load skipped due to error: {e}")
-
-        return output
+        rows_inserted = self._load_to_db(df)
+        self.logger.info(
+            f"Loaded {rows_inserted:,} rows into {self.output_table}"
+        )
+        return df
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -444,7 +533,7 @@ class ETLPipeline:
         )
         self.logger.info(f"  Tables    : {list(self.tables.values())}")
         self.logger.info(f"  Frequency : {self.frequency}")
-        self.logger.info(f"  Output    : {self.output_path}")
+        self.logger.info(f"  Output    : {self.output_table}")
         self.logger.info("=" * 80)
 
         try:
@@ -462,7 +551,7 @@ class ETLPipeline:
 
             # 3. Load
             self.logger.info("\n--- LOAD ---")
-            output_path = self.load(clean_df)
+            self.load(clean_df)
 
             # Summary
             elapsed = (datetime.now() - start_time).total_seconds()
@@ -475,7 +564,7 @@ class ETLPipeline:
                 self.logger.info(
                     f"  Date range      : {clean_df['date'].min()} to {clean_df['date'].max()}"
                 )
-            self.logger.info(f"  Output file     : {output_path}")
+            self.logger.info(f"  Output table    : {self.output_table}")
             self.logger.info("=" * 80)
 
             return clean_df

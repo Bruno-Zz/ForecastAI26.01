@@ -53,7 +53,7 @@ const parseUniqueId = (uid) => {
 const SECTION_ORDER_KEY = 'tsv_section_order';
 const DEFAULT_SECTION_ORDER = [
   'toggles', 'main_chart', 'forecast_table', 'outlier',
-  'rationale', 'scoring', 'metrics', 'ridge', 'evolution',
+  'rationale', 'scoring', 'metrics', 'hyperparameters', 'ridge', 'evolution',
 ];
 
 function useSectionOrder() {
@@ -88,7 +88,7 @@ function useSectionOrder() {
 
 // ---- Collapsible section with drag-and-drop handle ----
 const Section = ({
-  title, storageKey, defaultOpen = true, children, badge,
+  title, storageKey, defaultOpen = true, children, badge, id,
   dragId, dragOver, onDragStart, onDragOver, onDrop, onDragEnd,
 }) => {
   const [open, setOpen] = useState(() => {
@@ -105,6 +105,7 @@ const Section = ({
 
   return (
     <div
+      id={id}
       className={`mb-6 bg-white rounded-lg shadow transition-all ${isDragTarget ? 'ring-2 ring-blue-400 ring-offset-1' : ''}`}
       draggable={!!dragId}
       onDragStart={dragId ? (e) => { e.dataTransfer.effectAllowed = 'move'; onDragStart(dragId); } : undefined}
@@ -612,6 +613,7 @@ export const TimeSeriesViewer = () => {
 
   // ---- Method visibility ----
   const [visibleMethods, setVisibleMethods] = useState({});
+  const [bandVisibleMethods, setBandVisibleMethods] = useState({});
 
   // ---- Date-range zoom ----
   const [zoomStart, setZoomStart] = useState(0);
@@ -627,6 +629,11 @@ export const TimeSeriesViewer = () => {
   const [adjustments, setAdjustments] = useState({});
   const [adjSaving, setAdjSaving] = useState({}); // key → true while saving
   const adjDebounceRef = useRef({});             // key → timeout id
+
+  // ---- Run Forecast button state ----
+  const [forecastJobId, setForecastJobId] = useState(null);
+  const [forecastJobStatus, setForecastJobStatus] = useState(null); // null|pending|running|success|error
+  const forecastPollRef = useRef(null);
 
   // ---- Section drag-and-drop order ----
   const { order: sectionOrder, reorder: reorderSections } = useSectionOrder();
@@ -799,6 +806,17 @@ export const TimeSeriesViewer = () => {
   const selectedItem = selectedItems[0] || '';
   const selectedSite = selectedSites[0] || '';
 
+  // All unique_ids from the current item × site selection
+  const forecastUids = useMemo(() => {
+    const uids = [];
+    selectedItems.forEach(item => {
+      selectedSites.forEach(site => {
+        if (item && site) uids.push(`${item}_${site}`);
+      });
+    });
+    return uids;
+  }, [selectedItems, selectedSites]);
+
   /* ---------- data loading ---------- */
   useEffect(() => {
     loadData();
@@ -848,7 +866,26 @@ export const TimeSeriesViewer = () => {
         setCompositeRanking(metricsRes.value.data.composite_ranking || null);
         setCompositeWeights(metricsRes.value.data.composite_weights || null);
       }
-      if (bestRes.status === 'fulfilled') setBestMethod(bestRes.value.data);
+      if (bestRes.status === 'fulfilled') {
+        setBestMethod(bestRes.value.data);
+        // Default band visibility: only best method shows confidence areas
+        if (forecastRes.status === 'fulfilled') {
+          const fcasts = forecastRes.value.data.forecasts || [];
+          const bestName = bestRes.value.data?.best_method || fcasts[0]?.method;
+          const bv = {};
+          fcasts.forEach(f => { bv[f.method] = f.method === bestName; });
+          setBandVisibleMethods(prev => {
+            // On first load, use defaults; on reload, keep user preferences
+            const hasExisting = Object.keys(prev).length > 0;
+            if (hasExisting) {
+              const merged = { ...bv };
+              Object.entries(prev).forEach(([k, v]) => { if (k in merged) merged[k] = v; });
+              return merged;
+            }
+            return bv;
+          });
+        }
+      }
       if (explainRes.status === 'fulfilled') setMethodExplanation(explainRes.value.data);
       if (distRes.status === 'fulfilled') setDistributions(distRes.value.data);
       if (originsRes.status === 'fulfilled') {
@@ -862,6 +899,56 @@ export const TimeSeriesViewer = () => {
       setLoading(false);
     }
   };
+
+  // ---- Run Forecast handler ----
+  const handleRunForecast = useCallback(async () => {
+    if (forecastUids.length === 0) return;
+    try {
+      setForecastJobStatus('pending');
+      const res = await axios.post(`${API_BASE_URL}/pipeline/run-forecast`, {
+        series: forecastUids,
+        all_methods: true,
+      });
+      const jobId = res.data.job_id;
+      setForecastJobId(jobId);
+      setForecastJobStatus('running');
+
+      // Poll job status every 1.5 s
+      if (forecastPollRef.current) clearInterval(forecastPollRef.current);
+      forecastPollRef.current = setInterval(async () => {
+        try {
+          const r = await axios.get(`${API_BASE_URL}/pipeline/jobs/${jobId}`);
+          const st = r.data.status;
+          setForecastJobStatus(st);
+          if (st === 'success' || st === 'error') {
+            clearInterval(forecastPollRef.current);
+            forecastPollRef.current = null;
+            if (st === 'success') {
+              // Refresh the API data cache, then reload this series
+              try { await axios.post(`${API_BASE_URL}/reload`); } catch { /* non-fatal */ }
+              loadData();
+            }
+          }
+        } catch { /* ignore transient poll errors */ }
+      }, 1500);
+    } catch (err) {
+      setForecastJobStatus('error');
+      console.error('Run forecast failed:', err);
+    }
+  }, [forecastUids, loadData]);
+
+  // Cleanup poll on unmount
+  useEffect(() => {
+    return () => { if (forecastPollRef.current) clearInterval(forecastPollRef.current); };
+  }, []);
+
+  // Auto-clear success/error badge after 8 seconds
+  useEffect(() => {
+    if (forecastJobStatus === 'success' || forecastJobStatus === 'error') {
+      const timer = setTimeout(() => setForecastJobStatus(null), 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [forecastJobStatus]);
 
   // ---- Load / save adjustments ----
   const loadAdjustments = useCallback(async () => {
@@ -954,6 +1041,7 @@ export const TimeSeriesViewer = () => {
   }, [isPlaying, origins.length]);
 
   const toggleMethod = (method) => setVisibleMethods(prev => ({ ...prev, [method]: !prev[method] }));
+  const toggleBand = (method) => setBandVisibleMethods(prev => ({ ...prev, [method]: !prev[method] }));
 
   // Active data source: multi-series aggregated OR single series
   const activeHistoricalData = multiSeriesData ? multiSeriesData.historical : historicalData;
@@ -977,18 +1065,24 @@ export const TimeSeriesViewer = () => {
       return { allData: [], allDates: [] };
     const data = [];
     const dateSet = new Set();
+
+    // Historical demand → stacked bars (layer: 'bar', barSeries: 'Demand')
     activeHistoricalData.date.forEach((date, i) => {
       dateSet.add(date);
-      data.push({ date, value: activeHistoricalData.value[i], type: 'Actual', method: 'Historical', lo90: null, hi90: null, lo50: null, hi50: null, layer: 'line' });
+      const val = activeHistoricalData.value[i];
+      data.push({ date, value: val, type: 'Actual', method: 'Historical',
+        lo90: null, hi90: null, lo50: null, hi50: null,
+        layer: 'bar', barSeries: 'Demand', barValue: val });
     });
 
-    // Forecast data + adjustment/override marker points
+    // Forecast data + bars for best method + adjustment/override stacking
     if (activeForecasts.length > 0) {
       const lastDate = new Date(activeHistoricalData.date[activeHistoricalData.date.length - 1]);
 
       // Use only the best method's forecast to compute base values for adjustments
       const bestFc = activeForecasts.find(f => f.method === bestMethod?.best_method) || activeForecasts[0];
 
+      // All forecast methods → lines + bands (unchanged)
       activeForecasts.forEach(forecast => {
         const quantiles = forecast.quantiles || {};
         forecast.point_forecast.forEach((value, i) => {
@@ -1003,7 +1097,7 @@ export const TimeSeriesViewer = () => {
         });
       });
 
-      // Add adjustment / override marker data points (plotted over forecast)
+      // Add adjustment / override marker data points (plotted over forecast lines)
       if (bestFc) {
         bestFc.point_forecast.forEach((baseValue, i) => {
           const d = new Date(lastDate); d.setUTCMonth(d.getUTCMonth() + i + 1);
@@ -1103,17 +1197,59 @@ export const TimeSeriesViewer = () => {
     const maxDate = allDates[Math.min(zoomEnd, allDates.length - 1)] || allDates[allDates.length - 1];
     const filtered = allData.filter(d => {
       if (d.type !== 'Actual' && d.method !== 'Historical' && visibleMethods[d.method] === false) return false;
+      // Filter bands by bandVisibleMethods
+      if (d.layer === 'band' && bandVisibleMethods[d.method] === false) return false;
       return d.date >= minDate && d.date <= maxDate;
     });
     if (filtered.length === 0) return null;
     const colorScale = { field: 'method', type: 'nominal', scale: activeMethodDomain, legend: { title: 'Method' } };
     const hasBands = filtered.some(d => d.layer === 'band');
+    const hasBars  = filtered.some(d => d.layer === 'bar');
     const layers = [];
+
+    // ---- Demand bars (historical only) ----
+    if (hasBars) {
+      layers.push({
+        transform: [{ filter: "datum.layer === 'bar'" }],
+        mark: { type: 'bar', tooltip: true, color: '#374151', opacity: 0.55 },
+        encoding: {
+          x: { field: 'date', type: 'temporal', title: 'Date',
+               axis: { format: '%Y-%m' },
+               timeUnit: 'yearmonth' },
+          y: { field: 'value', type: 'quantitative', title: 'Demand' },
+          tooltip: [
+            { field: 'date', type: 'temporal', title: 'Date', format: '%Y-%m' },
+            { field: 'value', type: 'quantitative', title: 'Demand', format: ',.0f' },
+          ]
+        }
+      });
+    }
+
+    // ---- Confidence bands (behind forecast lines) ----
     if (hasBands) {
       layers.push({ transform: [{ filter: "datum.layer === 'band'" }], mark: { type: 'area', opacity: 0.12 }, encoding: { x: { field: 'date', type: 'temporal' }, y: { field: 'lo90', type: 'quantitative' }, y2: { field: 'hi90' }, color: { ...colorScale, legend: null } } });
       layers.push({ transform: [{ filter: "datum.layer === 'band'" }], mark: { type: 'area', opacity: 0.25 }, encoding: { x: { field: 'date', type: 'temporal' }, y: { field: 'lo50', type: 'quantitative' }, y2: { field: 'hi50' }, color: { ...colorScale, legend: null } } });
     }
-    layers.push({ transform: [{ filter: "datum.layer === 'line'" }], mark: { type: 'line', point: false, strokeWidth: 2 }, encoding: { x: { field: 'date', type: 'temporal', title: 'Date', axis: { format: '%Y-%m' } }, y: { field: 'value', type: 'quantitative', title: 'Demand', scale: { zero: false } }, color: colorScale, strokeDash: { field: 'type', type: 'nominal', scale: { domain: ['Actual', 'Forecast'], range: [[1, 0], [5, 5]] }, legend: null }, opacity: { condition: { test: "datum.type === 'Actual'", value: 1 }, value: 0.85 }, tooltip: [{ field: 'date', type: 'temporal', title: 'Date' }, { field: 'value', type: 'quantitative', title: 'Value', format: ',.0f' }, { field: 'method', type: 'nominal', title: 'Method' }, { field: 'type', type: 'nominal', title: 'Type' }] } });
+
+    // ---- Forecast method lines (excluding Historical which is now bars) ----
+    layers.push({
+      transform: [{ filter: "datum.layer === 'line'" }],
+      mark: { type: 'line', point: false, strokeWidth: 2 },
+      encoding: {
+        x: { field: 'date', type: 'temporal', title: 'Date', axis: { format: '%Y-%m' } },
+        y: { field: 'value', type: 'quantitative', title: 'Demand', scale: { zero: false } },
+        color: colorScale,
+        strokeDash: { field: 'type', type: 'nominal',
+          scale: { domain: ['Actual', 'Forecast'], range: [[1, 0], [5, 5]] }, legend: null },
+        opacity: { value: 0.85 },
+        tooltip: [
+          { field: 'date', type: 'temporal', title: 'Date' },
+          { field: 'value', type: 'quantitative', title: 'Value', format: ',.0f' },
+          { field: 'method', type: 'nominal', title: 'Method' },
+          { field: 'type', type: 'nominal', title: 'Type' },
+        ]
+      }
+    });
 
     // "Final Forecast" line — only drawn when any adjustments/overrides exist.
     // It uses the best-method forecast as base, applies adjustments/overrides.
@@ -1180,7 +1316,7 @@ export const TimeSeriesViewer = () => {
     }
 
     return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: 380, autosize: { type: 'fit', contains: 'padding' }, data: { values: filtered }, layer: layers, config: { view: { stroke: null } } };
-  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, activeMethodDomain]);
+  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, bandVisibleMethods, activeMethodDomain]);
 
   const racingBarsSpec = useMemo(() => {
     const src = originForecasts?.forecasts?.length > 0 ? originForecasts.forecasts : activeForecasts;
@@ -1386,9 +1522,9 @@ export const TimeSeriesViewer = () => {
   return (
     <div className="p-4 sm:p-6">
 
-      {/* Item / Site Selector */}
-      <div className="mb-6 bg-white rounded-lg shadow p-4">
-        <div className="flex flex-col sm:flex-row gap-3 sm:gap-4">
+      {/* Item / Site Selector — sticky at top */}
+      <div id="tsv-selector" className="mb-6 bg-white rounded-lg shadow p-4 sticky top-0 z-30">
+        <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 items-end">
           <SearchableDropdown
             label="Item"
             values={selectedItems}
@@ -1406,6 +1542,51 @@ export const TimeSeriesViewer = () => {
             disabled={selectedItems.length === 0 || availableSites.length === 0}
             placeholder="Search site..."
           />
+
+          {/* Run Forecast button */}
+          <div className="flex items-center gap-2 flex-shrink-0 pb-0.5">
+            <button
+              onClick={handleRunForecast}
+              disabled={forecastUids.length === 0 || forecastJobStatus === 'running' || forecastJobStatus === 'pending'}
+              className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all whitespace-nowrap ${
+                forecastUids.length === 0 || forecastJobStatus === 'running' || forecastJobStatus === 'pending'
+                  ? 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                  : 'bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 shadow-sm'
+              }`}
+              title={forecastUids.length === 0
+                ? 'Select at least one item and site'
+                : `Run all forecast methods for ${forecastUids.length} series`}
+            >
+              {forecastJobStatus === 'running' || forecastJobStatus === 'pending' ? (
+                <span className="flex items-center gap-1.5">
+                  <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                  </svg>
+                  Running...
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 3l14 9-14 9V3z"/>
+                  </svg>
+                  Run Forecast
+                </span>
+              )}
+            </button>
+
+            {/* Status badge */}
+            {forecastJobStatus === 'success' && (
+              <span className="text-emerald-600 text-xs font-medium flex items-center gap-1 animate-fade-in">
+                &#10003; Done
+              </span>
+            )}
+            {forecastJobStatus === 'error' && (
+              <span className="text-red-600 text-xs font-medium flex items-center gap-1">
+                &#10005; Failed
+              </span>
+            )}
+          </div>
         </div>
         <div className="mt-3 text-xs text-gray-400 flex flex-wrap gap-2 items-center">
           {isMultiMode ? (
@@ -1423,7 +1604,7 @@ export const TimeSeriesViewer = () => {
       </div>
 
       {/* Header */}
-      <div className="mb-6">
+      <div id="tsv-header" className="mb-6">
         <h1 className="text-2xl sm:text-3xl font-bold mb-3">Series: {decodedId}</h1>
         {characteristics && (
           <div className="flex flex-wrap gap-2 text-sm">
@@ -1455,15 +1636,40 @@ export const TimeSeriesViewer = () => {
 
         /* toggles */
         sectionNodes['toggles'] = activeForecasts.length > 0 ? (
-          <Section key="toggles" title="Method Toggles" storageKey="tsv_toggles_open" {...dp('toggles')}>
+          <Section key="toggles" id="tsv-toggles" title="Method Toggles" storageKey="tsv_toggles_open" {...dp('toggles')}>
+            <p className="text-xs text-gray-400 mb-2">Click a method to show/hide its line. Click the <span className="inline-block align-middle" style={{width:14,height:10,background:'rgba(99,102,241,0.25)',borderRadius:2,border:'1px solid rgba(99,102,241,0.5)'}}></span> icon to toggle its confidence bands.</p>
             <div className="flex flex-wrap gap-2">
-              {activeForecasts.map(f => (
-                <button key={f.method} onClick={() => toggleMethod(f.method)}
-                  className={`px-3 py-1.5 rounded-full text-sm font-medium border-2 transition-all ${visibleMethods[f.method] ? 'text-white border-transparent' : 'bg-white text-gray-400 border-gray-200'}`}
-                  style={visibleMethods[f.method] ? { backgroundColor: getMethodColor(f.method), borderColor: getMethodColor(f.method) } : {}}>
-                  {f.method}{bestMethod?.best_method === f.method && ' ★'}
-                </button>
-              ))}
+              {activeForecasts.map(f => {
+                const isVis = visibleMethods[f.method] !== false;
+                const hasBands = f.quantiles && Object.keys(f.quantiles).length > 1;
+                const bandOn = bandVisibleMethods[f.method] === true;
+                return (
+                  <div key={f.method} className="flex items-center gap-0.5">
+                    <button onClick={() => toggleMethod(f.method)}
+                      className={`px-3 py-1.5 text-sm font-medium border-2 transition-all ${hasBands ? 'rounded-l-full' : 'rounded-full'} ${isVis ? 'text-white border-transparent' : 'bg-white text-gray-400 border-gray-200'}`}
+                      style={isVis ? { backgroundColor: getMethodColor(f.method), borderColor: getMethodColor(f.method) } : {}}>
+                      {f.method}{bestMethod?.best_method === f.method && ' \u2605'}
+                    </button>
+                    {hasBands && (
+                      <button onClick={() => toggleBand(f.method)}
+                        title={bandOn ? `Hide confidence bands for ${f.method}` : `Show confidence bands for ${f.method}`}
+                        className={`px-1.5 py-1.5 text-xs font-medium border-2 rounded-r-full transition-all ${bandOn ? 'text-white border-transparent' : 'bg-white border-gray-200'}`}
+                        style={bandOn ? { backgroundColor: getMethodColor(f.method), borderColor: getMethodColor(f.method), opacity: 0.7 } : { color: '#9ca3af' }}>
+                        <svg width="16" height="14" viewBox="0 0 16 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+                          <path d="M0 10 Q4 2 8 7 Q12 12 16 4" stroke={bandOn ? 'white' : '#9ca3af'} strokeWidth="1.5" fill="none"/>
+                          <path d="M0 10 Q4 2 8 7 Q12 12 16 4 L16 10 Q12 14 8 11 Q4 8 0 14 Z" fill={bandOn ? 'rgba(255,255,255,0.4)' : 'rgba(156,163,175,0.2)'}/>
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex gap-3 mt-2">
+              <button onClick={() => { const bv = {}; activeForecasts.forEach(f => { bv[f.method] = true; }); setBandVisibleMethods(bv); }}
+                className="text-xs text-blue-500 hover:text-blue-700 hover:underline">Show all bands</button>
+              <button onClick={() => { const bv = {}; activeForecasts.forEach(f => { bv[f.method] = false; }); setBandVisibleMethods(bv); }}
+                className="text-xs text-gray-400 hover:text-gray-600 hover:underline">Hide all bands</button>
             </div>
           </Section>
         ) : null;
@@ -1482,7 +1688,7 @@ export const TimeSeriesViewer = () => {
 
         /* main_chart */
         sectionNodes['main_chart'] = (
-          <Section key="main_chart" title={`Historical Data & Forecasts${horizonLength ? ` (${horizonLength}-month horizon)` : ''}`} storageKey="tsv_main_chart_open" {...dp('main_chart')}>
+          <Section key="main_chart" id="tsv-main-chart" title={`Historical Data & Forecasts${horizonLength ? ` (${horizonLength}-month horizon)` : ''}`} storageKey="tsv_main_chart_open" {...dp('main_chart')}>
             <p className="text-sm text-gray-500 mb-4">Shaded bands: 50% (dark) and 90% (light) prediction intervals.</p>
             {mainChartSpec ? (
               <div className="w-full overflow-x-auto"><VegaLite spec={mainChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
@@ -1709,7 +1915,7 @@ export const TimeSeriesViewer = () => {
 
         /* scoring */
         sectionNodes['scoring'] = (targetChartSpec || compositeScoreSpec) ? (
-          <Section key="scoring" title="Accuracy vs Precision & Composite Score" storageKey="tsv_scoring_open" {...dp('scoring')}>
+          <Section key="scoring" id="tsv-scoring" title="Accuracy vs Precision & Composite Score" storageKey="tsv_scoring_open" {...dp('scoring')}>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {targetChartSpec && (
                 <div>
@@ -1787,6 +1993,101 @@ export const TimeSeriesViewer = () => {
                   })}
                 </tbody>
               </table>
+            </div>
+          </Section>
+        ) : null;
+
+        /* hyperparameters — per-method detailed parameter cards */
+        sectionNodes['hyperparameters'] = activeForecasts.some(f => f.hyperparameters) ? (
+          <Section key="hyperparameters" title="Model Hyperparameters &amp; Configuration" storageKey="tsv_hyperparams_open" {...dp('hyperparameters')}>
+            <p className="text-sm text-gray-500 mb-4">
+              Exact parameters used for each forecast method. Use these to reproduce results outside this application.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {activeForecasts.filter(f => f.hyperparameters).map(f => {
+                const hp = f.hyperparameters;
+                const isBest = bestMethod?.best_method === f.method;
+                // Separate description from params
+                const description = hp.description;
+                // Group params: common vs method-specific vs fitted
+                const commonKeys = ['horizon', 'frequency', 'confidence_levels', 'n_observations'];
+                const metaKeys = ['description', 'method_family', 'training_time_seconds', 'prediction_intervals_available'];
+                const fittedKeys = Object.keys(hp).filter(k => k.startsWith('fitted_'));
+                const specificKeys = Object.keys(hp).filter(k =>
+                  !commonKeys.includes(k) && !metaKeys.includes(k) && !fittedKeys.includes(k)
+                );
+                const renderVal = (v) => {
+                  if (v === null || v === undefined) return <span className="text-gray-400">null</span>;
+                  if (typeof v === 'boolean') return <span className={v ? 'text-emerald-600' : 'text-red-500'}>{v.toString()}</span>;
+                  if (Array.isArray(v)) return <span className="text-indigo-600">[{v.join(', ')}]</span>;
+                  if (typeof v === 'number') return <span className="text-blue-700">{Number.isInteger(v) ? v : v.toFixed(4)}</span>;
+                  return <span className="text-gray-800">{String(v)}</span>;
+                };
+                return (
+                  <div key={f.method} className={`rounded-lg border p-4 text-sm ${isBest ? 'border-emerald-400 bg-emerald-50/50' : 'border-gray-200 bg-white'}`}>
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: getMethodColor(f.method) }}></span>
+                      <span className="font-semibold text-gray-900">{f.method}</span>
+                      {hp.method_family && <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">{hp.method_family}</span>}
+                      {isBest && <span className="text-xs bg-emerald-200 text-emerald-800 px-1.5 py-0.5 rounded font-semibold">Best</span>}
+                    </div>
+                    {description && <p className="text-xs text-gray-500 mb-3 leading-relaxed">{description}</p>}
+
+                    {/* Common config */}
+                    <div className="mb-2">
+                      <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Configuration</div>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono text-xs">
+                        {commonKeys.filter(k => hp[k] !== undefined).map(k => (
+                          <React.Fragment key={k}>
+                            <span className="text-gray-500">{k}</span>
+                            <span className="text-right">{renderVal(hp[k])}</span>
+                          </React.Fragment>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Method-specific params */}
+                    {specificKeys.length > 0 && (
+                      <div className="mb-2">
+                        <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Method Parameters</div>
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono text-xs">
+                          {specificKeys.map(k => (
+                            <React.Fragment key={k}>
+                              <span className="text-gray-500">{k}</span>
+                              <span className="text-right">{renderVal(hp[k])}</span>
+                            </React.Fragment>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Fitted / estimated params from the model */}
+                    {fittedKeys.length > 0 && (
+                      <div className="mb-2">
+                        <div className="text-xs font-semibold text-indigo-500 uppercase tracking-wide mb-1">Fitted (estimated)</div>
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono text-xs">
+                          {fittedKeys.map(k => (
+                            <React.Fragment key={k}>
+                              <span className="text-gray-500">{k.replace('fitted_', '')}</span>
+                              <span className="text-right">{renderVal(hp[k])}</span>
+                            </React.Fragment>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Training time + PI availability */}
+                    <div className="mt-2 pt-2 border-t border-gray-100 flex items-center gap-3 text-xs text-gray-400">
+                      {hp.training_time_seconds != null && <span>Training: {hp.training_time_seconds}s</span>}
+                      {hp.prediction_intervals_available != null && (
+                        <span className={hp.prediction_intervals_available ? 'text-emerald-500' : 'text-amber-500'}>
+                          PI: {hp.prediction_intervals_available ? 'Yes' : 'No'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </Section>
         ) : null;
@@ -1893,7 +2194,7 @@ export const TimeSeriesViewer = () => {
 
         /* forecast_table */
         sectionNodes['forecast_table'] = activeForecasts.length > 0 ? (
-          <div key="forecast_table">
+          <div key="forecast_table" id="tsv-forecast-table">
             <ForecastTableWithAdjustments
               activeForecasts={activeForecasts}
               forecastDates={forecastDates}

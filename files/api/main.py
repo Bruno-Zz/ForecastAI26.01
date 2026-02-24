@@ -30,11 +30,18 @@ if str(_files_dir) not in sys.path:
     sys.path.insert(0, str(_files_dir))
 
 try:
-    from db.db import get_conn, init_schema as _init_db_schema
+    from db.db import get_conn, init_schema as _init_db_schema, get_schema, load_table
     _DB_AVAILABLE = True
 except Exception as _db_import_err:
     _DB_AVAILABLE = False
     logging.warning(f"db.db import failed: {_db_import_err}")
+
+try:
+    import dask.dataframe as dd
+    _DASK_AVAILABLE = True
+except ImportError:
+    _DASK_AVAILABLE = False
+    logging.warning("Dask not available; data_cache will use pandas DataFrames")
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -105,75 +112,139 @@ class MetricsData(BaseModel):
     coverage_90: Optional[float] = None
 
 
+class RunForecastRequest(BaseModel):
+    series: List[str]           # e.g., ["63530_517", "63531_518"]
+    all_methods: bool = True    # run ALL methods (not just recommended)
+
+
+# ── Helper: wrap a pandas DataFrame into a Dask DataFrame when available ──
+#
+# IMPORTANT: Dask serializes Python list/dict objects in object-dtype columns
+# to their string representation.  Tables with JSONB columns (forecast_results,
+# best_method_per_series, fitted_distributions, time_series_characteristics)
+# MUST stay as plain pandas to preserve native Python types.  Only large,
+# flat-column tables should be Dask-wrapped.
+#
+_DASK_SAFE_TABLES = {
+    "time_series", "time_series_original", "metrics",
+    "forecasts_by_origin", "outliers",
+}
+
+def _to_dask(pdf: pd.DataFrame, name: str = "") -> "pd.DataFrame | dd.DataFrame":
+    """Convert a pandas DataFrame to a Dask DataFrame when Dask is available.
+    Only wraps tables listed in _DASK_SAFE_TABLES (no JSONB columns)."""
+    if _DASK_AVAILABLE and not pdf.empty and name in _DASK_SAFE_TABLES:
+        nparts = max(1, len(pdf) // 50_000)
+        ddf = dd.from_pandas(pdf, npartitions=nparts)
+        return ddf
+    return pdf
+
+
+def _compute(df_or_ddf):
+    """Call .compute() on Dask DataFrames; return pandas DataFrames as-is."""
+    if _DASK_AVAILABLE and hasattr(df_or_ddf, 'compute'):
+        return df_or_ddf.compute()
+    return df_or_ddf
+
+
 # Helper functions
 def load_data():
-    """Load all data files into cache."""
-    data_dir = Path('./output')
+    """Load all data from PostgreSQL into cache as Dask DataFrames."""
+    if not _DB_AVAILABLE:
+        logger.warning("Database not available — cannot load data")
+        return
+
+    cfg_path = _api_config_path()
 
     try:
-        # Load time series: prefer corrected version, keep original for comparison
+        schema = get_schema(cfg_path)
+        conn = get_conn(cfg_path)
+
+        # ── time_series (corrected values, used for charts) ──
         if data_cache['time_series'] is None:
-            ts_corrected_path = Path('./data/time_series_corrected.parquet')
-            ts_path = Path('./data/time_series.parquet')
-            if ts_corrected_path.exists():
-                data_cache['time_series'] = pd.read_parquet(ts_corrected_path)
-                logger.info(f"Loaded corrected time series: {len(data_cache['time_series'])} rows")
-            elif ts_path.exists():
-                data_cache['time_series'] = pd.read_parquet(ts_path)
-                logger.info(f"Loaded time series: {len(data_cache['time_series'])} rows")
+            pdf = pd.read_sql(
+                f"SELECT unique_id, date, COALESCE(corrected_qty, qty) AS y "
+                f"FROM {schema}.demand_actuals ORDER BY unique_id, date",
+                conn,
+            )
+            pdf['date'] = pd.to_datetime(pdf['date'])
+            data_cache['time_series'] = _to_dask(pdf, "time_series")
+            logger.info(f"Loaded time_series from DB: {len(pdf)} rows")
 
+        # ── time_series_original (raw qty, for outlier comparison) ──
         if data_cache['time_series_original'] is None:
-            ts_path = Path('./data/time_series.parquet')
-            if ts_path.exists():
-                data_cache['time_series_original'] = pd.read_parquet(ts_path)
-                logger.info(f"Loaded original time series: {len(data_cache['time_series_original'])} rows")
+            pdf = pd.read_sql(
+                f"SELECT unique_id, date, qty AS y "
+                f"FROM {schema}.demand_actuals ORDER BY unique_id, date",
+                conn,
+            )
+            pdf['date'] = pd.to_datetime(pdf['date'])
+            data_cache['time_series_original'] = _to_dask(pdf, "time_series_original")
+            logger.info(f"Loaded time_series_original from DB: {len(pdf)} rows")
 
+        # ── characteristics ──
         if data_cache['characteristics'] is None:
-            char_path = data_dir / 'time_series_characteristics.parquet'
-            if char_path.exists():
-                data_cache['characteristics'] = pd.read_parquet(char_path)
-                logger.info(f"Loaded characteristics: {len(data_cache['characteristics'])} series")
+            pdf = pd.read_sql(f"SELECT * FROM {schema}.time_series_characteristics", conn)
+            # JSONB columns are auto-deserialized by psycopg2
+            for col in ('seasonal_periods', 'recommended_methods'):
+                if col in pdf.columns:
+                    pdf[col] = pdf[col].apply(lambda x: x if isinstance(x, list) else [])
+            data_cache['characteristics'] = _to_dask(pdf, "characteristics")
+            logger.info(f"Loaded characteristics from DB: {len(pdf)} series")
 
+        # ── forecasts ──
         if data_cache['forecasts'] is None:
-            forecast_path = data_dir / 'forecasts_all_methods.parquet'
-            if forecast_path.exists():
-                data_cache['forecasts'] = pd.read_parquet(forecast_path)
-                logger.info(f"Loaded forecasts: {len(data_cache['forecasts'])} forecasts")
+            pdf = pd.read_sql(f"SELECT * FROM {schema}.forecast_results", conn)
+            data_cache['forecasts'] = _to_dask(pdf, "forecasts")
+            logger.info(f"Loaded forecasts from DB: {len(pdf)} rows")
 
+        # ── distributions ──
         if data_cache['distributions'] is None:
-            dist_path = data_dir / 'fitted_distributions.parquet'
-            if dist_path.exists():
-                data_cache['distributions'] = pd.read_parquet(dist_path)
-                logger.info(f"Loaded distributions: {len(data_cache['distributions'])} fits")
+            pdf = pd.read_sql(f"SELECT * FROM {schema}.fitted_distributions", conn)
+            data_cache['distributions'] = _to_dask(pdf, "distributions") if not pdf.empty else None
+            if not pdf.empty:
+                logger.info(f"Loaded distributions from DB: {len(pdf)} rows")
 
+        # ── metrics ──
         if data_cache['metrics'] is None:
-            metrics_path = data_dir / 'backtest_metrics.parquet'
-            if metrics_path.exists():
-                data_cache['metrics'] = pd.read_parquet(metrics_path)
-                logger.info(f"Loaded metrics: {len(data_cache['metrics'])} evaluations")
+            pdf = pd.read_sql(f"SELECT * FROM {schema}.backtest_metrics", conn)
+            # Coerce metric columns to numeric (DB NULLs can cause object dtype)
+            for mc in ['mae', 'rmse', 'mape', 'smape', 'mase', 'bias',
+                       'crps', 'winkler_score',
+                       'coverage_50', 'coverage_80', 'coverage_90', 'coverage_95',
+                       'quantile_loss', 'aic', 'bic', 'aicc']:
+                if mc in pdf.columns:
+                    pdf[mc] = pd.to_numeric(pdf[mc], errors='coerce')
+            data_cache['metrics'] = _to_dask(pdf, "metrics")
+            logger.info(f"Loaded metrics from DB: {len(pdf)} rows")
 
+        # ── best_methods ──
         if data_cache['best_methods'] is None:
-            best_path = data_dir / 'best_method_per_series.parquet'
-            if best_path.exists():
-                data_cache['best_methods'] = pd.read_parquet(best_path)
-                logger.info(f"Loaded best methods: {len(data_cache['best_methods'])} series")
+            pdf = pd.read_sql(f"SELECT * FROM {schema}.best_method_per_series", conn)
+            data_cache['best_methods'] = _to_dask(pdf, "best_methods")
+            logger.info(f"Loaded best_methods from DB: {len(pdf)} rows")
 
+        # ── forecasts_by_origin ──
         if data_cache['forecasts_by_origin'] is None:
-            origin_path = data_dir / 'forecasts_by_origin.parquet'
-            if origin_path.exists():
-                data_cache['forecasts_by_origin'] = pd.read_parquet(origin_path)
-                # Ensure forecast_origin is datetime
-                for col in ['forecast_origin', 'origin', 'origin_date']:
-                    if col in data_cache['forecasts_by_origin'].columns:
-                        data_cache['forecasts_by_origin'][col] = pd.to_datetime(data_cache['forecasts_by_origin'][col])
-                logger.info(f"Loaded forecasts by origin: {len(data_cache['forecasts_by_origin'])} rows")
+            pdf = pd.read_sql(f"SELECT * FROM {schema}.forecasts_by_origin", conn)
+            for col in ['forecast_origin', 'origin', 'origin_date']:
+                if col in pdf.columns:
+                    pdf[col] = pd.to_datetime(pdf[col])
+            data_cache['forecasts_by_origin'] = _to_dask(pdf, "forecasts_by_origin")
+            logger.info(f"Loaded forecasts_by_origin from DB: {len(pdf)} rows")
 
+        # ── outliers ──
         if data_cache['outliers'] is None:
-            outlier_path = data_dir / 'detected_outliers.parquet'
-            if outlier_path.exists():
-                data_cache['outliers'] = pd.read_parquet(outlier_path)
-                logger.info(f"Loaded outliers: {len(data_cache['outliers'])} detections")
+            pdf = pd.read_sql(f"SELECT * FROM {schema}.detected_outliers", conn)
+            if not pdf.empty and 'date' in pdf.columns:
+                pdf['date'] = pd.to_datetime(pdf['date'])
+            data_cache['outliers'] = _to_dask(pdf, "outliers") if not pdf.empty else None
+            if not pdf.empty:
+                logger.info(f"Loaded outliers from DB: {len(pdf)} rows")
 
+        conn.close()
+
+        # ── config (YAML, not DB) ──
         if data_cache['config'] is None:
             config_path = Path('./config/config.yaml')
             if config_path.exists():
@@ -182,7 +253,7 @@ def load_data():
                 logger.info("Loaded config.yaml")
 
     except Exception as e:
-        logger.error(f"Error loading data: {e}")
+        logger.error(f"Error loading data from DB: {e}", exc_info=True)
 
 
 def _get_config():
@@ -208,6 +279,18 @@ async def startup_event():
         except Exception as exc:
             logger.warning(f"DB schema init failed (non-fatal): {exc}")
     load_data()
+
+
+@app.post("/api/reload")
+async def reload_data():
+    """Reload all data from PostgreSQL into cache (call after a pipeline run)."""
+    # Reset cache so load_data() re-reads everything
+    for key in data_cache:
+        data_cache[key] = None
+    load_data()
+    sizes = {k: (len(_compute(v)) if v is not None and hasattr(v, '__len__') else 0)
+             for k, v in data_cache.items() if k != 'config'}
+    return {"status": "reloaded", "cache_sizes": sizes}
 
 
 # API Endpoints
@@ -253,7 +336,7 @@ async def get_series_list(
     if data_cache['characteristics'] is None:
         raise HTTPException(status_code=503, detail="Data not loaded")
 
-    df = data_cache['characteristics'].copy()
+    df = _compute(data_cache['characteristics']).copy()
 
     # Apply filters
     if search:
@@ -272,12 +355,12 @@ async def get_series_list(
     # Build outlier lookup
     outlier_counts = {}
     if data_cache['outliers'] is not None:
-        outlier_counts = data_cache['outliers'].groupby('unique_id').size().to_dict()
+        outlier_counts = _compute(data_cache['outliers']).groupby('unique_id').size().to_dict()
 
     # Build best-method lookup: backtested results take priority over recommendations
     backtested_map = {}
     if data_cache['best_methods'] is not None:
-        for _, bm_row in data_cache['best_methods'].iterrows():
+        for _, bm_row in _compute(data_cache['best_methods']).iterrows():
             backtested_map[bm_row['unique_id']] = str(bm_row['best_method'])
 
     # Convert to response model
@@ -328,7 +411,7 @@ async def get_series_data(unique_id: str):
     if data_cache['time_series'] is None:
         raise HTTPException(status_code=503, detail="Data not loaded")
 
-    df = data_cache['time_series']
+    df = _compute(data_cache['time_series'])
     series_df = df[df['unique_id'] == unique_id].sort_values('date')
 
     if series_df.empty:
@@ -350,7 +433,7 @@ async def get_series_data(unique_id: str):
 
     # Include original data if outlier corrections exist
     if data_cache.get('time_series_original') is not None:
-        orig_df = data_cache['time_series_original']
+        orig_df = _compute(data_cache['time_series_original'])
         orig_series = orig_df[orig_df['unique_id'] == unique_id].sort_values('date')
         if not orig_series.empty:
             orig_data = {
@@ -361,7 +444,8 @@ async def get_series_data(unique_id: str):
 
             # Check if there are actual differences
             if data_cache.get('outliers') is not None:
-                uid_outliers = data_cache['outliers'][data_cache['outliers']['unique_id'] == unique_id]
+                outliers_pdf = _compute(data_cache['outliers'])
+                uid_outliers = outliers_pdf[outliers_pdf['unique_id'] == unique_id]
                 if not uid_outliers.empty:
                     result['has_outlier_corrections'] = True
                     result['n_outliers'] = len(uid_outliers)
@@ -384,7 +468,7 @@ async def get_forecasts(
     if data_cache['forecasts'] is None:
         raise HTTPException(status_code=503, detail="Forecasts not loaded")
 
-    df = data_cache['forecasts']
+    df = _compute(data_cache['forecasts'])
     forecasts_df = df[df['unique_id'] == unique_id]
 
     if forecasts_df.empty:
@@ -411,10 +495,21 @@ async def get_forecasts(
             else:
                 quantiles_dict[str(q)] = [float(values)]
 
+        # Parse hyperparameters if available
+        hyperparams = row.get('hyperparameters')
+        if hyperparams is not None:
+            if isinstance(hyperparams, str):
+                try:
+                    hyperparams = json.loads(hyperparams)
+                except (json.JSONDecodeError, ValueError):
+                    hyperparams = None
+
         forecasts.append({
             'method': row['method'],
             'point_forecast': [float(v) for v in row['point_forecast']],
-            'quantiles': quantiles_dict
+            'quantiles': quantiles_dict,
+            'hyperparameters': hyperparams,
+            'training_time': float(row['training_time']) if pd.notna(row.get('training_time')) else None
         })
 
     return {
@@ -432,10 +527,11 @@ def _compute_metrics_from_origin(unique_id: str) -> list:
     min(horizon, n_obs//3) actual observations vs the forecast that was produced.
     This gives a meaningful accuracy estimate even for short series.
     """
-    ts_df = data_cache.get('time_series')
-    if ts_df is None:
+    ts_ddf = data_cache.get('time_series')
+    if ts_ddf is None:
         return []
 
+    ts_df = _compute(ts_ddf)
     actuals_df = ts_df[ts_df['unique_id'] == unique_id].sort_values('date')
     if actuals_df.empty:
         return []
@@ -445,7 +541,7 @@ def _compute_metrics_from_origin(unique_id: str) -> list:
 
     # ── Strategy A: forecasts_by_origin ──────────────────────────────────────
     if data_cache.get('forecasts_by_origin') is not None:
-        origin_df = data_cache['forecasts_by_origin']
+        origin_df = _compute(data_cache['forecasts_by_origin'])
         for col in ['forecast_origin', 'origin', 'origin_date']:
             if col in origin_df.columns:
                 origin_col = col
@@ -477,10 +573,11 @@ def _compute_metrics_from_origin(unique_id: str) -> list:
                     return _pairs_to_metrics(method_pairs)
 
     # ── Strategy B: pseudo-holdout from final forecast vs last actuals ────────
-    fc_df = data_cache.get('forecasts')
-    if fc_df is None:
+    fc_ddf = data_cache.get('forecasts')
+    if fc_ddf is None:
         return []
 
+    fc_df = _compute(fc_ddf)
     uid_fc = fc_df[fc_df['unique_id'] == unique_id]
     if uid_fc.empty:
         return []
@@ -594,7 +691,7 @@ def _compute_composite_ranking(metrics_by_method: list, weights: dict) -> dict:
 @app.get("/api/metrics/{unique_id}")
 async def get_metrics(unique_id: str):
     """Get evaluation metrics for a specific time series with full metric set and composite ranking.
-    Falls back to on-the-fly computation from forecasts_by_origin if backtest parquet has no data."""
+    Falls back to on-the-fly computation from forecasts_by_origin if backtest table has no data."""
 
     metric_cols = ['mae', 'rmse', 'bias', 'mape', 'smape', 'mase',
                    'crps', 'winkler_score',
@@ -602,11 +699,11 @@ async def get_metrics(unique_id: str):
                    'quantile_loss']
 
     metrics_by_method = []
-    source = 'parquet'
+    source = 'database'
 
-    # Try parquet first
+    # Try database cache first
     if data_cache['metrics'] is not None:
-        df = data_cache['metrics']
+        df = _compute(data_cache['metrics'])
         metrics_df = df[df['unique_id'] == unique_id]
         if not metrics_df.empty:
             for method in metrics_df['method'].unique():
@@ -633,10 +730,10 @@ async def get_metrics(unique_id: str):
         'mae': 0.40, 'rmse': 0.20, 'bias': 0.15, 'coverage_90': 0.15, 'mase': 0.10
     })
 
-    # Include composite ranking from best_methods parquet if available
+    # Include composite ranking from best_methods if available
     ranking = None
     if data_cache['best_methods'] is not None:
-        best_df = data_cache['best_methods']
+        best_df = _compute(data_cache['best_methods'])
         row_df = best_df[best_df['unique_id'] == unique_id]
         if not row_df.empty:
             row = row_df.iloc[0]
@@ -645,7 +742,7 @@ async def get_metrics(unique_id: str):
                 all_rankings = json.loads(all_rankings.replace("'", '"'))
             ranking = {str(k): float(v) if pd.notna(v) else None for k, v in all_rankings.items()}
 
-    # If ranking not in parquet, compute it on-the-fly
+    # If ranking not in DB, compute it on-the-fly
     if ranking is None and metrics_by_method:
         ranking = _compute_composite_ranking(metrics_by_method, weights)
 
@@ -654,7 +751,7 @@ async def get_metrics(unique_id: str):
         for entry in metrics_by_method:
             entry['composite_score'] = ranking.get(entry['method'])
 
-    # Derive best method from ranking if not in parquet
+    # Derive best method from ranking if not in DB
     best_method_name = None
     if ranking:
         best_method_name = min(ranking, key=lambda k: ranking[k] if ranking[k] is not None else float('inf'))
@@ -679,7 +776,7 @@ async def get_analytics():
     if data_cache['characteristics'] is None:
         raise HTTPException(status_code=503, detail="Data not loaded")
 
-    chars_df = data_cache['characteristics']
+    chars_df = _compute(data_cache['characteristics'])
 
     analytics = {
         'total_series': len(chars_df),
@@ -693,26 +790,26 @@ async def get_analytics():
 
     # Method recommendations summary
     if data_cache['forecasts'] is not None:
-        forecasts_df = data_cache['forecasts']
+        forecasts_df = _compute(data_cache['forecasts'])
         method_counts = forecasts_df['method'].value_counts().to_dict()
         analytics['methods_summary'] = method_counts
 
     # Distribution types summary
     if data_cache['distributions'] is not None:
-        dist_df = data_cache['distributions']
+        dist_df = _compute(data_cache['distributions'])
         dist_types = dist_df['distribution_type'].value_counts().to_dict()
         analytics['distribution_types'] = dist_types
 
     # Best method distribution
     if data_cache['best_methods'] is not None:
-        best_df = data_cache['best_methods']
+        best_df = _compute(data_cache['best_methods'])
         best_method_counts = best_df['best_method'].value_counts().to_dict()
         analytics['best_method_distribution'] = best_method_counts
         analytics['best_method_total_series'] = len(best_df)
 
     # Outlier summary
     if data_cache['outliers'] is not None:
-        outlier_df = data_cache['outliers']
+        outlier_df = _compute(data_cache['outliers'])
         analytics['outlier_adjusted_count'] = int(outlier_df['unique_id'].nunique())
         analytics['outlier_total_count'] = int(len(outlier_df))
     else:
@@ -732,7 +829,7 @@ async def get_best_methods():
     if data_cache['best_methods'] is None:
         raise HTTPException(status_code=503, detail="Best methods data not loaded")
 
-    df = data_cache['best_methods']
+    df = _compute(data_cache['best_methods'])
 
     results = []
     for _, row in df.iterrows():
@@ -751,11 +848,11 @@ async def get_best_methods():
 async def get_series_best_method(unique_id: str):
     """
     Get best method for a single series.
-    Falls back to on-the-fly computation if not in parquet.
+    Falls back to on-the-fly computation if not in database.
     """
-    # Try parquet first
+    # Try database cache first
     if data_cache['best_methods'] is not None:
-        df = data_cache['best_methods']
+        df = _compute(data_cache['best_methods'])
         row_df = df[df['unique_id'] == unique_id]
         if not row_df.empty:
             row = row_df.iloc[0]
@@ -806,7 +903,7 @@ async def get_series_outliers(unique_id: str):
             'outliers': []
         }
 
-    df = data_cache['outliers']
+    df = _compute(data_cache['outliers'])
     series_outliers = df[df['unique_id'] == unique_id]
 
     if series_outliers.empty:
@@ -848,7 +945,7 @@ async def get_forecast_origins(unique_id: str):
     if data_cache['forecasts_by_origin'] is None:
         raise HTTPException(status_code=503, detail="Forecasts by origin data not loaded")
 
-    df = data_cache['forecasts_by_origin']
+    df = _compute(data_cache['forecasts_by_origin'])
     series_df = df[df['unique_id'] == unique_id]
 
     if series_df.empty:
@@ -888,7 +985,7 @@ async def get_forecasts_at_origin(unique_id: str, origin_date: str):
     if data_cache['forecasts_by_origin'] is None:
         raise HTTPException(status_code=503, detail="Forecasts by origin data not loaded")
 
-    df = data_cache['forecasts_by_origin']
+    df = _compute(data_cache['forecasts_by_origin'])
 
     # Determine origin column name
     if 'forecast_origin' in df.columns:
@@ -959,7 +1056,7 @@ async def get_forecast_evolution(unique_id: str):
     if data_cache['forecasts_by_origin'] is None:
         raise HTTPException(status_code=503, detail="Forecasts by origin data not loaded")
 
-    df = data_cache['forecasts_by_origin']
+    df = _compute(data_cache['forecasts_by_origin'])
 
     # Determine origin column name
     if 'forecast_origin' in df.columns:
@@ -1031,7 +1128,7 @@ async def get_vega_spec(unique_id: str):
     if data_cache['time_series'] is None:
         raise HTTPException(status_code=503, detail="Data not loaded")
 
-    df = data_cache['time_series']
+    df = _compute(data_cache['time_series'])
     series_df = df[df['unique_id'] == unique_id].sort_values('date')
 
     if series_df.empty:
@@ -1049,7 +1146,7 @@ async def get_vega_spec(unique_id: str):
     # Get forecasts
     forecast_data = []
     if data_cache['forecasts'] is not None:
-        forecasts_df = data_cache['forecasts']
+        forecasts_df = _compute(data_cache['forecasts'])
         series_forecasts = forecasts_df[forecasts_df['unique_id'] == unique_id]
 
         if not series_forecasts.empty:
@@ -1129,9 +1226,9 @@ async def get_sparklines(unique_ids: List[str] = Body(...)):
     if data_cache['time_series'] is None:
         raise HTTPException(status_code=503, detail="Data not loaded")
 
-    ts_df = data_cache['time_series']
-    forecasts_df = data_cache.get('forecasts')
-    best_df = data_cache.get('best_methods')
+    ts_df = _compute(data_cache['time_series'])
+    forecasts_df = _compute(data_cache['forecasts']) if data_cache.get('forecasts') is not None else None
+    best_df = _compute(data_cache['best_methods']) if data_cache.get('best_methods') is not None else None
 
     # Build best-method lookup
     best_method_map = {}
@@ -1226,7 +1323,7 @@ async def get_method_explanation(unique_id: str):
     if data_cache['characteristics'] is None:
         raise HTTPException(status_code=503, detail="Characteristics not loaded")
 
-    chars_df = data_cache['characteristics']
+    chars_df = _compute(data_cache['characteristics'])
     char_row = chars_df[chars_df['unique_id'] == unique_id]
     if char_row.empty:
         raise HTTPException(status_code=404, detail=f"No characteristics for {unique_id}")
@@ -1290,7 +1387,8 @@ async def get_method_explanation(unique_id: str):
     # Methods that were actually forecasted
     forecasted_methods = set()
     if data_cache['forecasts'] is not None:
-        uid_fc = data_cache['forecasts'][data_cache['forecasts']['unique_id'] == unique_id]
+        fc_pdf = _compute(data_cache['forecasts'])
+        uid_fc = fc_pdf[fc_pdf['unique_id'] == unique_id]
         forecasted_methods = set(uid_fc['method'].unique())
 
     included = []
@@ -1333,9 +1431,10 @@ async def get_method_explanation(unique_id: str):
     try:
         from statsmodels.tsa.stattools import acf as sm_acf, pacf as sm_pacf
 
-        ts_df = data_cache.get('time_series')
-        if ts_df is not None:
-            uid_ts = ts_df[ts_df['unique_id'] == unique_id].sort_values('date')
+        ts_ddf = data_cache.get('time_series')
+        if ts_ddf is not None:
+            ts_pdf = _compute(ts_ddf)
+            uid_ts = ts_pdf[ts_pdf['unique_id'] == unique_id].sort_values('date')
             y_vals = uid_ts['y'].values.astype(float)
 
             if len(y_vals) >= 6:
@@ -1420,7 +1519,7 @@ async def get_series_distributions(unique_id: str):
     if data_cache['forecasts'] is None:
         raise HTTPException(status_code=503, detail="Forecasts not loaded")
 
-    fc_df = data_cache['forecasts']
+    fc_df = _compute(data_cache['forecasts'])
     uid_fc = fc_df[fc_df['unique_id'] == unique_id]
     if uid_fc.empty:
         raise HTTPException(status_code=404, detail=f"No forecasts for {unique_id}")
@@ -1428,7 +1527,7 @@ async def get_series_distributions(unique_id: str):
     # Use best method's forecast
     best_method_name = None
     if data_cache['best_methods'] is not None:
-        best_df = data_cache['best_methods']
+        best_df = _compute(data_cache['best_methods'])
         best_row = best_df[best_df['unique_id'] == unique_id]
         if not best_row.empty:
             best_method_name = str(best_row.iloc[0]['best_method'])
@@ -1458,10 +1557,11 @@ async def get_series_distributions(unique_id: str):
     n_horizon = len(point_forecast)
 
     # Check if we have fitted distributions
-    dist_df = data_cache.get('distributions')
+    dist_ddf = data_cache.get('distributions')
     has_fitted = False
     fitted_rows = None
-    if dist_df is not None:
+    if dist_ddf is not None:
+        dist_df = _compute(dist_ddf)
         fitted_rows = dist_df[(dist_df['unique_id'] == unique_id) & (dist_df['method'] == method_name)]
         if not fitted_rows.empty:
             has_fitted = True
@@ -1587,7 +1687,7 @@ _pipeline_jobs: Dict[str, Dict] = {}
 _pipeline_lock = threading.Lock()
 
 PIPELINE_STEPS = {
-    "etl":               {"label": "ETL",               "arg": "etl",               "desc": "Extract data from the database and save to Parquet"},
+    "etl":               {"label": "ETL",               "arg": "etl",               "desc": "Extract data from the source database into demand_actuals"},
     "outlier-detection": {"label": "Outlier Detection",  "arg": "outlier-detection", "desc": "Detect and correct outliers in the time series"},
     "forecast":          {"label": "Forecast",           "arg": "forecast",          "desc": "Run all forecasting models (statistical, ML, neural, foundation)"},
     "backtest":          {"label": "Backtest",           "arg": "backtest",          "desc": "Rolling-window backtesting and metric computation"},
@@ -1599,10 +1699,12 @@ PIPELINE_STEPS = {
 PIPELINE_STEP_ORDER = ["etl", "outlier-detection", "forecast", "backtest", "best-method", "distributions"]
 
 
-def _run_pipeline_step_thread(job_id: str, step_arg: str):
+def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = None):
     """Run a pipeline step in a background thread, capturing output line by line."""
     files_dir = Path(__file__).parent.parent  # files/ directory
     cmd = [sys.executable, "run_pipeline.py", "--only", step_arg, "--log-level", "INFO"]
+    if extra_args:
+        cmd.extend(extra_args)
 
     with _pipeline_lock:
         _pipeline_jobs[job_id]["status"] = "running"
@@ -1801,6 +1903,53 @@ async def run_pipeline_step(step: str):
     t.start()
 
     return {"job_id": job_id, "step": step, "status": "pending"}
+
+
+@app.post("/api/pipeline/run-forecast")
+async def run_forecast_for_series(req: RunForecastRequest):
+    """Launch a forecast for specific series (optionally with all methods).
+
+    Used by the "Run Forecast" button in the Time Series Viewer.
+    Returns a job_id that can be polled via GET /api/pipeline/jobs/{job_id}.
+    """
+    if not req.series:
+        raise HTTPException(status_code=400, detail="No series provided")
+
+    # Reject if a series-forecast job is already running
+    with _pipeline_lock:
+        for job in _pipeline_jobs.values():
+            if job.get("step") == "forecast-series" and job.get("status") == "running":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"A series forecast job is already running (job {job['job_id']})"
+                )
+
+    job_id = str(uuid.uuid4())[:8]
+    with _pipeline_lock:
+        _pipeline_jobs[job_id] = {
+            "job_id": job_id,
+            "step": "forecast-series",
+            "step_label": f"Forecast ({len(req.series)} series)",
+            "status": "pending",
+            "log_lines": [],
+            "started_at": None,
+            "ended_at": None,
+            "pid": None,
+            "exit_code": None,
+        }
+
+    extra_args = ["--series", ",".join(req.series)]
+    if req.all_methods:
+        extra_args.append("--all-methods")
+
+    t = threading.Thread(
+        target=_run_pipeline_step_thread,
+        args=(job_id, "forecast", extra_args),
+        daemon=True,
+    )
+    t.start()
+
+    return {"job_id": job_id, "step": "forecast-series", "status": "pending"}
 
 
 @app.get("/api/pipeline/jobs")

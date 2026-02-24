@@ -441,6 +441,7 @@ export const PipelineRunner = () => {
       )}
 
       {/* Full pipeline card */}
+      <div id="pipeline-full">
       <FullPipelineCard
         steps={orderedSteps}
         job={fullJob}
@@ -449,6 +450,7 @@ export const PipelineRunner = () => {
         showLogs={showFullLogs}
         onToggleLogs={() => setShowFullLogs(v => !v)}
       />
+      </div>
 
       {/* Divider */}
       <div className="flex items-center gap-3 mb-4">
@@ -465,7 +467,7 @@ export const PipelineRunner = () => {
       )}
 
       {/* Individual step cards */}
-      <div className="space-y-3">
+      <div id="pipeline-steps" className="space-y-3">
         {orderedSteps.map((step, i) => (
           <div key={step.id} className="flex gap-3 items-stretch">
             {/* Step number + connector line */}
@@ -499,7 +501,7 @@ export const PipelineRunner = () => {
       </div>
 
       {/* Notes */}
-      <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
+      <div id="pipeline-notes" className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
         <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Notes</p>
         <ul className="text-xs text-gray-500 space-y-1 list-disc list-inside">
           <li>Individual steps run independently — you can re-run any step without re-running earlier ones.</li>

@@ -419,31 +419,38 @@ class DistributionFitter:
 
 def main():
     """Example usage of distribution fitter."""
-    # Load forecasts
-    try:
-        forecasts_df = pd.read_parquet('./output/forecasts_statistical.parquet')
-    except:
-        print("No forecasts found. Run forecasting first.")
+    from db.db import load_table, get_schema, bulk_insert, jsonb_serialize
+
+    config_path = 'config/config.yaml'
+    schema = get_schema(config_path)
+
+    # Load forecasts from PostgreSQL
+    forecasts_df = load_table(config_path, f"{schema}.forecast_results")
+    if forecasts_df.empty:
+        print("No forecasts found in DB. Run forecasting first.")
         return
-    
+
     # Initialize fitter
     fitter = DistributionFitter()
-    
+
     # Fit distributions
     distributions_df = fitter.fit_forecast_distributions(forecasts_df)
-    
-    # Save results
-    output_path = './output/fitted_distributions.parquet'
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    distributions_df.to_parquet(output_path, index=False)
-    
-    print(f"\nFitted distributions saved to: {output_path}")
+
+    # Save results to PostgreSQL
+    if not distributions_df.empty:
+        cols = list(distributions_df.columns)
+        rows = [
+            tuple(jsonb_serialize(v) for v in row)
+            for row in distributions_df.itertuples(index=False, name=None)
+        ]
+        n = bulk_insert(config_path, f"{schema}.fitted_distributions", cols, rows)
+        print(f"\nFitted distributions saved to {schema}.fitted_distributions ({n} rows)")
     print(f"Generated {len(distributions_df)} distribution fits")
-    
+
     # Summary
     print("\nDistribution type summary:")
     print(distributions_df['distribution_type'].value_counts())
-    
+
     print("\nExample service level quantiles:")
     print(distributions_df[['unique_id', 'method', 'distribution_type', 'service_level_quantiles']].head())
 
