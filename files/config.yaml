@@ -47,7 +47,7 @@ etl:
     
   # Aggregation if needed
   aggregation:
-    frequency: "M"  # D=Daily, W=Weekly, M=Monthly
+    frequency: "W"  # D=Daily, W=Weekly, M=Monthly
     method: "sum"   # sum, mean, median
 
 # Outlier Detection & Correction
@@ -106,7 +106,7 @@ characterization:
 # Forecasting Configuration
 forecasting:
   horizon: 24  # Number of periods to forecast (2 years monthly)
-  frequency: "M"  # D, W, M, Q, Y
+  frequency: "W"  # D, W, M, Q, Y
   
   # Backtesting configuration
   backtesting:

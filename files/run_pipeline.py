@@ -89,7 +89,8 @@ def _load_demand_actuals(config_path: str):
 
 
 def run_single_step(step: str, config_path: str, output_dir: str = None,
-                    series_filter: list = None, all_methods: bool = False):
+                    series_filter: list = None, all_methods: bool = False,
+                    overrides_map: dict = None):
     """Run a single pipeline step.  All data is read from / written to PostgreSQL.
 
     Args:
@@ -99,6 +100,8 @@ def run_single_step(step: str, config_path: str, output_dir: str = None,
         series_filter: Optional list of unique_ids to restrict processing to.
         all_methods: If True, override recommended_methods with ALL methods
                      from the config (statistical + ML + neural + foundation).
+        overrides_map: Optional dict of {unique_id: {method: {param: value}}}
+                       hyperparameter overrides from the UI.
     """
     orchestrator = ForecastOrchestrator(config_path)
     schema = get_schema(config_path)
@@ -152,7 +155,7 @@ def run_single_step(step: str, config_path: str, output_dir: str = None,
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
             orchestrator.start_dask_client()
         try:
-            forecasts_df = orchestrator.step_forecast(df, chars_df)
+            forecasts_df = orchestrator.step_forecast(df, chars_df, overrides_map=overrides_map)
         finally:
             if orchestrator.client:
                 orchestrator.stop_dask_client()
@@ -245,6 +248,10 @@ Examples:
         '--all-methods', action='store_true',
         help='Run ALL forecast methods instead of only recommended ones'
     )
+    parser.add_argument(
+        '--overrides-json', type=str, default=None,
+        help='JSON dict of {unique_id: {method: {param: value}}} hyperparameter overrides'
+    )
 
     # Schema discovery
     parser.add_argument('--discover-schema', action='store_true', help='Discover database schema and exit')
@@ -281,10 +288,16 @@ Examples:
     if args.only:
         logger.info(f"Running single step: {args.only}")
         series_filter = args.series.split(',') if args.series else None
+        overrides_map = None
+        if args.overrides_json:
+            import json as _json
+            overrides_map = _json.loads(args.overrides_json)
+            logger.info(f"Loaded hyperparameter overrides for {len(overrides_map)} series")
         run_single_step(
             args.only, args.config, args.output,
             series_filter=series_filter,
             all_methods=args.all_methods,
+            overrides_map=overrides_map,
         )
         return
 

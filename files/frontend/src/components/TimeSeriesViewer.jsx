@@ -611,6 +611,11 @@ export const TimeSeriesViewer = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const playTimerRef = useRef(null);
 
+  // ---- Forecast convergence ----
+  const [convergenceData, setConvergenceData] = useState(null);
+  const [convergenceMethod, setConvergenceMethod] = useState(''); // '' = best method
+  const [convergenceView, setConvergenceView] = useState('convergence'); // 'convergence' | 'racing'
+
   // ---- Method visibility ----
   const [visibleMethods, setVisibleMethods] = useState({});
   const [bandVisibleMethods, setBandVisibleMethods] = useState({});
@@ -634,6 +639,11 @@ export const TimeSeriesViewer = () => {
   const [forecastJobId, setForecastJobId] = useState(null);
   const [forecastJobStatus, setForecastJobStatus] = useState(null); // null|pending|running|success|error
   const forecastPollRef = useRef(null);
+
+  // ---- Hyperparameter overrides (editable params) ----
+  const [hpEdits, setHpEdits] = useState({});           // {method: {param: newValue}}
+  const [hpSaving, setHpSaving] = useState(false);
+  const [hpSavedOverrides, setHpSavedOverrides] = useState({}); // from DB: {method: {param: val}}
 
   // ---- Section drag-and-drop order ----
   const { order: sectionOrder, reorder: reorderSections } = useSectionOrder();
@@ -893,6 +903,23 @@ export const TimeSeriesViewer = () => {
         setOrigins(o);
         if (o.length > 0) setSelectedOriginIdx(o.length - 1);
       }
+
+      // Load hyperparameter overrides (non-blocking)
+      try {
+        const hpRes = await axios.get(`${API_BASE_URL}/hyperparams/${encodeURIComponent(decodedId)}`);
+        setHpSavedOverrides(hpRes.data.overrides || {});
+        setHpEdits({});  // clear local edits on fresh load
+      } catch { /* no overrides yet — that's fine */ }
+
+      // Load forecast convergence data (non-blocking)
+      try {
+        const convRes = await axios.get(`${API_BASE_URL}/series/${encodeURIComponent(decodedId)}/forecast-convergence`);
+        console.log('[convergence] loaded', convRes.data?.targets?.length, 'targets,', convRes.data?.methods?.length, 'methods');
+        setConvergenceData(convRes.data);
+      } catch (convErr) {
+        console.warn('[convergence] failed to load:', convErr?.response?.status, convErr?.response?.data?.detail || convErr.message);
+      }
+
       setLoading(false);
     } catch (err) {
       setError(err.message);
@@ -1331,6 +1358,119 @@ export const TimeSeriesViewer = () => {
     }
     return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: Math.max(150, barData.length * 40), autosize: { type: 'fit', contains: 'padding' }, data: { values: barData }, layer: layers };
   }, [originForecasts, activeForecasts, selectedPeriod, visibleMethods, activeMethodDomain]);
+
+  // ---- Forecast Convergence chart (Plotly grouped bars) ----
+  const convergenceChart = useMemo(() => {
+    if (!convergenceData || !convergenceData.targets || convergenceData.targets.length === 0) return null;
+
+    // Pick method: use convergenceMethod state, or fall back to best method, or first available
+    const selectedMethod = convergenceMethod || bestMethod?.best_method || convergenceData.methods?.[0] || '';
+    if (!selectedMethod) return null;
+
+    const targets = convergenceData.targets;
+
+    // Collect all unique origin dates across all targets
+    const allOrigins = new Set();
+    targets.forEach(t => t.origins.forEach(o => allOrigins.add(o.origin)));
+    const originsSorted = [...allOrigins].sort();
+
+    // Format date labels (shorter for x-axis)
+    const fmtShort = (d) => {
+      const dt = new Date(d + 'T00:00:00');
+      return dt.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+    };
+
+    // Color palette for origins (from older=lighter to newer=darker)
+    const originColors = [
+      '#93c5fd', '#60a5fa', '#3b82f6', '#2563eb', '#1d4ed8',
+      '#1e40af', '#1e3a8a', '#172554', '#0f172a', '#6366f1',
+      '#4f46e5', '#4338ca', '#3730a3', '#312e81'
+    ];
+
+    // Build one trace per origin
+    const traces = originsSorted.map((origin, idx) => {
+      const xLabels = [];
+      const yValues = [];
+
+      targets.forEach(t => {
+        const oEntry = t.origins.find(o => o.origin === origin);
+        const val = oEntry?.forecasts?.[selectedMethod];
+        if (val !== undefined && val !== null) {
+          xLabels.push(fmtShort(t.target_date));
+          yValues.push(val);
+        } else {
+          xLabels.push(fmtShort(t.target_date));
+          yValues.push(null);
+        }
+      });
+
+      const color = originColors[idx % originColors.length];
+      const monthsText = targets.map(t => {
+        const oEntry = t.origins.find(o => o.origin === origin);
+        return oEntry ? `${oEntry.months_ahead}m ahead` : '';
+      });
+
+      return {
+        type: 'bar',
+        name: fmtShort(origin),
+        x: xLabels,
+        y: yValues,
+        marker: { color, line: { color: '#fff', width: 0.5 } },
+        hovertemplate: xLabels.map((x, i) =>
+          `<b>${x}</b><br>Origin: ${fmtShort(origin)}<br>${monthsText[i]}<br>Forecast: %{y:,.0f}<extra></extra>`
+        ),
+      };
+    });
+
+    // Add actual values as a line overlay
+    const actualX = [];
+    const actualY = [];
+    targets.forEach(t => {
+      if (t.actual != null) {
+        actualX.push(fmtShort(t.target_date));
+        actualY.push(t.actual);
+      }
+    });
+
+    if (actualX.length > 0) {
+      traces.push({
+        type: 'scatter',
+        mode: 'lines+markers',
+        name: 'Actual',
+        x: actualX,
+        y: actualY,
+        line: { color: '#e11d48', width: 3, dash: 'dot' },
+        marker: { color: '#e11d48', size: 8, symbol: 'diamond' },
+        hovertemplate: '<b>%{x}</b><br>Actual: %{y:,.0f}<extra>Actual</extra>',
+      });
+    }
+
+    const layout = {
+      barmode: 'group',
+      xaxis: {
+        title: { text: 'Target Month', font: { size: 12 } },
+        tickangle: -45,
+      },
+      yaxis: {
+        title: { text: 'Forecast Qty', font: { size: 12 } },
+        tickformat: ',.0f',
+      },
+      legend: {
+        title: { text: 'Forecast Origin' },
+        orientation: 'h',
+        y: -0.3,
+        x: 0.5,
+        xanchor: 'center',
+      },
+      margin: { l: 60, r: 20, t: 30, b: 80 },
+      height: 400,
+      hoverlabel: { bgcolor: '#1e293b', font: { color: '#fff', size: 12 } },
+      plot_bgcolor: '#fafafa',
+      paper_bgcolor: '#ffffff',
+    };
+
+    return { traces, layout, method: selectedMethod };
+  }, [convergenceData, convergenceMethod, bestMethod]);
 
   const targetChartSpec = useMemo(() => {
     if (!activeMetrics || activeMetrics.length === 0) return null;
@@ -1997,25 +2137,46 @@ export const TimeSeriesViewer = () => {
           </Section>
         ) : null;
 
-        /* hyperparameters — per-method detailed parameter cards */
+        /* hyperparameters — per-method EDITABLE parameter cards */
         sectionNodes['hyperparameters'] = activeForecasts.some(f => f.hyperparameters) ? (
           <Section key="hyperparameters" title="Model Hyperparameters &amp; Configuration" storageKey="tsv_hyperparams_open" {...dp('hyperparameters')}>
             <p className="text-sm text-gray-500 mb-4">
-              Exact parameters used for each forecast method. Use these to reproduce results outside this application.
+              Edit parameters below and click <strong>Save</strong> to persist. Click <strong>Run Forecast</strong> to re-run with your custom values.
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {activeForecasts.filter(f => f.hyperparameters).map(f => {
                 const hp = f.hyperparameters;
-                const isBest = bestMethod?.best_method === f.method;
-                // Separate description from params
+                const method = f.method;
+                const isBest = bestMethod?.best_method === method;
                 const description = hp.description;
-                // Group params: common vs method-specific vs fitted
                 const commonKeys = ['horizon', 'frequency', 'confidence_levels', 'n_observations'];
-                const metaKeys = ['description', 'method_family', 'training_time_seconds', 'prediction_intervals_available'];
+                const metaKeys = ['description', 'method_family', 'training_time_seconds', 'prediction_intervals_available', 'has_overrides', 'overrides_applied'];
                 const fittedKeys = Object.keys(hp).filter(k => k.startsWith('fitted_'));
                 const specificKeys = Object.keys(hp).filter(k =>
                   !commonKeys.includes(k) && !metaKeys.includes(k) && !fittedKeys.includes(k)
                 );
+
+                // ALL keys are now editable (including fitted)
+                const editableKeys = [...commonKeys.filter(k => hp[k] !== undefined), ...specificKeys];
+
+                // Merge: saved DB overrides → local unsaved edits → original value
+                // For fitted_ keys: overrides are stored WITHOUT the prefix (e.g. "p" not "fitted_p")
+                const savedOvr = hpSavedOverrides[method] || {};
+                const localEdits = hpEdits[method] || {};
+
+                const getEffectiveValue = (k) => {
+                  // For fitted keys, also check the unprefixed name in overrides
+                  const ovrKey = k.startsWith('fitted_') ? k.replace('fitted_', '') : k;
+                  if (k in localEdits) return localEdits[k];
+                  if (ovrKey in localEdits) return localEdits[ovrKey];
+                  if (k in savedOvr) return savedOvr[k];
+                  if (ovrKey in savedOvr) return savedOvr[ovrKey];
+                  return hp[k];
+                };
+
+                const hasMethodEdits = Object.keys(localEdits).length > 0;
+                const hasMethodSaved = Object.keys(savedOvr).length > 0;
+
                 const renderVal = (v) => {
                   if (v === null || v === undefined) return <span className="text-gray-400">null</span>;
                   if (typeof v === 'boolean') return <span className={v ? 'text-emerald-600' : 'text-red-500'}>{v.toString()}</span>;
@@ -2023,67 +2184,245 @@ export const TimeSeriesViewer = () => {
                   if (typeof v === 'number') return <span className="text-blue-700">{Number.isInteger(v) ? v : v.toFixed(4)}</span>;
                   return <span className="text-gray-800">{String(v)}</span>;
                 };
+
+                // Inline editable input for a param
+                const renderEditableParam = (k, original) => {
+                  const effective = getEffectiveValue(k);
+                  const isEdited = k in localEdits;
+                  const isSavedOverride = k in savedOvr && !(k in localEdits);
+                  const borderCls = isEdited ? 'border-amber-400' : isSavedOverride ? 'border-blue-400' : 'border-gray-200';
+
+                  if (typeof original === 'boolean') {
+                    return (
+                      <label className="flex items-center gap-1 justify-end cursor-pointer">
+                        <input type="checkbox" checked={!!effective}
+                          className="accent-indigo-600 w-3.5 h-3.5"
+                          onChange={e => {
+                            setHpEdits(prev => ({
+                              ...prev,
+                              [method]: { ...(prev[method] || {}), [k]: e.target.checked }
+                            }));
+                          }}
+                        />
+                        <span className={effective ? 'text-emerald-600' : 'text-red-500'}>{String(effective)}</span>
+                      </label>
+                    );
+                  }
+                  if (typeof original === 'number') {
+                    const step = Number.isInteger(original) ? 1 : 0.001;
+                    return (
+                      <input type="number" step={step}
+                        value={effective ?? ''}
+                        className={`w-full text-right font-mono text-xs border rounded px-1 py-0.5 ${borderCls} focus:outline-none focus:ring-1 focus:ring-indigo-400`}
+                        onChange={e => {
+                          const val = e.target.value === '' ? null : (Number.isInteger(original) ? parseInt(e.target.value, 10) : parseFloat(e.target.value));
+                          setHpEdits(prev => ({
+                            ...prev,
+                            [method]: { ...(prev[method] || {}), [k]: val }
+                          }));
+                        }}
+                      />
+                    );
+                  }
+                  if (Array.isArray(original)) {
+                    return (
+                      <input type="text"
+                        value={Array.isArray(effective) ? effective.join(', ') : String(effective ?? '')}
+                        className={`w-full text-right font-mono text-xs border rounded px-1 py-0.5 ${borderCls} focus:outline-none focus:ring-1 focus:ring-indigo-400`}
+                        onChange={e => {
+                          const val = e.target.value.split(',').map(s => {
+                            const trimmed = s.trim();
+                            const n = Number(trimmed);
+                            return isNaN(n) ? trimmed : n;
+                          });
+                          setHpEdits(prev => ({
+                            ...prev,
+                            [method]: { ...(prev[method] || {}), [k]: val }
+                          }));
+                        }}
+                      />
+                    );
+                  }
+                  // string
+                  return (
+                    <input type="text"
+                      value={effective ?? ''}
+                      className={`w-full text-right font-mono text-xs border rounded px-1 py-0.5 ${borderCls} focus:outline-none focus:ring-1 focus:ring-indigo-400`}
+                      onChange={e => {
+                        setHpEdits(prev => ({
+                          ...prev,
+                          [method]: { ...(prev[method] || {}), [k]: e.target.value }
+                        }));
+                      }}
+                    />
+                  );
+                };
+
+                // Save handler
+                const handleSaveMethod = async () => {
+                  // Merge localEdits with existing saved overrides
+                  const merged = { ...savedOvr, ...localEdits };
+                  if (Object.keys(merged).length === 0) return;
+                  setHpSaving(true);
+                  try {
+                    await axios.put(`${API_BASE_URL}/hyperparams/${encodeURIComponent(decodedId)}`, {
+                      overrides: { [method]: merged }
+                    });
+                    setHpSavedOverrides(prev => ({ ...prev, [method]: merged }));
+                    setHpEdits(prev => { const next = { ...prev }; delete next[method]; return next; });
+                  } catch (err) {
+                    console.error('Failed to save hyperparameter overrides:', err);
+                  }
+                  setHpSaving(false);
+                };
+
+                // Reset handler
+                const handleResetMethod = async () => {
+                  setHpSaving(true);
+                  try {
+                    await axios.delete(`${API_BASE_URL}/hyperparams/${encodeURIComponent(decodedId)}?method=${encodeURIComponent(method)}`);
+                    setHpSavedOverrides(prev => { const next = { ...prev }; delete next[method]; return next; });
+                    setHpEdits(prev => { const next = { ...prev }; delete next[method]; return next; });
+                  } catch (err) {
+                    console.error('Failed to reset hyperparameter overrides:', err);
+                  }
+                  setHpSaving(false);
+                };
+
                 return (
-                  <div key={f.method} className={`rounded-lg border p-4 text-sm ${isBest ? 'border-emerald-400 bg-emerald-50/50' : 'border-gray-200 bg-white'}`}>
+                  <div key={method} className={`rounded-lg border p-4 text-sm ${isBest ? 'border-emerald-400 bg-emerald-50/50' : 'border-gray-200 bg-white'}`}>
                     <div className="flex items-center gap-2 mb-2">
-                      <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: getMethodColor(f.method) }}></span>
-                      <span className="font-semibold text-gray-900">{f.method}</span>
+                      <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: getMethodColor(method) }}></span>
+                      <span className="font-semibold text-gray-900">{method}</span>
                       {hp.method_family && <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">{hp.method_family}</span>}
                       {isBest && <span className="text-xs bg-emerald-200 text-emerald-800 px-1.5 py-0.5 rounded font-semibold">Best</span>}
+                      {hasMethodSaved && <span className="text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded">Custom</span>}
                     </div>
                     {description && <p className="text-xs text-gray-500 mb-3 leading-relaxed">{description}</p>}
 
-                    {/* Common config */}
+                    {/* Configuration — editable */}
                     <div className="mb-2">
                       <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Configuration</div>
-                      <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono text-xs">
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-xs items-center">
                         {commonKeys.filter(k => hp[k] !== undefined).map(k => (
                           <React.Fragment key={k}>
                             <span className="text-gray-500">{k}</span>
-                            <span className="text-right">{renderVal(hp[k])}</span>
+                            {renderEditableParam(k, hp[k])}
                           </React.Fragment>
                         ))}
                       </div>
                     </div>
 
-                    {/* Method-specific params */}
+                    {/* Method-specific params — editable */}
                     {specificKeys.length > 0 && (
                       <div className="mb-2">
                         <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Method Parameters</div>
-                        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono text-xs">
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-xs items-center">
                           {specificKeys.map(k => (
                             <React.Fragment key={k}>
                               <span className="text-gray-500">{k}</span>
-                              <span className="text-right">{renderVal(hp[k])}</span>
+                              {renderEditableParam(k, hp[k])}
                             </React.Fragment>
                           ))}
                         </div>
                       </div>
                     )}
 
-                    {/* Fitted / estimated params from the model */}
+                    {/* Fitted params — now editable (overrides stored without fitted_ prefix) */}
                     {fittedKeys.length > 0 && (
                       <div className="mb-2">
-                        <div className="text-xs font-semibold text-indigo-500 uppercase tracking-wide mb-1">Fitted (estimated)</div>
-                        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono text-xs">
-                          {fittedKeys.map(k => (
-                            <React.Fragment key={k}>
-                              <span className="text-gray-500">{k.replace('fitted_', '')}</span>
-                              <span className="text-right">{renderVal(hp[k])}</span>
-                            </React.Fragment>
-                          ))}
+                        <div className="text-xs font-semibold text-indigo-500 uppercase tracking-wide mb-1">
+                          Fitted (edit to override on next run)
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono text-xs items-center">
+                          {fittedKeys.map(k => {
+                            const stripKey = k.replace('fitted_', '');
+                            const effective = getEffectiveValue(k);
+                            const original = hp[k];
+                            const isEdited = stripKey in localEdits || k in localEdits;
+                            const isSavedOverride = (stripKey in savedOvr || k in savedOvr) && !isEdited;
+                            const borderCls = isEdited ? 'border-amber-400' : isSavedOverride ? 'border-blue-400' : 'border-gray-200';
+
+                            // Render editable input — same logic as renderEditableParam but stores key WITHOUT fitted_ prefix
+                            const handleChange = (val) => {
+                              setHpEdits(prev => ({
+                                ...prev,
+                                [method]: { ...(prev[method] || {}), [stripKey]: val }
+                              }));
+                            };
+
+                            let input;
+                            if (typeof original === 'boolean') {
+                              input = (
+                                <label className="flex items-center gap-1 justify-end cursor-pointer">
+                                  <input type="checkbox" checked={!!effective}
+                                    className="accent-indigo-600 w-3.5 h-3.5"
+                                    onChange={e => handleChange(e.target.checked)} />
+                                  <span className={effective ? 'text-emerald-600' : 'text-red-500'}>{String(effective)}</span>
+                                </label>
+                              );
+                            } else if (typeof original === 'number') {
+                              const step = Number.isInteger(original) ? 1 : 0.001;
+                              input = (
+                                <input type="number" step={step} value={effective ?? ''}
+                                  className={`w-full text-right font-mono text-xs border rounded px-1 py-0.5 ${borderCls} focus:outline-none focus:ring-1 focus:ring-indigo-400`}
+                                  onChange={e => {
+                                    const v = e.target.value === '' ? null : (Number.isInteger(original) ? parseInt(e.target.value, 10) : parseFloat(e.target.value));
+                                    handleChange(v);
+                                  }} />
+                              );
+                            } else if (typeof original === 'string') {
+                              input = (
+                                <input type="text" value={effective ?? ''}
+                                  className={`w-full text-right font-mono text-xs border rounded px-1 py-0.5 ${borderCls} focus:outline-none focus:ring-1 focus:ring-indigo-400`}
+                                  onChange={e => handleChange(e.target.value)} />
+                              );
+                            } else {
+                              // Fallback: read-only display
+                              input = <span className="text-right">{renderVal(hp[k])}</span>;
+                            }
+
+                            return (
+                              <React.Fragment key={k}>
+                                <span className="text-gray-500 flex items-center gap-1" title={`Override: ${stripKey}`}>
+                                  {stripKey}
+                                  {isSavedOverride && <span className="text-blue-400 text-[8px]">*</span>}
+                                </span>
+                                {input}
+                              </React.Fragment>
+                            );
+                          })}
                         </div>
                       </div>
                     )}
 
-                    {/* Training time + PI availability */}
-                    <div className="mt-2 pt-2 border-t border-gray-100 flex items-center gap-3 text-xs text-gray-400">
-                      {hp.training_time_seconds != null && <span>Training: {hp.training_time_seconds}s</span>}
-                      {hp.prediction_intervals_available != null && (
-                        <span className={hp.prediction_intervals_available ? 'text-emerald-500' : 'text-amber-500'}>
-                          PI: {hp.prediction_intervals_available ? 'Yes' : 'No'}
-                        </span>
-                      )}
+                    {/* Training time + PI + Save/Reset buttons */}
+                    <div className="mt-2 pt-2 border-t border-gray-100 flex items-center justify-between">
+                      <div className="flex items-center gap-3 text-xs text-gray-400">
+                        {hp.training_time_seconds != null && <span>Training: {hp.training_time_seconds}s</span>}
+                        {hp.prediction_intervals_available != null && (
+                          <span className={hp.prediction_intervals_available ? 'text-emerald-500' : 'text-amber-500'}>
+                            PI: {hp.prediction_intervals_available ? 'Yes' : 'No'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {(hasMethodEdits || hasMethodSaved) && (
+                          <button
+                            onClick={handleResetMethod}
+                            disabled={hpSaving}
+                            className="px-2 py-0.5 text-xs rounded border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                            title="Reset to defaults"
+                          >Reset</button>
+                        )}
+                        {hasMethodEdits && (
+                          <button
+                            onClick={handleSaveMethod}
+                            disabled={hpSaving}
+                            className="px-2 py-0.5 text-xs rounded bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                          >{hpSaving ? 'Saving...' : 'Save'}</button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -2125,71 +2464,123 @@ export const TimeSeriesViewer = () => {
           </Section>
         ) : null;
 
-        /* evolution */
-        if (isMultiMode && activeForecasts.length > 0) {
-          sectionNodes['evolution'] = (
-            <Section key="evolution" title="Method Comparison (aggregated)" storageKey="tsv_evolution_open" {...dp('evolution')}>
-              <div className="flex items-center gap-2 mb-4 flex-wrap">
-                <span className="text-sm text-gray-600">Horizon month:</span>
-                {[1, 3, 6, 12, 18, 24].filter(p => p <= horizonLength).map(p => (
-                  <button key={p} onClick={() => setSelectedPeriod(p)}
-                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${selectedPeriod === p ? 'bg-blue-500 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
-                    M{p}
-                  </button>
-                ))}
-              </div>
-              {racingBarsSpec
-                ? <div className="w-full overflow-x-auto"><VegaLite spec={racingBarsSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
-                : <div className="text-gray-400 py-4 text-center text-sm">No comparison data</div>
-              }
-            </Section>
-          );
-        } else if (origins.length > 0 || activeForecasts.length > 0) {
-          sectionNodes['evolution'] = (
-            <Section key="evolution" title={origins.length > 0 ? 'Forecast Evolution Over Time' : 'Method Comparison'} storageKey="tsv_evolution_open" {...dp('evolution')}>
-              <p className="text-sm text-gray-500 mb-4">{origins.length > 0 ? 'See how forecasts changed at different points in time.' : 'Compare forecast values across methods for each horizon month.'}</p>
-              {origins.length > 0 && (
-                <div className="flex items-center gap-3 mb-4 flex-wrap">
-                  <button onClick={togglePlay} className={`px-4 py-2 rounded-lg text-white text-sm font-medium transition-colors ${isPlaying ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'}`}>
-                    {isPlaying ? '■ Stop' : '▶ Play'}
-                  </button>
-                  <div className="flex-1 min-w-32">
-                    <input type="range" min={0} max={origins.length - 1} value={selectedOriginIdx} onChange={e => setSelectedOriginIdx(parseInt(e.target.value))} className="w-full accent-blue-500" />
-                  </div>
-                  <div className="text-sm font-mono bg-blue-50 text-blue-800 px-3 py-1.5 rounded-lg min-w-28 text-center font-medium">{origins[selectedOriginIdx] || '-'}</div>
+        /* evolution — combined: Forecast Convergence + Racing Bars */
+        {
+          const hasConvergence = convergenceChart != null;
+          const hasRacing = origins.length > 0 || activeForecasts.length > 0;
+          // Auto-select available view if current selection is unavailable
+          const effectiveView = (convergenceView === 'convergence' && !hasConvergence) ? 'racing'
+                              : (convergenceView === 'racing' && !hasRacing) ? 'convergence'
+                              : convergenceView;
+
+          if (hasConvergence || hasRacing) {
+            sectionNodes['evolution'] = (
+              <Section key="evolution" title="Forecast Evolution" storageKey="tsv_evolution_open" {...dp('evolution')}>
+                {/* View toggle tabs */}
+                <div className="flex items-center gap-1 mb-4 border-b border-gray-200">
+                  {hasConvergence && (
+                    <button onClick={() => setConvergenceView('convergence')}
+                      className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${effectiveView === 'convergence' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+                      Convergence
+                    </button>
+                  )}
+                  {hasRacing && (
+                    <button onClick={() => setConvergenceView('racing')}
+                      className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${effectiveView === 'racing' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+                      Method Comparison
+                    </button>
+                  )}
                 </div>
-              )}
-              <div className="flex items-center gap-2 mb-4 flex-wrap">
-                <span className="text-sm text-gray-600">Horizon month:</span>
-                {horizonLength <= 12
-                  ? Array.from({ length: horizonLength }, (_, i) => i + 1).map(p => (
-                      <button key={p} onClick={() => setSelectedPeriod(p)}
-                        className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${selectedPeriod === p ? 'bg-blue-500 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
-                        M{p}
-                      </button>
-                    ))
-                  : (
-                    <>
-                      {[1, 3, 6, 12, 18, 24].filter(p => p <= horizonLength).map(p => (
-                        <button key={p} onClick={() => setSelectedPeriod(p)}
-                          className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${selectedPeriod === p ? 'bg-blue-500 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
-                          M{p}
+
+                {/* ── Convergence View ── */}
+                {effectiveView === 'convergence' && hasConvergence && (
+                  <div>
+                    <p className="text-sm text-gray-500 mb-3">
+                      How the forecast for each target month evolved as the forecast date approached.
+                      Each bar group is a target month; bars within are forecasts made at different origins.
+                    </p>
+                    {/* Method selector */}
+                    {convergenceData?.methods?.length > 1 && (
+                      <div className="flex items-center gap-2 mb-4 flex-wrap">
+                        <span className="text-sm text-gray-600">Method:</span>
+                        {convergenceData.methods.map(m => (
+                          <button key={m} onClick={() => setConvergenceMethod(m)}
+                            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${(convergenceMethod || convergenceChart?.method) === m
+                              ? 'text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}
+                            style={(convergenceMethod || convergenceChart?.method) === m ? { backgroundColor: getMethodColor(m) } : {}}>
+                            {m}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {/* Convergence chart */}
+                    <div className="w-full" style={{ minHeight: 400 }}>
+                      <Plot
+                        data={convergenceChart.traces}
+                        layout={{ ...convergenceChart.layout, title: { text: `Forecast Convergence — ${convergenceChart.method}`, font: { size: 14 } } }}
+                        config={{ responsive: true, displayModeBar: false }}
+                        style={{ width: '100%', height: '100%' }}
+                        useResizeHandler
+                      />
+                    </div>
+                    {/* Legend explanation */}
+                    <p className="text-xs text-gray-400 mt-2 text-center">
+                      Lighter bars = older forecasts (further ahead) &middot; Darker bars = more recent forecasts &middot; Diamond line = actual demand
+                    </p>
+                  </div>
+                )}
+
+                {/* ── Racing Bars / Method Comparison View ── */}
+                {effectiveView === 'racing' && hasRacing && (
+                  <div>
+                    <p className="text-sm text-gray-500 mb-4">
+                      {origins.length > 0 ? 'Compare method forecasts at each origin date.' : 'Compare forecast values across methods for each horizon month.'}
+                    </p>
+                    {origins.length > 0 && (
+                      <div className="flex items-center gap-3 mb-4 flex-wrap">
+                        <button onClick={togglePlay} className={`px-4 py-2 rounded-lg text-white text-sm font-medium transition-colors ${isPlaying ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'}`}>
+                          {isPlaying ? '■ Stop' : '▶ Play'}
                         </button>
-                      ))}
-                      <input type="range" min={1} max={horizonLength} value={selectedPeriod} onChange={e => setSelectedPeriod(parseInt(e.target.value))} className="w-28 accent-blue-500 ml-2" />
-                      <span className="text-xs font-mono text-gray-500">M{selectedPeriod}</span>
-                    </>
-                  )
-                }
-              </div>
-              {racingBarsSpec
-                ? <div className="w-full overflow-x-auto"><VegaLite spec={racingBarsSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
-                : <div className="text-gray-400 py-4 text-center text-sm">No comparison data</div>
-              }
-            </Section>
-          );
-        } else {
-          sectionNodes['evolution'] = null;
+                        <div className="flex-1 min-w-32">
+                          <input type="range" min={0} max={origins.length - 1} value={selectedOriginIdx} onChange={e => setSelectedOriginIdx(parseInt(e.target.value))} className="w-full accent-blue-500" />
+                        </div>
+                        <div className="text-sm font-mono bg-blue-50 text-blue-800 px-3 py-1.5 rounded-lg min-w-28 text-center font-medium">{origins[selectedOriginIdx] || '-'}</div>
+                      </div>
+                    )}
+                    <div className="flex items-center gap-2 mb-4 flex-wrap">
+                      <span className="text-sm text-gray-600">Horizon month:</span>
+                      {horizonLength <= 12
+                        ? Array.from({ length: horizonLength }, (_, i) => i + 1).map(p => (
+                            <button key={p} onClick={() => setSelectedPeriod(p)}
+                              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${selectedPeriod === p ? 'bg-blue-500 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
+                              M{p}
+                            </button>
+                          ))
+                        : (
+                          <>
+                            {[1, 3, 6, 12, 18, 24].filter(p => p <= horizonLength).map(p => (
+                              <button key={p} onClick={() => setSelectedPeriod(p)}
+                                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${selectedPeriod === p ? 'bg-blue-500 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
+                                M{p}
+                              </button>
+                            ))}
+                            <input type="range" min={1} max={horizonLength} value={selectedPeriod} onChange={e => setSelectedPeriod(parseInt(e.target.value))} className="w-28 accent-blue-500 ml-2" />
+                            <span className="text-xs font-mono text-gray-500">M{selectedPeriod}</span>
+                          </>
+                        )
+                      }
+                    </div>
+                    {racingBarsSpec
+                      ? <div className="w-full overflow-x-auto"><VegaLite spec={racingBarsSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+                      : <div className="text-gray-400 py-4 text-center text-sm">No comparison data</div>
+                    }
+                  </div>
+                )}
+              </Section>
+            );
+          } else {
+            sectionNodes['evolution'] = null;
+          }
         }
 
         /* forecast_table */

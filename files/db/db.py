@@ -301,6 +301,19 @@ def init_schema(config_path: Union[str, Path]) -> None:
         UNIQUE (unique_id, forecast_date, adjustment_type)
     );
 
+    -- ─── Hyperparameter overrides (user-edited params from the UI) ───
+
+    CREATE TABLE IF NOT EXISTS {schema}.hyperparameter_overrides (
+        id          SERIAL PRIMARY KEY,
+        unique_id   TEXT NOT NULL,
+        method      TEXT NOT NULL,
+        overrides   JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+        updated_at  TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (unique_id, method)
+    );
+    CREATE INDEX IF NOT EXISTS idx_hypoverrides_uid
+        ON {schema}.hyperparameter_overrides (unique_id);
+
     -- ─── Process log (pipeline run tracking) ─────────────────────────
 
     CREATE TABLE IF NOT EXISTS {schema}.process_log (

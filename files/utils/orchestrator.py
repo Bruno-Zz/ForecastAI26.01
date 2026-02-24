@@ -55,7 +55,8 @@ from db.db import get_conn, bulk_insert, jsonb_serialize, load_table, get_schema
 
 def _dask_forecast_batch(config_path: str,
                          batch_df: pd.DataFrame,
-                         batch_chars: pd.DataFrame) -> pd.DataFrame:
+                         batch_chars: pd.DataFrame,
+                         overrides_map: dict = None) -> pd.DataFrame:
     """
     Module-level standalone function submitted to Dask workers.
 
@@ -67,6 +68,7 @@ def _dask_forecast_batch(config_path: str,
         config_path: Path to config.yaml (picklable string).
         batch_df: Time series data slice for this batch.
         batch_chars: Characteristics slice for this batch.
+        overrides_map: Optional {unique_id: {method: {param: value}}} overrides.
 
     Returns:
         DataFrame with forecast results for the batch.
@@ -81,7 +83,8 @@ def _dask_forecast_batch(config_path: str,
         stat_forecaster = StatisticalForecaster(config_path)
         stat_forecasts = stat_forecaster.forecast_multiple_series(
             df=batch_df,
-            characteristics_df=batch_chars
+            characteristics_df=batch_chars,
+            overrides_map=overrides_map,
         )
         if not stat_forecasts.empty:
             all_forecasts.append(stat_forecasts)
@@ -98,7 +101,8 @@ def _dask_forecast_batch(config_path: str,
             ml_forecaster = MLForecaster(config_path)
             ml_forecasts = ml_forecaster.forecast_multiple_series(
                 df=batch_df,
-                characteristics_df=ml_eligible
+                characteristics_df=ml_eligible,
+                overrides_map=overrides_map,
             )
             if not ml_forecasts.empty:
                 all_forecasts.append(ml_forecasts)
@@ -523,7 +527,8 @@ class ForecastOrchestrator:
     def forecast_batch(self,
                        df: pd.DataFrame,
                        characteristics_df: pd.DataFrame,
-                       methods_filter: Optional[List[str]] = None) -> pd.DataFrame:
+                       methods_filter: Optional[List[str]] = None,
+                       overrides_map: dict = None) -> pd.DataFrame:
         """
         Generate forecasts for a batch of time series across all model families.
 
@@ -531,6 +536,7 @@ class ForecastOrchestrator:
             df: Time series data
             characteristics_df: Characteristics for this batch
             methods_filter: Optional list to restrict methods
+            overrides_map: Optional {unique_id: {method: {param: value}}} overrides.
 
         Returns:
             DataFrame with forecast results
@@ -542,7 +548,8 @@ class ForecastOrchestrator:
         try:
             stat_forecasts = self.stat_forecaster.forecast_multiple_series(
                 df=df,
-                characteristics_df=characteristics_df
+                characteristics_df=characteristics_df,
+                overrides_map=overrides_map,
             )
             if not stat_forecasts.empty:
                 all_forecasts.append(stat_forecasts)
@@ -559,7 +566,8 @@ class ForecastOrchestrator:
             try:
                 ml_forecasts = self.ml_forecaster.forecast_multiple_series(
                     df=df,
-                    characteristics_df=ml_eligible
+                    characteristics_df=ml_eligible,
+                    overrides_map=overrides_map,
                 )
                 if not ml_forecasts.empty:
                     all_forecasts.append(ml_forecasts)
@@ -604,13 +612,15 @@ class ForecastOrchestrator:
 
     def step_forecast(self,
                       df: pd.DataFrame,
-                      characteristics_df: pd.DataFrame) -> pd.DataFrame:
+                      characteristics_df: pd.DataFrame,
+                      overrides_map: dict = None) -> pd.DataFrame:
         """
         Step 3: Generate forecasts using all model families.
 
         Args:
             df: Time series data (must contain unique_id, date, y)
             characteristics_df: Series characteristics
+            overrides_map: Optional {unique_id: {method: {param: value}}} overrides.
 
         Returns:
             Combined forecast results
@@ -627,10 +637,13 @@ class ForecastOrchestrator:
 
         batch_size = self.parallel_config.get('batch_size', 100)
 
+        if overrides_map:
+            self.logger.info(f"Hyperparameter overrides active for {len(overrides_map)} series")
+
         if self.client is None or not DASK_AVAILABLE:
             # Serial mode
             self.logger.info("Running forecasting in serial mode...")
-            forecasts_df = self.forecast_batch(df, characteristics_df)
+            forecasts_df = self.forecast_batch(df, characteristics_df, overrides_map=overrides_map)
         else:
             # Parallel with Dask — use the module-level standalone function so
             # the orchestrator instance (which holds un-picklable asyncio state)
@@ -648,11 +661,19 @@ class ForecastOrchestrator:
                 batch_ids = batch_chars['unique_id'].tolist()
                 batch_df = df[df['unique_id'].isin(batch_ids)]
 
+                # Filter overrides to just this batch's series
+                batch_overrides = None
+                if overrides_map:
+                    batch_overrides = {uid: overrides_map[uid] for uid in batch_ids if uid in overrides_map}
+                    if not batch_overrides:
+                        batch_overrides = None
+
                 future = self.client.submit(
                     _dask_forecast_batch,   # picklable module-level function
                     self.config_path,       # picklable string
                     batch_df,               # DataFrame (Arrow-serialisable)
                     batch_chars,            # DataFrame (Arrow-serialisable)
+                    batch_overrides,        # dict (picklable) or None
                 )
                 futures.append(future)
 

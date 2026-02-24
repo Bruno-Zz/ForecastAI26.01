@@ -1117,6 +1117,148 @@ async def get_forecast_evolution(unique_id: str):
     }
 
 
+@app.get("/api/series/{unique_id}/forecast-convergence")
+async def get_forecast_convergence(unique_id: str, method: Optional[str] = None):
+    """
+    Forecast convergence view: how predictions for each target month evolved
+    across origin dates.
+
+    For every (origin, horizon_step) pair, we compute:
+        target_date = origin + horizon_step months
+    Then we group by target_date and return, for each target month, the
+    list of (origin, forecast_value) pairs so the frontend can draw bars
+    showing how the forecast converged as the target date approached.
+
+    Optional query param ``method`` restricts to a single forecast method
+    (defaults to all methods, returning the best/first available).
+
+    Returns::
+
+        {
+          "unique_id": "63530_517",
+          "methods": ["AutoARIMA", "AutoETS", ...],
+          "targets": [
+            {
+              "target_date": "2025-06-01",
+              "actual": 1234.0,
+              "origins": [
+                {"origin": "2025-01-01", "months_ahead": 5, "forecasts": {"AutoARIMA": 1100, "AutoETS": 1200}},
+                {"origin": "2025-02-01", "months_ahead": 4, "forecasts": {"AutoARIMA": 1150, "AutoETS": 1210}},
+                ...
+              ]
+            },
+            ...
+          ]
+        }
+    """
+    if data_cache['forecasts_by_origin'] is None:
+        raise HTTPException(status_code=503, detail="Forecasts by origin data not loaded")
+
+    df = _compute(data_cache['forecasts_by_origin'])
+
+    # Determine column names
+    if 'forecast_origin' in df.columns:
+        origin_col = 'forecast_origin'
+    elif 'origin' in df.columns:
+        origin_col = 'origin'
+    elif 'origin_date' in df.columns:
+        origin_col = 'origin_date'
+    else:
+        raise HTTPException(status_code=500, detail="Origin column not found in data")
+
+    actual_col = 'actual_value' if 'actual_value' in df.columns else 'actual'
+    has_horizon = 'horizon_step' in df.columns
+
+    series_df = df[df['unique_id'] == unique_id].copy()
+    if series_df.empty:
+        raise HTTPException(status_code=404, detail=f"No forecast convergence data for {unique_id}")
+
+    # Filter by method if requested
+    if method:
+        series_df = series_df[series_df['method'] == method]
+        if series_df.empty:
+            raise HTTPException(status_code=404, detail=f"No data for method {method}")
+
+    # Ensure origin is datetime
+    if not pd.api.types.is_datetime64_any_dtype(series_df[origin_col]):
+        series_df[origin_col] = pd.to_datetime(series_df[origin_col])
+
+    # Compute target_date = origin + horizon_step months
+    if has_horizon:
+        def _add_months(origin_ts, steps):
+            try:
+                return (origin_ts + pd.DateOffset(months=int(steps))).strftime('%Y-%m-%d')
+            except Exception:
+                return None
+        series_df['target_date'] = series_df.apply(
+            lambda r: _add_months(r[origin_col], r['horizon_step']), axis=1
+        )
+        series_df = series_df.dropna(subset=['target_date'])
+    else:
+        # Without horizon_step, we can't compute target dates
+        raise HTTPException(status_code=500, detail="horizon_step column required for convergence view")
+
+    if series_df.empty:
+        raise HTTPException(status_code=404, detail=f"No convergence data after target_date computation for {unique_id}")
+
+    # Get unique methods present
+    methods_list = sorted(series_df['method'].unique().tolist())
+
+    # Group by target_date (string, so groupby is reliable)
+    targets = []
+    for target_str, tgroup in series_df.groupby('target_date'):
+
+        # Get actual value (should be same across all rows for same target)
+        actual_val = None
+        if actual_col in tgroup.columns:
+            act_vals = tgroup[actual_col].dropna()
+            if len(act_vals) > 0:
+                actual_val = float(act_vals.iloc[0])
+
+        # Group by origin within this target_date
+        origin_entries = []
+        for origin_val, ogroup in tgroup.groupby(origin_col):
+            origin_str = origin_val.strftime('%Y-%m-%d') if hasattr(origin_val, 'strftime') else str(origin_val)
+
+            # Calculate months ahead
+            months_ahead = int(ogroup['horizon_step'].iloc[0]) if has_horizon else None
+
+            # Collect forecast values per method
+            method_forecasts = {}
+            for _, row in ogroup.iterrows():
+                m = str(row['method'])
+                pf = row.get('point_forecast', None)
+                if pf is not None:
+                    if isinstance(pf, (list, np.ndarray)):
+                        method_forecasts[m] = float(pf[0])
+                    else:
+                        method_forecasts[m] = float(pf)
+
+            origin_entries.append({
+                'origin': origin_str,
+                'months_ahead': months_ahead,
+                'forecasts': method_forecasts
+            })
+
+        # Sort origins chronologically
+        origin_entries.sort(key=lambda e: e['origin'])
+
+        targets.append({
+            'target_date': target_str,
+            'actual': actual_val,
+            'origins': origin_entries
+        })
+
+    # Sort targets chronologically
+    targets.sort(key=lambda t: t['target_date'])
+
+    return {
+        'unique_id': unique_id,
+        'methods': methods_list,
+        'targets': targets
+    }
+
+
 @app.get("/api/series/{unique_id}/vega-spec")
 async def get_vega_spec(unique_id: str):
     """
@@ -1942,6 +2084,30 @@ async def run_forecast_for_series(req: RunForecastRequest):
     if req.all_methods:
         extra_args.append("--all-methods")
 
+    # Load any hyperparameter overrides from DB for the requested series
+    if _DB_AVAILABLE:
+        try:
+            conn = get_conn(_api_config_path())
+            schema = get_schema(_api_config_path())
+            placeholders = ",".join(["%s"] * len(req.series))
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT unique_id, method, overrides FROM {schema}.hyperparameter_overrides "
+                    f"WHERE unique_id IN ({placeholders})",
+                    tuple(req.series),
+                )
+                rows = cur.fetchall()
+            conn.close()
+            if rows:
+                overrides_map = {}
+                for uid, method, ovr in rows:
+                    if isinstance(ovr, str):
+                        ovr = json.loads(ovr)
+                    overrides_map.setdefault(uid, {})[method] = ovr
+                extra_args.extend(["--overrides-json", json.dumps(overrides_map)])
+        except Exception as exc:
+            logger.warning(f"Could not load hyperparameter overrides: {exc}")
+
     t = threading.Thread(
         target=_run_pipeline_step_thread,
         args=(job_id, "forecast", extra_args),
@@ -1950,6 +2116,93 @@ async def run_forecast_for_series(req: RunForecastRequest):
     t.start()
 
     return {"job_id": job_id, "step": "forecast-series", "status": "pending"}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Hyperparameter overrides CRUD
+# ══════════════════════════════════════════════════════════════════════
+
+class HyperparamOverridesRequest(BaseModel):
+    overrides: Dict[str, Dict[str, Any]]  # {method: {param: value, ...}, ...}
+
+
+@app.get("/api/hyperparams/{unique_id}")
+async def get_hyperparams(unique_id: str):
+    """Return all saved hyperparameter overrides for a series."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        conn = get_conn(_api_config_path())
+        schema = get_schema(_api_config_path())
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT method, overrides FROM {schema}.hyperparameter_overrides WHERE unique_id = %s",
+                (unique_id,),
+            )
+            rows = cur.fetchall()
+        conn.close()
+        result = {}
+        for method, overrides in rows:
+            if isinstance(overrides, str):
+                overrides = json.loads(overrides)
+            result[method] = overrides
+        return {"unique_id": unique_id, "overrides": result}
+    except Exception as exc:
+        logger.error(f"Failed to load hyperparameter overrides: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.put("/api/hyperparams/{unique_id}")
+async def put_hyperparams(unique_id: str, req: HyperparamOverridesRequest):
+    """Upsert hyperparameter overrides for one or more methods."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        conn = get_conn(_api_config_path())
+        schema = get_schema(_api_config_path())
+        with conn.cursor() as cur:
+            for method, overrides in req.overrides.items():
+                cur.execute(
+                    f"""INSERT INTO {schema}.hyperparameter_overrides (unique_id, method, overrides, updated_at)
+                        VALUES (%s, %s, %s, NOW())
+                        ON CONFLICT (unique_id, method)
+                        DO UPDATE SET overrides = EXCLUDED.overrides, updated_at = NOW()""",
+                    (unique_id, method, json.dumps(overrides)),
+                )
+        conn.commit()
+        conn.close()
+        return {"status": "ok", "unique_id": unique_id, "methods_updated": list(req.overrides.keys())}
+    except Exception as exc:
+        logger.error(f"Failed to save hyperparameter overrides: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.delete("/api/hyperparams/{unique_id}")
+async def delete_hyperparams(unique_id: str, method: Optional[str] = None):
+    """Delete hyperparameter overrides. If ?method=X is provided, delete only that method."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        conn = get_conn(_api_config_path())
+        schema = get_schema(_api_config_path())
+        with conn.cursor() as cur:
+            if method:
+                cur.execute(
+                    f"DELETE FROM {schema}.hyperparameter_overrides WHERE unique_id = %s AND method = %s",
+                    (unique_id, method),
+                )
+            else:
+                cur.execute(
+                    f"DELETE FROM {schema}.hyperparameter_overrides WHERE unique_id = %s",
+                    (unique_id,),
+                )
+            deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        return {"status": "ok", "unique_id": unique_id, "deleted": deleted}
+    except Exception as exc:
+        logger.error(f"Failed to delete hyperparameter overrides: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/pipeline/jobs")

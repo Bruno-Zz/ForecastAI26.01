@@ -16,6 +16,7 @@ from pathlib import Path
 try:
     from statsforecast import StatsForecast
     from statsforecast.models import (
+        ARIMA,
         AutoARIMA,
         AutoETS,
         AutoTheta,
@@ -96,7 +97,8 @@ class StatisticalForecaster:
     def get_model_instance(self,
                           method_name: str,
                           characteristics: Dict,
-                          season_length: Optional[int] = None) -> Tuple[Any, Dict[str, Any]]:
+                          season_length: Optional[int] = None,
+                          overrides: Optional[Dict[str, Any]] = None) -> Tuple[Any, Dict[str, Any]]:
         """
         Get configured model instance and its hyperparameters.
 
@@ -104,10 +106,13 @@ class StatisticalForecaster:
             method_name: Name of the forecasting method
             characteristics: Time series characteristics for hyperparameter tuning
             season_length: Seasonal period length
+            overrides: Optional dict of user-edited hyperparameter values to merge.
 
         Returns:
             Tuple of (configured model instance, hyperparameters dict)
         """
+        ovr = overrides or {}
+
         # Determine season length from characteristics if not provided
         if season_length is None:
             if characteristics.get('has_seasonality'):
@@ -116,18 +121,13 @@ class StatisticalForecaster:
             else:
                 season_length = 1
 
-        # Clamp season_length to at least 1
-        season_length = max(1, int(season_length))
+        # Clamp season_length to at least 1 — apply override if present
+        season_length = max(1, int(ovr.get('season_length', season_length)))
 
         # For MSTL the trend forecaster must be non-seasonal (season_length=1).
-        # Using AutoETS(season_length>1) causes "Trend forecaster should not
-        # adjust seasonal models".  Use AutoARIMA(season_length=1) instead.
         mstl_trend = AutoARIMA(season_length=1)
 
         # Conformal prediction intervals for intermittent-demand models
-        # (CrostonOptimized, ADIDA, IMAPA, TSB) which don't produce native PIs.
-        # ConformalIntervals requires n_windows * h + 1 observations; use None
-        # when the series is too short — the model still runs, just no intervals.
         n_obs = characteristics.get('n_observations', 0)
         _min_for_conformal = 2 * self.horizon + 1  # n_windows=2
         _conformal = ConformalIntervals(n_windows=2, h=self.horizon) if n_obs >= _min_for_conformal else None
@@ -140,8 +140,10 @@ class StatisticalForecaster:
             'n_observations': n_obs,
         }
 
-        approximation = True if characteristics.get('n_observations', 0) > 150 else False
-        decomp_type = 'multiplicative' if characteristics.get('complexity_level') == 'high' else 'additive'
+        approximation = ovr.get('approximation',
+                                True if characteristics.get('n_observations', 0) > 150 else False)
+        decomp_type = ovr.get('decomposition_type',
+                              'multiplicative' if characteristics.get('complexity_level') == 'high' else 'additive')
         conformal_enabled = _conformal is not None
         conformal_info = {
             'conformal_intervals': conformal_enabled,
@@ -149,45 +151,105 @@ class StatisticalForecaster:
             'conformal_h': self.horizon if conformal_enabled else None,
         }
 
+        # ── TSB-specific overridable params ──
+        tsb_alpha_d = ovr.get('alpha_d', 0.1)
+        tsb_alpha_p = ovr.get('alpha_p', 0.1)
+
+        # ── ETS model override ──
+        ets_model = ovr.get('model', 'ZZZ')
+
+        # ── SeasonalWindowAverage window_size override ──
+        swa_window = int(ovr.get('window_size', 2))
+
+        # Mark overrides in hyperparams dict for UI display
+        _ovr_flag = {'has_overrides': True, 'overrides_applied': ovr} if ovr else {}
+
+        # ── ARIMA: switch to manual ARIMA when user overrides p/d/q ──
+        _arima_has_order = any(k in ovr for k in ('p', 'd', 'q', 'P', 'D', 'Q'))
+        _arima_order = (int(ovr.get('p', 0)), int(ovr.get('d', 0)), int(ovr.get('q', 0)))
+        _arima_seasonal = (int(ovr.get('P', 0)), int(ovr.get('D', 0)), int(ovr.get('Q', 0)))
+        _arima_include_mean = ovr.get('include_mean', True)
+        _arima_include_drift = ovr.get('include_drift', False)
+        _arima_method = ovr.get('method', 'CSS-ML')
+        # AutoARIMA search params (when not forcing manual orders)
+        _auto_arima_kwargs = {}
+        for _aak in ('max_p', 'max_q', 'max_P', 'max_Q', 'max_order', 'max_d', 'max_D',
+                      'start_p', 'start_q', 'start_P', 'start_Q',
+                      'stationary', 'seasonal', 'stepwise', 'allowdrift', 'allowmean'):
+            if _aak in ovr:
+                _auto_arima_kwargs[_aak] = ovr[_aak]
+
+        # ── ETS: pass through damped/phi/model overrides ──
+        _ets_damped = ovr.get('damped', None)
+        _ets_phi = ovr.get('phi', None)
+
+        # ── Theta: model override (Theta, OptimizedTheta, DynamicTheta...) ──
+        _theta_model = ovr.get('model', None)  # e.g. 'OptimizedTheta'
+
+        # ── CES: model override (N=simple, P=partial, F=full, Z=auto) ──
+        _ces_model = ovr.get('model', None)
+
         # Model mapping with hyperparameter configuration
-        # Each entry returns (model_instance, method-specific hyperparameters)
         model_configs = {
             'AutoARIMA': lambda: (
-                AutoARIMA(season_length=season_length, approximation=approximation),
-                {**_base_hyper, 'season_length': season_length,
+                ARIMA(order=_arima_order,
+                      seasonal_order=_arima_seasonal,
+                      season_length=season_length,
+                      include_mean=_arima_include_mean,
+                      include_drift=_arima_include_drift,
+                      method=_arima_method)
+                if _arima_has_order else
+                AutoARIMA(season_length=season_length, approximation=approximation,
+                          **_auto_arima_kwargs),
+                {**_base_hyper, **_ovr_flag, 'season_length': season_length,
                  'approximation': approximation,
+                 **_auto_arima_kwargs,
                  'method_family': 'ARIMA',
-                 'description': 'Automatic ARIMA model selection via Hyndman-Khandakar algorithm. '
-                                'Searches over (p,d,q)(P,D,Q)m orders and selects by AICc.'}
+                 'description': ('Manual ARIMA({},{},{})({},{},{}) with user-specified orders.'
+                                 .format(*_arima_order, *_arima_seasonal)
+                                 if _arima_has_order else
+                                 'Automatic ARIMA model selection via Hyndman-Khandakar algorithm. '
+                                 'Searches over (p,d,q)(P,D,Q)m orders and selects by AICc.'),
+                 **(dict(p=_arima_order[0], d=_arima_order[1], q=_arima_order[2],
+                         P=_arima_seasonal[0], D=_arima_seasonal[1], Q=_arima_seasonal[2],
+                         include_mean=_arima_include_mean, include_drift=_arima_include_drift)
+                    if _arima_has_order else {})}
             ),
             'AutoETS': lambda: (
-                AutoETS(season_length=season_length, model='ZZZ'),
-                {**_base_hyper, 'season_length': season_length,
-                 'model': 'ZZZ',
+                AutoETS(season_length=season_length, model=ets_model,
+                        damped=_ets_damped, phi=_ets_phi),
+                {**_base_hyper, **_ovr_flag, 'season_length': season_length,
+                 'model': ets_model,
+                 **({} if _ets_damped is None else {'damped': _ets_damped}),
+                 **({} if _ets_phi is None else {'phi': _ets_phi}),
                  'description': 'Automatic Exponential Smoothing (ETS) model selection. '
-                                'ZZZ = auto-select Error, Trend, and Seasonal components. '
+                                f'{ets_model} = auto-select Error, Trend, and Seasonal components. '
                                 'Optimizes smoothing parameters (alpha, beta, gamma, phi) via MLE.',
                  'method_family': 'ETS',
                  'selection_criterion': 'AICc'}
             ),
             'AutoTheta': lambda: (
-                AutoTheta(season_length=season_length, decomposition_type=decomp_type),
-                {**_base_hyper, 'season_length': season_length,
+                AutoTheta(season_length=season_length, decomposition_type=decomp_type,
+                          **({'model': _theta_model} if _theta_model else {})),
+                {**_base_hyper, **_ovr_flag, 'season_length': season_length,
                  'decomposition_type': decomp_type,
+                 **({'model': _theta_model} if _theta_model else {}),
                  'description': f'Automatic Theta method with {decomp_type} decomposition. '
                                 'Decomposes series into trend and seasonality, applies Theta lines.',
                  'method_family': 'Theta'}
             ),
             'AutoCES': lambda: (
-                AutoCES(season_length=season_length),
-                {**_base_hyper, 'season_length': season_length,
+                AutoCES(season_length=season_length,
+                        **({'model': _ces_model} if _ces_model else {})),
+                {**_base_hyper, **_ovr_flag, 'season_length': season_length,
+                 **({'model': _ces_model} if _ces_model else {}),
                  'description': 'Complex Exponential Smoothing. Auto-selects between '
                                 'simple (N), partial (P), full (F) seasonal models.',
                  'method_family': 'CES'}
             ),
             'MSTL': lambda: (
                 MSTL(season_length=season_length, trend_forecaster=mstl_trend),
-                {**_base_hyper, 'season_length': season_length,
+                {**_base_hyper, **_ovr_flag, 'season_length': season_length,
                  'trend_forecaster': 'AutoARIMA(season_length=1)',
                  'description': 'Multiple Seasonal-Trend decomposition using LOESS. '
                                 'Decomposes into trend + seasonal + remainder, then forecasts '
@@ -196,7 +258,7 @@ class StatisticalForecaster:
             ),
             'CrostonOptimized': lambda: (
                 CrostonOptimized(prediction_intervals=_conformal),
-                {**_base_hyper, **conformal_info,
+                {**_base_hyper, **conformal_info, **_ovr_flag,
                  'description': 'Optimized Croston method for intermittent demand. '
                                 'Separately models demand size and inter-arrival intervals. '
                                 'Optimizes smoothing parameter via MSE.',
@@ -204,50 +266,50 @@ class StatisticalForecaster:
             ),
             'ADIDA': lambda: (
                 ADIDA(prediction_intervals=_conformal),
-                {**_base_hyper, **conformal_info,
+                {**_base_hyper, **conformal_info, **_ovr_flag,
                  'description': 'Aggregate-Disaggregate Intermittent Demand Approach. '
                                 'Aggregates demand to remove intermittency, forecasts, then disaggregates.',
                  'method_family': 'Intermittent'}
             ),
             'IMAPA': lambda: (
                 IMAPA(prediction_intervals=_conformal),
-                {**_base_hyper, **conformal_info,
+                {**_base_hyper, **conformal_info, **_ovr_flag,
                  'description': 'Intermittent Multiple Aggregation Prediction Algorithm. '
                                 'Aggregates at multiple temporal levels and combines forecasts.',
                  'method_family': 'Intermittent'}
             ),
             'TSB': lambda: (
-                TSB(alpha_d=0.1, alpha_p=0.1, prediction_intervals=_conformal),
-                {**_base_hyper, **conformal_info,
-                 'alpha_d': 0.1,
-                 'alpha_p': 0.1,
-                 'description': 'Teunter-Syntetos-Babai method for intermittent demand. '
-                                'Smoothes demand probability (alpha_p=0.1) and demand size (alpha_d=0.1) separately.',
+                TSB(alpha_d=tsb_alpha_d, alpha_p=tsb_alpha_p, prediction_intervals=_conformal),
+                {**_base_hyper, **conformal_info, **_ovr_flag,
+                 'alpha_d': tsb_alpha_d,
+                 'alpha_p': tsb_alpha_p,
+                 'description': f'Teunter-Syntetos-Babai method for intermittent demand. '
+                                f'Smoothes demand probability (alpha_p={tsb_alpha_p}) and demand size (alpha_d={tsb_alpha_d}) separately.',
                  'method_family': 'Intermittent'}
             ),
             'SeasonalNaive': lambda: (
                 SeasonalNaive(season_length=season_length),
-                {**_base_hyper, 'season_length': season_length,
+                {**_base_hyper, **_ovr_flag, 'season_length': season_length,
                  'description': f'Repeats last seasonal cycle (season_length={season_length}). '
                                 'Forecast for h steps ahead equals the value from h-season_length steps ago.',
                  'method_family': 'Naive'}
             ),
             'HistoricAverage': lambda: (
                 HistoricAverage(),
-                {**_base_hyper,
+                {**_base_hyper, **_ovr_flag,
                  'description': 'Flat forecast equal to the mean of all historical observations.',
                  'method_family': 'Naive'}
             ),
             'Naive': lambda: (
                 Naive(),
-                {**_base_hyper,
+                {**_base_hyper, **_ovr_flag,
                  'description': 'Random walk forecast — repeats the last observed value for all horizons.',
                  'method_family': 'Naive'}
             ),
             'SeasonalWindowAverage': lambda: (
-                SeasonalWindowAverage(season_length=season_length, window_size=2),
-                {**_base_hyper, 'season_length': season_length, 'window_size': 2,
-                 'description': f'Average of last {2} seasonal cycles (season_length={season_length}).',
+                SeasonalWindowAverage(season_length=season_length, window_size=swa_window),
+                {**_base_hyper, **_ovr_flag, 'season_length': season_length, 'window_size': swa_window,
+                 'description': f'Average of last {swa_window} seasonal cycles (season_length={season_length}).',
                  'method_family': 'Naive'}
             ),
         }
@@ -261,16 +323,18 @@ class StatisticalForecaster:
                               df: pd.DataFrame,
                               unique_id: str,
                               methods: List[str],
-                              characteristics: Dict) -> List[ForecastResult]:
+                              characteristics: Dict,
+                              overrides_map: Optional[Dict[str, Dict[str, Any]]] = None) -> List[ForecastResult]:
         """
         Generate forecasts for a single time series using multiple methods.
-        
+
         Args:
             df: DataFrame with columns [unique_id, ds, y]
             unique_id: Series identifier
             methods: List of method names to use
             characteristics: Time series characteristics
-            
+            overrides_map: Optional {method: {param: value}} overrides for this series.
+
         Returns:
             List of ForecastResult objects
         """
@@ -340,7 +404,10 @@ class StatisticalForecaster:
                 start_time = time.time()
 
                 # Get model instance AND its hyperparameters
-                model, method_hyperparams = self.get_model_instance(method, characteristics, season_length)
+                method_ovr = (overrides_map or {}).get(method, {})
+                model, method_hyperparams = self.get_model_instance(
+                    method, characteristics, season_length, overrides=method_ovr
+                )
 
                 # Create StatsForecast instance
                 sf = StatsForecast(
@@ -393,17 +460,83 @@ class StatisticalForecaster:
                 # After fitting, some StatsForecast models expose their estimated
                 # parameters (e.g. ARIMA orders, ETS smoothing weights).
                 try:
-                    fitted_models = sf.fitted_[0, 0]  # first model, first series
-                    if hasattr(fitted_models, 'model_') and hasattr(fitted_models.model_, '__dict__'):
-                        _fitted = fitted_models.model_.__dict__
-                        # Extract only JSON-serialisable primitives
+                    fitted_model_obj = sf.fitted_[0, 0]  # first model, first series
+                    if hasattr(fitted_model_obj, 'model_'):
+                        _inner = fitted_model_obj.model_
+                        _fitted = getattr(_inner, '__dict__', {})
+
+                        # Generic extraction — JSON-serialisable primitives
                         for k, v in _fitted.items():
                             if k.startswith('_'):
                                 continue
                             if isinstance(v, (int, float, bool, str)):
                                 method_hyperparams[f'fitted_{k}'] = v
+                            elif isinstance(v, (np.integer,)):
+                                method_hyperparams[f'fitted_{k}'] = int(v)
+                            elif isinstance(v, (np.floating,)):
+                                method_hyperparams[f'fitted_{k}'] = float(v)
                             elif isinstance(v, np.ndarray) and v.size <= 10:
                                 method_hyperparams[f'fitted_{k}'] = v.tolist()
+
+                        # ── ARIMA-specific: extract (p,d,q)(P,D,Q,s) ──
+                        if method in ('AutoARIMA',):
+                            arma = getattr(_inner, 'arma', None)
+                            if arma is not None and hasattr(arma, '__len__') and len(arma) >= 7:
+                                method_hyperparams['fitted_p'] = int(arma[0])
+                                method_hyperparams['fitted_q'] = int(arma[1])
+                                method_hyperparams['fitted_P'] = int(arma[2])
+                                method_hyperparams['fitted_Q'] = int(arma[3])
+                                method_hyperparams['fitted_s'] = int(arma[4])
+                                method_hyperparams['fitted_d'] = int(arma[5])
+                                method_hyperparams['fitted_D'] = int(arma[6])
+                            # Fallback: look for individual attributes
+                            for attr in ('p', 'd', 'q', 'P', 'D', 'Q', 's'):
+                                if f'fitted_{attr}' not in method_hyperparams:
+                                    val = getattr(_inner, attr, None)
+                                    if val is not None:
+                                        method_hyperparams[f'fitted_{attr}'] = int(val) if isinstance(val, (int, np.integer)) else val
+                            # Also grab AIC / AICc / BIC if available
+                            for attr in ('aic', 'aicc', 'bic'):
+                                val = getattr(_inner, attr, None)
+                                if val is not None and isinstance(val, (int, float, np.floating)):
+                                    method_hyperparams[f'fitted_{attr}'] = round(float(val), 4)
+
+                        # ── ETS-specific: extract alpha, beta, gamma, phi ──
+                        if method in ('AutoETS',):
+                            for attr in ('alpha', 'beta', 'gamma', 'phi', 'sigma2'):
+                                val = getattr(_inner, attr, None)
+                                if val is not None and isinstance(val, (int, float, np.integer, np.floating)):
+                                    method_hyperparams[f'fitted_{attr}'] = round(float(val), 6)
+                            # ETS model type string (e.g. 'MAM', 'ANA')
+                            for attr in ('model', 'errortype', 'trendtype', 'seasontype', 'damped'):
+                                val = getattr(_inner, attr, None)
+                                if val is not None:
+                                    if isinstance(val, str):
+                                        method_hyperparams[f'fitted_{attr}'] = val
+                                    elif isinstance(val, bool):
+                                        method_hyperparams[f'fitted_{attr}'] = val
+                            for attr in ('aic', 'aicc', 'bic'):
+                                val = getattr(_inner, attr, None)
+                                if val is not None and isinstance(val, (int, float, np.floating)):
+                                    method_hyperparams[f'fitted_{attr}'] = round(float(val), 4)
+
+                        # ── Theta-specific ──
+                        if method in ('AutoTheta',):
+                            for attr in ('theta', 'alpha', 'drift'):
+                                val = getattr(_inner, attr, None)
+                                if val is not None and isinstance(val, (int, float, np.integer, np.floating)):
+                                    method_hyperparams[f'fitted_{attr}'] = round(float(val), 6)
+
+                        # ── CES-specific ──
+                        if method in ('AutoCES',):
+                            for attr in ('alpha', 'beta', 'model'):
+                                val = getattr(_inner, attr, None)
+                                if val is not None:
+                                    if isinstance(val, (int, float, np.integer, np.floating)):
+                                        method_hyperparams[f'fitted_{attr}'] = round(float(val), 6)
+                                    elif isinstance(val, str):
+                                        method_hyperparams[f'fitted_{attr}'] = val
+
                 except Exception:
                     pass  # Not all models expose fitted internals
 
@@ -452,7 +585,8 @@ class StatisticalForecaster:
     def forecast_multiple_series(self,
                                 df: pd.DataFrame,
                                 characteristics_df: pd.DataFrame,
-                                parallel: bool = False) -> pd.DataFrame:
+                                parallel: bool = False,
+                                overrides_map: dict = None) -> pd.DataFrame:
         """
         Generate forecasts for a batch of time series sequentially.
         Parallelism across series is handled externally by the Dask orchestrator,
@@ -462,6 +596,7 @@ class StatisticalForecaster:
             df: DataFrame with time series data
             characteristics_df: DataFrame with characteristics and recommended methods
             parallel: Unused – kept for API compatibility
+            overrides_map: Optional {unique_id: {method: {param: value}}} overrides.
 
         Returns:
             DataFrame with all forecast results
@@ -495,12 +630,16 @@ class StatisticalForecaster:
             # Convert characteristics to dict
             characteristics = char_row.to_dict()
 
+            # Extract per-series overrides (if any)
+            series_overrides = (overrides_map or {}).get(unique_id, None)
+
             # Generate forecasts
             results = self.forecast_single_series(
                 df=df,
                 unique_id=unique_id,
                 methods=methods,
-                characteristics=characteristics
+                characteristics=characteristics,
+                overrides_map=series_overrides,
             )
 
             all_results.extend(results)

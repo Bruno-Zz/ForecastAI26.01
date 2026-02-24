@@ -81,11 +81,11 @@ etl:
     max_date: null  # null = use current date
     
     # Data quality filters
-    min_observations: 12  # Minimum number of observations per time series
+    min_observations: 52  # Minimum number of observations per time series (1 year weekly)
     
   # Aggregation if needed
   aggregation:
-    frequency: "M"  # D=Daily, W=Weekly, M=Monthly
+    frequency: "W"  # D=Daily, W=Weekly, M=Monthly
     method: "sum"   # sum, mean, median
 
 # Outlier Detection & Correction
@@ -105,7 +105,7 @@ outlier_detection:
 
   # STL decomposition residuals method parameters
   stl_residuals:
-    seasonal_period: 12            # STL seasonal period
+    seasonal_period: 52            # STL seasonal period (52 weeks)
     residual_threshold: 3.0        # Residual z-score threshold
 
   # Correction parameters
@@ -119,7 +119,7 @@ outlier_detection:
 characterization:
   # Seasonality detection
   seasonality:
-    test_periods: [7, 30, 365]  # Days for daily data, adjust for monthly
+    test_periods: [4, 13, 26, 52]  # Weeks: monthly(4), quarterly(13), semi-annual(26), annual(52)
     significance_level: 0.05
     min_strength: 0.3  # Minimum seasonal strength to consider significant
   
@@ -147,16 +147,16 @@ characterization:
 
 # Forecasting Configuration
 forecasting:
-  horizon: 24  # Number of periods to forecast (2 years monthly)
-  frequency: "M"  # D, W, M, Q, Y
+  horizon: 52  # Number of periods to forecast (1 year weekly)
+  frequency: "W"  # D, W, M, Q, Y
   
   # Backtesting configuration
   backtesting:
     n_windows: 3        # Number of rolling origins to evaluate
-    step_size: 1        # Periods between consecutive origins
+    step_size: 4        # Periods (weeks) between consecutive origins
     # First origin is always earliest_obs + 2 years (auto-detected from data).
     # Backtest is attempted for ALL series regardless of length.
-    min_train_size: 12  # Kept for backward-compat; no longer gates backtesting
+    min_train_size: 52  # Minimum training size (1 year of weekly data)
   
   # Prediction intervals
   confidence_levels: [10, 25, 50, 75, 90, 95, 99]  # For MEIO

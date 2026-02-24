@@ -76,7 +76,15 @@
       "Bash(cmd.exe /c start \"\" \"C:\\\\allDev\\\\ForecastAI2026.01\\\\ForecastAI2026_Documentation.pdf\")",
       "Bash(psql:*)",
       "Bash(npm --prefix \"C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\frontend\" run build)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(more:*)",
+      "Bash(node -e:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(find:*)",
+      "Bash(wmic process:*)",
+      "Bash(git status:*)",
+      "Bash(npx react-scripts build)",
+      "Bash(wc:*)"
     ]
   }
 }
