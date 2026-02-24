@@ -3,17 +3,14 @@ Parallel Forecast Orchestrator
 Coordinates all forecasting methods across time series using Dask.
 
 Pipeline steps:
-  1. ETL: Extract from PostgreSQL, transform, load to PostgreSQL
+  1. ETL: Extract from PostgreSQL, transform, load to Parquet
   2. Characterization: Analyze each series (seasonality, trend, intermittency, complexity)
   3. Forecasting: Statistical + Neural + Foundation + ML models
   4. Backtesting: Rolling-window evaluation with per-origin forecast storage
   5. Best method selection: Composite-score ranking per series
   6. Distribution fitting: Parametric distributions for MEIO
-
-All intermediate and final results are persisted to PostgreSQL (zcube schema).
 """
 
-import json
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional
@@ -49,14 +46,10 @@ from selection.best_method import MethodSelector
 from outlier.detection import OutlierDetector
 from utils.process_logger import ProcessLogger, ListHandler
 
-# Database helpers
-from db.db import get_conn, bulk_insert, jsonb_serialize, load_table, get_schema
-
 
 def _dask_forecast_batch(config_path: str,
                          batch_df: pd.DataFrame,
-                         batch_chars: pd.DataFrame,
-                         overrides_map: dict = None) -> pd.DataFrame:
+                         batch_chars: pd.DataFrame) -> pd.DataFrame:
     """
     Module-level standalone function submitted to Dask workers.
 
@@ -68,7 +61,6 @@ def _dask_forecast_batch(config_path: str,
         config_path: Path to config.yaml (picklable string).
         batch_df: Time series data slice for this batch.
         batch_chars: Characteristics slice for this batch.
-        overrides_map: Optional {unique_id: {method: {param: value}}} overrides.
 
     Returns:
         DataFrame with forecast results for the batch.
@@ -83,8 +75,7 @@ def _dask_forecast_batch(config_path: str,
         stat_forecaster = StatisticalForecaster(config_path)
         stat_forecasts = stat_forecaster.forecast_multiple_series(
             df=batch_df,
-            characteristics_df=batch_chars,
-            overrides_map=overrides_map,
+            characteristics_df=batch_chars
         )
         if not stat_forecasts.empty:
             all_forecasts.append(stat_forecasts)
@@ -101,8 +92,7 @@ def _dask_forecast_batch(config_path: str,
             ml_forecaster = MLForecaster(config_path)
             ml_forecasts = ml_forecaster.forecast_multiple_series(
                 df=batch_df,
-                characteristics_df=ml_eligible,
-                overrides_map=overrides_map,
+                characteristics_df=ml_eligible
             )
             if not ml_forecasts.empty:
                 all_forecasts.append(ml_forecasts)
@@ -322,39 +312,19 @@ class ForecastOrchestrator:
             self._start_local_client(dask_config)
 
     def _start_local_client(self, dask_config: Dict):
-        """Start local Dask client with heartbeat / timeout settings."""
-        import os
-        n_workers = dask_config.get('n_workers') or os.cpu_count()
-        threads_per_worker = dask_config.get('threads_per_worker', 2)
+        """Start local Dask client."""
+        n_workers = dask_config.get('n_workers')
+        threads_per_worker = dask_config.get('threads_per_worker', 1)
         memory_limit = dask_config.get('memory_limit', 'auto')
-        death_timeout = dask_config.get('death_timeout', 120)
-        heartbeat_interval = dask_config.get('heartbeat_interval', '10s')
-
-        # Configure Dask distributed timeouts to prevent CommClosedError
-        # on Windows when many workers are under heavy CPU load.
-        if DASK_AVAILABLE:
-            dask.config.set({
-                "distributed.comm.timeouts.connect": "60s",
-                "distributed.comm.timeouts.tcp": "120s",
-                "distributed.worker.heartbeat-interval": heartbeat_interval,
-            })
 
         self.client = Client(
             n_workers=n_workers,
             threads_per_worker=threads_per_worker,
             memory_limit=memory_limit,
-            processes=True,
-            timeout=death_timeout,
+            processes=True
         )
 
-        total_slots = n_workers * threads_per_worker
-        cpu_count = os.cpu_count() or 1
-        pct = int(100 * total_slots / cpu_count)
-        self.logger.info(
-            f"Started local Dask client: {n_workers} workers × "
-            f"{threads_per_worker} threads = {total_slots} slots "
-            f"({pct}% of {cpu_count} cores)"
-        )
+        self.logger.info(f"Started local Dask client: {self.client}")
         self.logger.info(f"Dashboard: {self.client.dashboard_link}")
 
     def stop_dask_client(self):
@@ -362,13 +332,6 @@ class ForecastOrchestrator:
         if self.client:
             self.client.close()
             self.client = None
-
-    # -- DB helpers --
-
-    def _load_table_as_df(self, table_name: str) -> pd.DataFrame:
-        """Load a zcube table into a pandas DataFrame."""
-        schema = get_schema(self.config_path)
-        return load_table(self.config_path, f"{schema}.{table_name}")
 
     # -- ProcessLogger helpers --
 
@@ -416,7 +379,7 @@ class ForecastOrchestrator:
 
     def step_etl(self) -> pd.DataFrame:
         """
-        Step 1: Extract data from PostgreSQL, transform, load back to PostgreSQL.
+        Step 1: Extract data from PostgreSQL, transform, load to Parquet.
 
         Returns:
             DataFrame with columns [unique_id, date, y, ...]
@@ -446,52 +409,76 @@ class ForecastOrchestrator:
 
         corrected_df, outliers_df = self.outlier_detector.detect_and_correct_all(df)
 
-        schema = get_schema(self.config_path)
-
-        # Persist outlier records to PostgreSQL
-        if not outliers_df.empty:
-            outlier_cols = [
-                "unique_id", "date", "original_value", "corrected_value",
-                "detection_method", "correction_method", "z_score",
-                "lower_bound", "upper_bound",
-            ]
-            outlier_rows = []
-            for _, r in outliers_df.iterrows():
-                outlier_rows.append(tuple(
-                    r.get(c) if c != "date" else (r["date"].date() if hasattr(r["date"], "date") else r["date"])
-                    for c in outlier_cols
-                ))
-            bulk_insert(
-                self.config_path,
-                f"{schema}.detected_outliers",
-                outlier_cols,
-                outlier_rows,
-            )
-            self.logger.info(f"Outliers saved to DB: {len(outlier_rows)} rows")
-
-            # Update corrected_qty in demand_actuals for affected rows
-            conn = get_conn(self.config_path)
+        # Save corrected data to PostgreSQL (update corrected_qty in demand_actuals)
+        try:
+            from db.db import get_conn, get_schema
+            config_path = str(self.config_path)
+            schema = get_schema(config_path)
+            conn = get_conn(config_path)
             try:
                 with conn.cursor() as cur:
-                    update_rows = [
-                        (float(r["corrected_value"]), str(r["unique_id"]),
-                         r["date"].date() if hasattr(r["date"], "date") else r["date"])
-                        for _, r in outliers_df.iterrows()
-                    ]
-                    from psycopg2.extras import execute_batch
-                    execute_batch(
-                        cur,
-                        f"UPDATE {schema}.demand_actuals SET corrected_qty = %s WHERE unique_id = %s AND date = %s",
-                        update_rows,
-                        page_size=5000,
-                    )
+                    # Build a mapping of (unique_id, date) → corrected y value
+                    updates = []
+                    for _, row in corrected_df.iterrows():
+                        updates.append((float(row['y']), str(row['unique_id']), str(row['date'])))
+
+                    if updates:
+                        from psycopg2.extras import execute_batch
+                        update_sql = f"""
+                            UPDATE {schema}.demand_actuals
+                            SET corrected_qty = %s
+                            WHERE unique_id = %s AND date = %s
+                        """
+                        execute_batch(cur, update_sql, updates, page_size=5000)
                 conn.commit()
-                self.logger.info(f"Updated corrected_qty for {len(update_rows)} rows in demand_actuals")
-            except Exception as exc:
-                conn.rollback()
-                self.logger.warning(f"Failed to update corrected_qty: {exc}")
+                self.logger.info(f"Corrected data saved to {schema}.demand_actuals ({len(updates):,} rows updated)")
             finally:
                 conn.close()
+        except Exception as db_err:
+            self.logger.warning(f"Could not save corrected data to DB: {db_err}")
+            # Fallback: save to parquet
+            output_base = Path(self.output_config['base_path'])
+            output_base.mkdir(parents=True, exist_ok=True)
+            corrected_path = output_base / "time_series_corrected.parquet"
+            corrected_df.to_parquet(str(corrected_path), index=False)
+            self.logger.info(f"Corrected data saved (fallback): {corrected_path}")
+
+        # Save outlier log to PostgreSQL
+        if not outliers_df.empty:
+            try:
+                from db.db import bulk_insert, get_schema, jsonb_serialize
+                config_path = str(self.config_path)
+                schema = get_schema(config_path)
+                outlier_table = f"{schema}.detected_outliers"
+
+                # Map outlier_df columns to DB columns
+                db_cols = ['unique_id', 'date', 'original_value', 'corrected_value',
+                           'detection_method', 'correction_method', 'z_score',
+                           'lower_bound', 'upper_bound']
+                # Build rows from the DataFrame (handle missing columns gracefully)
+                rows = []
+                for _, row in outliers_df.iterrows():
+                    rows.append((
+                        str(row.get('unique_id', '')),
+                        str(row.get('date', '')),
+                        float(row['original_value']) if pd.notna(row.get('original_value')) else None,
+                        float(row['corrected_value']) if pd.notna(row.get('corrected_value')) else None,
+                        str(row.get('detection_method', '')),
+                        str(row.get('correction_method', '')),
+                        float(row['z_score']) if pd.notna(row.get('z_score')) else None,
+                        float(row['lower_bound']) if pd.notna(row.get('lower_bound')) else None,
+                        float(row['upper_bound']) if pd.notna(row.get('upper_bound')) else None,
+                    ))
+                bulk_insert(config_path, outlier_table, db_cols, rows, truncate=True)
+                self.logger.info(f"Outliers saved to {outlier_table} ({len(rows):,} outliers)")
+            except Exception as db_err:
+                self.logger.warning(f"Could not save outliers to DB: {db_err}")
+                # Fallback: save to parquet
+                output_base = Path(self.output_config['base_path'])
+                output_base.mkdir(parents=True, exist_ok=True)
+                outlier_path = output_base / "detected_outliers.parquet"
+                outliers_df.to_parquet(str(outlier_path), index=False)
+                self.logger.info(f"Outliers saved (fallback): {outlier_path}")
         else:
             self.logger.info("No outliers detected")
 
@@ -527,8 +514,7 @@ class ForecastOrchestrator:
     def forecast_batch(self,
                        df: pd.DataFrame,
                        characteristics_df: pd.DataFrame,
-                       methods_filter: Optional[List[str]] = None,
-                       overrides_map: dict = None) -> pd.DataFrame:
+                       methods_filter: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Generate forecasts for a batch of time series across all model families.
 
@@ -536,7 +522,6 @@ class ForecastOrchestrator:
             df: Time series data
             characteristics_df: Characteristics for this batch
             methods_filter: Optional list to restrict methods
-            overrides_map: Optional {unique_id: {method: {param: value}}} overrides.
 
         Returns:
             DataFrame with forecast results
@@ -548,8 +533,7 @@ class ForecastOrchestrator:
         try:
             stat_forecasts = self.stat_forecaster.forecast_multiple_series(
                 df=df,
-                characteristics_df=characteristics_df,
-                overrides_map=overrides_map,
+                characteristics_df=characteristics_df
             )
             if not stat_forecasts.empty:
                 all_forecasts.append(stat_forecasts)
@@ -566,8 +550,7 @@ class ForecastOrchestrator:
             try:
                 ml_forecasts = self.ml_forecaster.forecast_multiple_series(
                     df=df,
-                    characteristics_df=ml_eligible,
-                    overrides_map=overrides_map,
+                    characteristics_df=ml_eligible
                 )
                 if not ml_forecasts.empty:
                     all_forecasts.append(ml_forecasts)
@@ -612,15 +595,13 @@ class ForecastOrchestrator:
 
     def step_forecast(self,
                       df: pd.DataFrame,
-                      characteristics_df: pd.DataFrame,
-                      overrides_map: dict = None) -> pd.DataFrame:
+                      characteristics_df: pd.DataFrame) -> pd.DataFrame:
         """
         Step 3: Generate forecasts using all model families.
 
         Args:
-            df: Time series data (must contain unique_id, date, y)
+            df: Time series data
             characteristics_df: Series characteristics
-            overrides_map: Optional {unique_id: {method: {param: value}}} overrides.
 
         Returns:
             Combined forecast results
@@ -629,21 +610,12 @@ class ForecastOrchestrator:
         self.logger.info("STEP 3: Forecasting (Statistical + ML + Neural + Foundation)")
         self.logger.info("=" * 80)
 
-        # Strip to canonical columns only — extra columns (item_id, site_id,
-        # channel, item_name, site_name etc.) would be treated as exogenous
-        # features by StatsForecast, causing forecast failures.
-        keep_cols = [c for c in ['unique_id', 'date', 'y'] if c in df.columns]
-        df = df[keep_cols].copy()
-
         batch_size = self.parallel_config.get('batch_size', 100)
-
-        if overrides_map:
-            self.logger.info(f"Hyperparameter overrides active for {len(overrides_map)} series")
 
         if self.client is None or not DASK_AVAILABLE:
             # Serial mode
             self.logger.info("Running forecasting in serial mode...")
-            forecasts_df = self.forecast_batch(df, characteristics_df, overrides_map=overrides_map)
+            forecasts_df = self.forecast_batch(df, characteristics_df)
         else:
             # Parallel with Dask — use the module-level standalone function so
             # the orchestrator instance (which holds un-picklable asyncio state)
@@ -661,19 +633,11 @@ class ForecastOrchestrator:
                 batch_ids = batch_chars['unique_id'].tolist()
                 batch_df = df[df['unique_id'].isin(batch_ids)]
 
-                # Filter overrides to just this batch's series
-                batch_overrides = None
-                if overrides_map:
-                    batch_overrides = {uid: overrides_map[uid] for uid in batch_ids if uid in overrides_map}
-                    if not batch_overrides:
-                        batch_overrides = None
-
                 future = self.client.submit(
                     _dask_forecast_batch,   # picklable module-level function
                     self.config_path,       # picklable string
                     batch_df,               # DataFrame (Arrow-serialisable)
                     batch_chars,            # DataFrame (Arrow-serialisable)
-                    batch_overrides,        # dict (picklable) or None
                 )
                 futures.append(future)
 
@@ -693,33 +657,11 @@ class ForecastOrchestrator:
             self.logger.warning("No forecasts generated!")
             return forecasts_df
 
-        # Save to PostgreSQL
-        schema = get_schema(self.config_path)
-        fc_cols = ["unique_id", "method", "point_forecast", "quantiles", "hyperparameters", "training_time"]
-        fc_rows = []
-        for _, r in forecasts_df.iterrows():
-            fc_rows.append((
-                str(r["unique_id"]),
-                str(r["method"]),
-                jsonb_serialize(r.get("point_forecast")),
-                jsonb_serialize(r.get("quantiles")),
-                jsonb_serialize(r.get("hyperparameters")),
-                float(r["training_time"]) if pd.notna(r.get("training_time")) else None,
-            ))
-
-        # Only delete rows for the series we just forecasted, preserving
-        # results for other series (important for --series partial runs).
-        forecasted_uids = forecasts_df["unique_id"].unique().tolist()
-        uid_list = ", ".join(f"'{u}'" for u in forecasted_uids)
-        bulk_insert(
-            self.config_path,
-            f"{schema}.forecast_results",
-            fc_cols,
-            fc_rows,
-            truncate=False,
-            delete_where=f"unique_id IN ({uid_list})",
-        )
-        self.logger.info(f"Forecasts saved to DB: {len(fc_rows)} rows")
+        # Save
+        output_path = Path(self.output_config['base_path']) / "forecasts_all_methods.parquet"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        forecasts_df.to_parquet(str(output_path), index=False)
+        self.logger.info(f"Forecasts saved: {output_path} ({len(forecasts_df)} rows)")
 
         return forecasts_df
 
@@ -742,10 +684,6 @@ class ForecastOrchestrator:
         self.logger.info("=" * 80)
         self.logger.info("STEP 4: Backtesting with Per-Origin Forecast Storage")
         self.logger.info("=" * 80)
-
-        # Strip to canonical columns only — same as step_forecast().
-        keep_cols = [c for c in ['unique_id', 'date', 'y'] if c in df.columns]
-        df = df[keep_cols].copy()
 
         # Build per-series work items: (unique_id, series_df_slice, methods, chars_dict)
         work_items = []
@@ -841,53 +779,23 @@ class ForecastOrchestrator:
         # Combine per-origin forecasts
         origin_df = pd.concat(all_origin_forecasts, ignore_index=True) if all_origin_forecasts else pd.DataFrame()
 
-        # Save to PostgreSQL
-        schema = get_schema(self.config_path)
+        # Save outputs
+        output_base = Path(self.output_config['base_path'])
+        output_base.mkdir(parents=True, exist_ok=True)
 
         if not metrics_df.empty:
-            m_cols = [
-                "unique_id", "method", "forecast_origin", "horizon",
-                "mae", "rmse", "mape", "smape", "mase", "bias",
-                "crps", "winkler_score",
-                "coverage_50", "coverage_80", "coverage_90", "coverage_95",
-                "quantile_loss", "aic", "bic", "aicc",
-            ]
-            m_rows = []
-            for _, r in metrics_df.iterrows():
-                row = []
-                for c in m_cols:
-                    v = r.get(c)
-                    if c == "forecast_origin" and v is not None:
-                        v = pd.Timestamp(v).date() if pd.notna(v) else None
-                    elif c == "horizon":
-                        v = int(v) if pd.notna(v) else None
-                    elif c in ("unique_id", "method"):
-                        v = str(v) if v is not None else None
-                    else:
-                        v = float(v) if pd.notna(v) else None
-                    row.append(v)
-                m_rows.append(tuple(row))
-            bulk_insert(self.config_path, f"{schema}.backtest_metrics", m_cols, m_rows)
-            self.logger.info(f"Backtest metrics saved to DB: {len(m_rows)} rows")
+            metrics_path = output_base / "backtest_metrics.parquet"
+            metrics_df.to_parquet(str(metrics_path), index=False)
+            self.logger.info(f"Backtest metrics saved: {metrics_path} ({len(metrics_df)} rows)")
 
             # Log summary
             summary = metrics_df.groupby('method')[['mae', 'rmse']].mean()
             self.logger.info(f"Backtest summary by method:\n{summary}")
 
         if not origin_df.empty:
-            o_cols = ["unique_id", "method", "forecast_origin", "horizon_step", "point_forecast", "actual_value"]
-            o_rows = []
-            for _, r in origin_df.iterrows():
-                o_rows.append((
-                    str(r["unique_id"]),
-                    str(r["method"]),
-                    pd.Timestamp(r["forecast_origin"]).date() if pd.notna(r.get("forecast_origin")) else None,
-                    int(r["horizon_step"]) if pd.notna(r.get("horizon_step")) else None,
-                    float(r["point_forecast"]) if pd.notna(r.get("point_forecast")) else None,
-                    float(r["actual_value"]) if pd.notna(r.get("actual_value")) else None,
-                ))
-            bulk_insert(self.config_path, f"{schema}.forecasts_by_origin", o_cols, o_rows)
-            self.logger.info(f"Per-origin forecasts saved to DB: {len(o_rows)} rows")
+            origin_path = output_base / "forecasts_by_origin.parquet"
+            origin_df.to_parquet(str(origin_path), index=False)
+            self.logger.info(f"Per-origin forecasts saved: {origin_path} ({len(origin_df)} rows)")
 
         return metrics_df, origin_df
 
@@ -911,21 +819,11 @@ class ForecastOrchestrator:
 
         best_methods_df = self.method_selector.select_best_methods(metrics_df)
 
-        # Save to PostgreSQL
-        schema = get_schema(self.config_path)
-        bm_cols = ["unique_id", "best_method", "best_score", "runner_up_method", "runner_up_score", "all_rankings"]
-        bm_rows = []
-        for _, r in best_methods_df.iterrows():
-            bm_rows.append((
-                str(r["unique_id"]),
-                str(r["best_method"]) if pd.notna(r.get("best_method")) else None,
-                float(r["best_score"]) if pd.notna(r.get("best_score")) else None,
-                str(r["runner_up_method"]) if pd.notna(r.get("runner_up_method")) else None,
-                float(r["runner_up_score"]) if pd.notna(r.get("runner_up_score")) else None,
-                jsonb_serialize(r.get("all_rankings")),
-            ))
-        bulk_insert(self.config_path, f"{schema}.best_method_per_series", bm_cols, bm_rows)
-        self.logger.info(f"Best methods saved to DB: {len(bm_rows)} rows")
+        # Save
+        output_path = Path(self.output_config['base_path']) / "best_method_per_series.parquet"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        best_methods_df.to_parquet(str(output_path), index=False)
+        self.logger.info(f"Best methods saved: {output_path} ({len(best_methods_df)} rows)")
 
         # Log distribution
         if 'best_method' in best_methods_df.columns:
@@ -984,35 +882,19 @@ class ForecastOrchestrator:
             self.logger.info(f"Running serial distribution fitting ({n_rows} rows)...")
             distributions_df = self.dist_fitter.fit_forecast_distributions(forecasts_df)
 
-        # Save to PostgreSQL
-        schema = get_schema(self.config_path)
-        d_cols = [
-            "unique_id", "method", "forecast_horizon", "distribution_type",
-            "mean", "std", "params", "ks_statistic", "ks_pvalue",
-            "service_level_quantiles",
-        ]
-        d_rows = []
-        for _, r in distributions_df.iterrows():
-            d_rows.append((
-                str(r["unique_id"]),
-                str(r["method"]) if pd.notna(r.get("method")) else None,
-                int(r["forecast_horizon"]) if pd.notna(r.get("forecast_horizon")) else None,
-                str(r["distribution_type"]) if pd.notna(r.get("distribution_type")) else None,
-                float(r["mean"]) if pd.notna(r.get("mean")) else None,
-                float(r["std"]) if pd.notna(r.get("std")) else None,
-                jsonb_serialize(r.get("params")),
-                float(r["ks_statistic"]) if pd.notna(r.get("ks_statistic")) else None,
-                float(r["ks_pvalue"]) if pd.notna(r.get("ks_pvalue")) else None,
-                jsonb_serialize(r.get("service_level_quantiles")),
-            ))
-        bulk_insert(self.config_path, f"{schema}.fitted_distributions", d_cols, d_rows)
-        self.logger.info(f"Distributions saved to DB: {len(d_rows)} rows")
+        # Save
+        output_path = Path(self.output_config['base_path']) / "fitted_distributions.parquet"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        distributions_df.to_parquet(str(output_path), index=False)
+        self.logger.info(f"Distributions saved: {output_path} ({len(distributions_df)} rows)")
 
         return distributions_df
 
     # -- Full pipeline --
 
     def run_complete_pipeline(self,
+                              time_series_path: Optional[str] = None,
+                              characteristics_path: Optional[str] = None,
                               output_dir: Optional[str] = None,
                               skip_etl: bool = False,
                               skip_outlier_detection: bool = False,
@@ -1024,20 +906,19 @@ class ForecastOrchestrator:
         """
         Run the complete forecasting pipeline.
 
-        All data is read from and written to PostgreSQL (zcube schema).
-
         Args:
-            output_dir: Output directory override (for summary YAML only)
+            time_series_path: Path to pre-existing time series parquet (skips ETL)
+            characteristics_path: Path to pre-existing characteristics (skips characterization)
+            output_dir: Output directory override
             skip_*: Flags to skip individual steps
 
         Returns:
-            Dictionary with output table names
+            Dictionary with output file paths
         """
         start_time = time.time()
         output_base = Path(output_dir or self.output_config['base_path'])
         output_base.mkdir(parents=True, exist_ok=True)
-        schema = get_schema(self.config_path)
-        output_tables = {}
+        output_paths = {}
 
         self.logger.info("=" * 80)
         self.logger.info("STARTING COMPLETE FORECASTING PIPELINE")
@@ -1054,16 +935,39 @@ class ForecastOrchestrator:
 
         try:
             # Step 1: ETL
-            if skip_etl:
-                self.logger.info("Skipping ETL, loading from DB...")
-                df = self._load_table_as_df("demand_actuals")
-                # Reconstruct the standard (unique_id, date, y) format
-                if "qty" in df.columns:
-                    df["y"] = df["corrected_qty"].combine_first(df["qty"]) if "corrected_qty" in df.columns else df["qty"]
-                    df["date"] = pd.to_datetime(df["date"])
+            if skip_etl and time_series_path:
+                self.logger.info("Skipping ETL, loading from file...")
+                df = pd.read_parquet(time_series_path)
+            elif skip_etl:
+                # Load from PostgreSQL instead of parquet
+                self.logger.info("Skipping ETL, loading demand data from PostgreSQL...")
+                try:
+                    from db.db import get_conn, get_schema
+                    _schema = get_schema(str(self.config_path))
+                    _table = f"{_schema}.demand_actuals" if _schema != "public" else "demand_actuals"
+                    _conn = get_conn(str(self.config_path))
+                    try:
+                        df = pd.read_sql(
+                            f"SELECT unique_id, date, COALESCE(corrected_qty, qty) AS y FROM {_table} ORDER BY unique_id, date",
+                            _conn,
+                        )
+                    finally:
+                        _conn.close()
+                    self.logger.info(f"Loaded {len(df):,} rows from {_table}")
+                except Exception as db_err:
+                    # Fallback to parquet if DB read fails
+                    default_path = self.config.get('etl', {}).get('output_path')
+                    if default_path and Path(default_path).exists():
+                        self.logger.warning(f"DB load failed ({db_err}), falling back to {default_path}")
+                        df = pd.read_parquet(default_path)
+                    else:
+                        raise RuntimeError(
+                            f"Cannot load demand data: DB read failed ({db_err}) "
+                            f"and no parquet fallback available"
+                        ) from db_err
             else:
                 df = self._run_step(pl, "etl", self.step_etl)
-                output_tables['demand_actuals'] = f"{schema}.demand_actuals"
+                output_paths['time_series'] = 'PostgreSQL: demand_actuals'
 
             self.logger.info(f"Data: {len(df)} rows, {df['unique_id'].nunique()} series")
 
@@ -1071,48 +975,70 @@ class ForecastOrchestrator:
             outlier_config = self.config.get('outlier_detection', {})
             if not skip_outlier_detection and outlier_config.get('enabled', False):
                 df, outliers_df = self._run_step(pl, "outlier_detection", self.step_outlier_detection, df)
-                output_tables['detected_outliers'] = f"{schema}.detected_outliers"
+                output_paths['outliers'] = 'PostgreSQL: detected_outliers'
+                output_paths['time_series_corrected'] = 'PostgreSQL: demand_actuals.corrected_qty'
             else:
                 self.logger.info("Skipping outlier detection")
 
             # Step 2: Characterization
-            if skip_characterization:
-                self.logger.info("Skipping characterization, loading from DB...")
-                characteristics_df = self._load_table_as_df("time_series_characteristics")
+            if skip_characterization and characteristics_path:
+                self.logger.info("Skipping characterization, loading from file...")
+                characteristics_df = pd.read_parquet(characteristics_path)
+            elif skip_characterization:
+                # Load from PostgreSQL instead of parquet
+                self.logger.info("Skipping characterization, loading from PostgreSQL...")
+                try:
+                    from db.db import load_table, get_schema
+                    _schema = get_schema(str(self.config_path))
+                    _table = f"{_schema}.time_series_characteristics" if _schema != "public" else "time_series_characteristics"
+                    characteristics_df = load_table(str(self.config_path), _table)
+                    self.logger.info(f"Loaded {len(characteristics_df):,} characteristics from {_table}")
+                except Exception as db_err:
+                    default_char_path = str(output_base / "time_series_characteristics.parquet")
+                    if Path(default_char_path).exists():
+                        self.logger.warning(f"DB load failed ({db_err}), falling back to {default_char_path}")
+                        characteristics_df = pd.read_parquet(default_char_path)
+                    else:
+                        raise RuntimeError(
+                            f"Cannot load characteristics: DB read failed ({db_err}) "
+                            f"and no parquet fallback at {default_char_path}"
+                        ) from db_err
             else:
                 characteristics_df = self._run_step(pl, "characterization", self.step_characterize, df)
-                output_tables['characteristics'] = f"{schema}.time_series_characteristics"
+                output_paths['characteristics'] = str(output_base / "time_series_characteristics.parquet")
 
             # Step 3: Forecasting
             if not skip_forecasting:
                 forecasts_df = self._run_step(pl, "forecasting", self.step_forecast, df, characteristics_df)
-                output_tables['forecasts'] = f"{schema}.forecast_results"
+                output_paths['forecasts'] = str(output_base / "forecasts_all_methods.parquet")
             else:
                 self.logger.info("Skipping forecasting step")
-                forecasts_df = self._load_table_as_df("forecast_results")
+                forecasts_path = output_base / "forecasts_all_methods.parquet"
+                forecasts_df = pd.read_parquet(str(forecasts_path)) if forecasts_path.exists() else pd.DataFrame()
 
             # Step 4: Backtesting
             if not skip_backtest:
                 metrics_df, origin_df = self._run_step(pl, "backtesting", self.step_backtest, df, characteristics_df)
                 if not metrics_df.empty:
-                    output_tables['metrics'] = f"{schema}.backtest_metrics"
+                    output_paths['metrics'] = str(output_base / "backtest_metrics.parquet")
                 if not origin_df.empty:
-                    output_tables['forecasts_by_origin'] = f"{schema}.forecasts_by_origin"
+                    output_paths['forecasts_by_origin'] = str(output_base / "forecasts_by_origin.parquet")
             else:
                 self.logger.info("Skipping backtesting step")
-                metrics_df = self._load_table_as_df("backtest_metrics")
+                metrics_path = output_base / "backtest_metrics.parquet"
+                metrics_df = pd.read_parquet(str(metrics_path)) if metrics_path.exists() else pd.DataFrame()
 
             # Step 5: Best method selection
             if not skip_best_method and not metrics_df.empty:
                 best_methods_df = self._run_step(pl, "best_method_selection", self.step_select_best_methods, metrics_df)
-                output_tables['best_methods'] = f"{schema}.best_method_per_series"
+                output_paths['best_methods'] = str(output_base / "best_method_per_series.parquet")
             else:
                 self.logger.info("Skipping best method selection")
 
             # Step 6: Distribution fitting
             if not skip_distributions and not forecasts_df.empty:
                 distributions_df = self._run_step(pl, "distribution_fitting", self.step_fit_distributions, forecasts_df)
-                output_tables['distributions'] = f"{schema}.fitted_distributions"
+                output_paths['distributions'] = str(output_base / "fitted_distributions.parquet")
             else:
                 self.logger.info("Skipping distribution fitting")
 
@@ -1129,15 +1055,15 @@ class ForecastOrchestrator:
                 'n_observations': int(len(df)),
                 'n_forecasts': int(len(forecasts_df)) if not forecasts_df.empty else 0,
                 'execution_time_seconds': round(elapsed, 1),
-                'output_tables': output_tables,
+                'output_files': output_paths
             }
 
             summary_path = output_base / "pipeline_summary.yaml"
             with open(str(summary_path), 'w') as f:
                 yaml.dump(summary, f, default_flow_style=False)
-            output_tables['summary'] = str(summary_path)
+            output_paths['summary'] = str(summary_path)
 
-            return output_tables
+            return output_paths
 
         finally:
             if self.client:

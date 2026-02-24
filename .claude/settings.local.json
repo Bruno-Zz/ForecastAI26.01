@@ -84,7 +84,10 @@
       "Bash(wmic process:*)",
       "Bash(git status:*)",
       "Bash(npx react-scripts build)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(done)",
+      "Bash(copy:*)",
+      "Bash(cmd.exe //c \"node_modules\\\\.bin\\\\vite.cmd build\")"
     ]
   }
 }

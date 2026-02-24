@@ -10,10 +10,13 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { VegaLite } from 'react-vega';
 import axios from 'axios';
+import { useLocale } from '../contexts/LocaleContext';
+import { useTheme } from '../contexts/ThemeContext';
+import { formatNumber } from '../utils/formatting';
 
 const API_BASE_URL = '/api';
 
-/** Collapsible section wrapper — matches Method Selection Rationale pattern */
+/** Collapsible section wrapper */
 const Section = ({ title, storageKey, defaultOpen = true, children, id }) => {
   const [open, setOpen] = useState(() => {
     const stored = localStorage.getItem(storageKey);
@@ -27,23 +30,23 @@ const Section = ({ title, storageKey, defaultOpen = true, children, id }) => {
     });
   };
   return (
-    <div id={id} className="mb-6 bg-white rounded-lg shadow">
+    <div id={id} className="mb-6 bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900/50">
       <button
         onClick={toggle}
-        className="w-full flex items-center justify-between p-4 text-left hover:bg-gray-50 transition-colors rounded-lg"
+        className="w-full flex items-center justify-between p-4 text-left hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors rounded-lg"
       >
-        <h2 className="text-lg font-semibold">{title}</h2>
-        <span className="text-gray-400 text-xl">{open ? '▲' : '▼'}</span>
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-white">{title}</h2>
+        <span className="text-gray-400 dark:text-gray-500 text-xl">{open ? '\u25B2' : '\u25BC'}</span>
       </button>
       {open && <div className="px-4 pb-4 sm:px-6 sm:pb-6">{children}</div>}
     </div>
   );
 };
 
-/** Inline SVG sparkline — historical (gray) + forecast (dashed blue) */
+/** Inline SVG sparkline */
 const Sparkline = ({ historical = [], forecast = [], width = 100, height = 28 }) => {
   const all = [...historical, ...forecast];
-  if (all.length === 0) return <span className="text-gray-300 text-xs">-</span>;
+  if (all.length === 0) return <span className="text-gray-300 dark:text-gray-600 text-xs">-</span>;
 
   const min = Math.min(...all);
   const max = Math.max(...all);
@@ -71,6 +74,8 @@ const Sparkline = ({ historical = [], forecast = [], width = 100, height = 28 })
 };
 
 export const Dashboard = () => {
+  const { locale, numberDecimals } = useLocale();
+  const { isDark } = useTheme();
   const [series, setSeries] = useState([]);
   const [analytics, setAnalytics] = useState(null);
   const [sparklineData, setSparklineData] = useState({});
@@ -152,7 +157,24 @@ export const Dashboard = () => {
     if (sortField === field) setSortDir(sortDir === 'asc' ? 'desc' : 'asc');
     else { setSortField(field); setSortDir('asc'); }
   };
-  const sortIndicator = (field) => sortField === field ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+  const sortIndicator = (field) => sortField === field ? (sortDir === 'asc' ? ' \u25B2' : ' \u25BC') : '';
+
+  // Vega theme for dark mode
+  const vegaConfig = useMemo(() => ({
+    background: isDark ? '#1f2937' : '#ffffff',
+    axis: {
+      labelColor: isDark ? '#d1d5db' : '#374151',
+      titleColor: isDark ? '#e5e7eb' : '#111827',
+      gridColor: isDark ? '#374151' : '#e5e7eb',
+      tickColor: isDark ? '#4b5563' : '#d1d5db',
+      domainColor: isDark ? '#4b5563' : '#d1d5db',
+    },
+    legend: {
+      labelColor: isDark ? '#d1d5db' : '#374151',
+      titleColor: isDark ? '#e5e7eb' : '#111827',
+    },
+    title: { color: isDark ? '#e5e7eb' : '#111827' },
+  }), [isDark]);
 
   const complexitySpec = useMemo(() => {
     if (!analytics?.complexity_distribution) return null;
@@ -160,6 +182,7 @@ export const Dashboard = () => {
     return {
       $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
       width: 280, height: 200,
+      config: vegaConfig,
       data: { values: data },
       mark: 'arc',
       encoding: {
@@ -175,7 +198,7 @@ export const Dashboard = () => {
         ]
       }
     };
-  }, [analytics]);
+  }, [analytics, vegaConfig]);
 
   const bestMethodSpec = useMemo(() => {
     if (!analytics?.best_method_distribution) return null;
@@ -185,7 +208,8 @@ export const Dashboard = () => {
     return {
       $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
       width: 'container', height: 250,
-      title: { text: `Best method across ${analytics.best_method_total_series || 0} backtested series`, fontSize: 12 },
+      config: vegaConfig,
+      title: { text: `Best method across ${formatNumber(analytics.best_method_total_series || 0, locale, 0)} backtested series`, fontSize: 12 },
       data: { values: data },
       mark: { type: 'bar', cornerRadiusEnd: 4 },
       encoding: {
@@ -198,31 +222,45 @@ export const Dashboard = () => {
         ]
       }
     };
-  }, [analytics]);
+  }, [analytics, vegaConfig, locale]);
 
-  if (loading) return <div className="flex items-center justify-center h-64"><div className="text-xl text-gray-500 animate-pulse">Loading dashboard...</div></div>;
-  if (error) return <div className="flex items-center justify-center h-64"><div className="text-xl text-red-600">Error: {error}</div></div>;
+  if (loading) return <div className="flex items-center justify-center h-64"><div className="text-xl text-gray-500 dark:text-gray-400 animate-pulse">Loading dashboard...</div></div>;
+  if (error) return <div className="flex items-center justify-center h-64"><div className="text-xl text-red-600 dark:text-red-400">Error: {error}</div></div>;
+
+  // Table column definitions with responsive visibility
+  const columns = [
+    { field: 'unique_id', label: 'Series ID', hideClass: '' },
+    { field: 'n_observations', label: 'Obs', hideClass: '' },
+    { field: 'complexity_level', label: 'Complexity', hideClass: 'hidden sm:table-cell' },
+    { field: 'is_intermittent', label: 'Interm.', hideClass: 'hidden md:table-cell' },
+    { field: 'has_seasonality', label: 'Seasonal', hideClass: 'hidden md:table-cell' },
+    { field: 'has_trend', label: 'Trend', hideClass: 'hidden lg:table-cell' },
+    { field: 'mean', label: 'Mean', hideClass: 'hidden sm:table-cell' },
+    { field: null, label: 'Demand', hideClass: '' },
+    { field: 'n_outliers', label: 'Adj.', hideClass: 'hidden lg:table-cell' },
+    { field: 'best_method', label: 'Best Method', hideClass: '' },
+  ];
 
   return (
     <div className="p-4 sm:p-6">
-      <h1 className="text-2xl sm:text-3xl font-bold mb-6">Forecasting Dashboard</h1>
+      <h1 className="text-2xl sm:text-3xl font-bold mb-6 text-gray-900 dark:text-white">Forecasting Dashboard</h1>
 
       {/* Summary Cards */}
       {analytics && (
         <Section title="Summary" storageKey="dash_summary_open" id="dash-summary">
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-3">
             {[
-              { label: 'Total Series', value: analytics.total_series?.toLocaleString(), color: 'text-blue-600' },
-              { label: 'Backtested', value: (analytics.best_method_total_series || 0).toLocaleString(), color: 'text-emerald-600' },
-              { label: 'Seasonal', value: analytics.seasonal_count, color: '' },
-              { label: 'Trending', value: analytics.trending_count, color: '' },
-              { label: 'Intermittent', value: analytics.intermittent_count, color: '' },
-              { label: 'Avg Obs', value: analytics.avg_observations?.toFixed(0), color: '' },
-              { label: 'Outlier Adj.', value: (analytics.outlier_adjusted_count || 0).toLocaleString(), color: 'text-orange-600' },
+              { label: 'Total Series', value: formatNumber(analytics.total_series, locale, 0), color: 'text-blue-600 dark:text-blue-400' },
+              { label: 'Backtested', value: formatNumber(analytics.best_method_total_series || 0, locale, 0), color: 'text-emerald-600 dark:text-emerald-400' },
+              { label: 'Seasonal', value: formatNumber(analytics.seasonal_count, locale, 0), color: '' },
+              { label: 'Trending', value: formatNumber(analytics.trending_count, locale, 0), color: '' },
+              { label: 'Intermittent', value: formatNumber(analytics.intermittent_count, locale, 0), color: '' },
+              { label: 'Avg Obs', value: formatNumber(analytics.avg_observations, locale, 0), color: '' },
+              { label: 'Outlier Adj.', value: formatNumber(analytics.outlier_adjusted_count || 0, locale, 0), color: 'text-orange-600 dark:text-orange-400' },
             ].map(({ label, value, color }) => (
-              <div key={label} className="bg-gray-50 rounded-lg p-3 border border-gray-100">
-                <div className="text-xs text-gray-500 mb-1">{label}</div>
-                <div className={`text-xl sm:text-2xl font-bold ${color}`}>{value}</div>
+              <div key={label} className="bg-gray-50 dark:bg-gray-700/50 rounded-lg p-3 border border-gray-100 dark:border-gray-600">
+                <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">{label}</div>
+                <div className={`text-xl sm:text-2xl font-bold ${color || 'text-gray-900 dark:text-white'}`}>{value}</div>
               </div>
             ))}
           </div>
@@ -235,13 +273,13 @@ export const Dashboard = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {complexitySpec && (
               <div>
-                <h3 className="text-sm font-semibold text-gray-600 mb-2">Complexity Distribution</h3>
+                <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-400 mb-2">Complexity Distribution</h3>
                 <div className="w-full flex justify-center"><VegaLite spec={complexitySpec} actions={false} renderer="svg" style={{display:'block'}} /></div>
               </div>
             )}
             {bestMethodSpec && (
               <div>
-                <h3 className="text-sm font-semibold text-gray-600 mb-2">Best Method Distribution</h3>
+                <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-400 mb-2">Best Method Distribution</h3>
                 <div className="w-full overflow-x-auto"><VegaLite spec={bestMethodSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
               </div>
             )}
@@ -250,7 +288,7 @@ export const Dashboard = () => {
       )}
 
       {/* Series Table */}
-      <Section title={`Series Table (${filteredSeries.length} series)`} storageKey="dash_table_open" id="dash-table">
+      <Section title={`Series Table (${formatNumber(filteredSeries.length, locale, 0)} series)`} storageKey="dash_table_open" id="dash-table">
         {/* Filters */}
         <div id="dash-filters" className="flex flex-wrap gap-3 mb-4">
           <input
@@ -258,12 +296,12 @@ export const Dashboard = () => {
             placeholder="Search by ID..."
             value={search}
             onChange={e => { setSearch(e.target.value); setPage(0); }}
-            className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-blue-400"
+            className="border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white dark:placeholder-gray-400 rounded-lg px-3 py-2 text-sm w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-blue-400"
           />
           <select
             value={complexityFilter}
             onChange={e => { setComplexityFilter(e.target.value); setPage(0); }}
-            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+            className="border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
           >
             <option value="">All Complexity</option>
             <option value="low">Low</option>
@@ -273,7 +311,7 @@ export const Dashboard = () => {
           <select
             value={intermittentFilter}
             onChange={e => { setIntermittentFilter(e.target.value); setPage(0); }}
-            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+            className="border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
           >
             <option value="">All Types</option>
             <option value="true">Intermittent</option>
@@ -282,73 +320,62 @@ export const Dashboard = () => {
         </div>
 
         {/* Table */}
-        <div className="overflow-x-auto rounded-lg border border-gray-200">
-          <table className="min-w-full divide-y divide-gray-200 text-sm">
-            <thead className="bg-gray-50">
+        <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
+          <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 text-sm">
+            <thead className="bg-gray-50 dark:bg-gray-900">
               <tr>
-                {[
-                  ['unique_id', 'Series ID'],
-                  ['n_observations', 'Obs'],
-                  ['complexity_level', 'Complexity'],
-                  ['is_intermittent', 'Interm.'],
-                  ['has_seasonality', 'Seasonal'],
-                  ['has_trend', 'Trend'],
-                  ['mean', 'Mean'],
-                  [null, 'Demand'],
-                  ['n_outliers', 'Adj.'],
-                  ['best_method', 'Best Method']
-                ].map(([field, label]) => (
+                {columns.map(({ field, label, hideClass }) => (
                   <th
                     key={label}
                     onClick={field ? () => handleSort(field) : undefined}
-                    className={`px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap ${field ? 'cursor-pointer hover:bg-gray-100 select-none' : ''}`}
+                    className={`px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase whitespace-nowrap ${hideClass} ${field ? 'cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800 select-none' : ''}`}
                   >
                     {label}{field ? sortIndicator(field) : ''}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200 bg-white">
+            <tbody className="divide-y divide-gray-200 dark:divide-gray-700 bg-white dark:bg-gray-800">
               {pagedSeries.map(s => (
                 <tr
                   key={s.unique_id}
                   onClick={() => navigate(`/series/${encodeURIComponent(s.unique_id)}`)}
-                  className="hover:bg-blue-50 cursor-pointer transition-colors"
+                  className="hover:bg-blue-50 dark:hover:bg-blue-900/20 cursor-pointer transition-colors"
                 >
-                  <td className="px-3 py-2 font-medium text-blue-600 whitespace-nowrap">{s.unique_id}</td>
-                  <td className="px-3 py-2 text-right">{s.n_observations}</td>
-                  <td className="px-3 py-2">
+                  <td className="px-3 py-2 font-medium text-blue-600 dark:text-blue-400 whitespace-nowrap">{s.unique_id}</td>
+                  <td className="px-3 py-2 text-right text-gray-700 dark:text-gray-300">{s.n_observations}</td>
+                  <td className="px-3 py-2 hidden sm:table-cell">
                     <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
-                      s.complexity_level === 'high' ? 'bg-red-100 text-red-700' :
-                      s.complexity_level === 'medium' ? 'bg-yellow-100 text-yellow-700' :
-                      'bg-green-100 text-green-700'
+                      s.complexity_level === 'high' ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400' :
+                      s.complexity_level === 'medium' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-400' :
+                      'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
                     }`}>
                       {s.complexity_level}
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-center">{s.is_intermittent ? '✓' : '-'}</td>
-                  <td className="px-3 py-2 text-center">{s.has_seasonality ? '✓' : '-'}</td>
-                  <td className="px-3 py-2 text-center">{s.has_trend ? '✓' : '-'}</td>
-                  <td className="px-3 py-2 text-right font-mono">{s.mean?.toFixed(1)}</td>
+                  <td className="px-3 py-2 text-center hidden md:table-cell text-gray-600 dark:text-gray-400">{s.is_intermittent ? '\u2713' : '-'}</td>
+                  <td className="px-3 py-2 text-center hidden md:table-cell text-gray-600 dark:text-gray-400">{s.has_seasonality ? '\u2713' : '-'}</td>
+                  <td className="px-3 py-2 text-center hidden lg:table-cell text-gray-600 dark:text-gray-400">{s.has_trend ? '\u2713' : '-'}</td>
+                  <td className="px-3 py-2 text-right font-mono hidden sm:table-cell text-gray-700 dark:text-gray-300">{formatNumber(s.mean, locale, numberDecimals)}</td>
                   <td className="px-3 py-2">
                     <Sparkline historical={sparklineData[s.unique_id]?.historical || []} forecast={sparklineData[s.unique_id]?.forecast || []} />
                   </td>
-                  <td className="px-3 py-2 text-center">
+                  <td className="px-3 py-2 text-center hidden lg:table-cell">
                     {s.has_outlier_corrections ? (
-                      <span className="bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded text-xs font-medium">{s.n_outliers}</span>
-                    ) : <span className="text-gray-300">-</span>}
+                      <span className="bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-400 px-1.5 py-0.5 rounded text-xs font-medium">{s.n_outliers}</span>
+                    ) : <span className="text-gray-300 dark:text-gray-600">-</span>}
                   </td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     {s.best_method ? (
                       <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
                         s.best_method_source === 'backtested'
-                          ? 'bg-emerald-100 text-emerald-700'
-                          : 'bg-blue-50 text-blue-600'
+                          ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400'
+                          : 'bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400'
                       }`}>
-                        {s.best_method_source === 'backtested' && <span title="Backtested">✓</span>}
+                        {s.best_method_source === 'backtested' && <span title="Backtested">{'\u2713'}</span>}
                         {s.best_method}
                       </span>
-                    ) : <span className="text-gray-300">-</span>}
+                    ) : <span className="text-gray-300 dark:text-gray-600">-</span>}
                   </td>
                 </tr>
               ))}
@@ -357,15 +384,15 @@ export const Dashboard = () => {
 
           {/* Pagination */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-t border-gray-200">
+            <div className="flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700">
               <button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0}
-                className="px-3 py-1.5 border rounded-lg text-sm disabled:opacity-40 hover:bg-gray-100 transition-colors">
-                ← Previous
+                className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm disabled:opacity-40 hover:bg-gray-100 dark:hover:bg-gray-800 dark:text-gray-300 transition-colors">
+                \u2190 Previous
               </button>
-              <span className="text-sm text-gray-500">Page {page + 1} of {totalPages}</span>
+              <span className="text-sm text-gray-500 dark:text-gray-400">Page {page + 1} of {totalPages}</span>
               <button onClick={() => setPage(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1}
-                className="px-3 py-1.5 border rounded-lg text-sm disabled:opacity-40 hover:bg-gray-100 transition-colors">
-                Next →
+                className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm disabled:opacity-40 hover:bg-gray-100 dark:hover:bg-gray-800 dark:text-gray-300 transition-colors">
+                Next \u2192
               </button>
             </div>
           )}

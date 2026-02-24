@@ -182,6 +182,84 @@ def load_data():
             data_cache['time_series_original'] = _to_dask(pdf, "time_series_original")
             logger.info(f"Loaded time_series_original from DB: {len(pdf)} rows")
 
+        # ── Backfill missing series from source DB ──
+        # When demand_actuals has fewer series than forecast_results (e.g. after
+        # a partial ETL re-run), load the missing actuals from the source DB.
+        try:
+            ts_df = _compute(data_cache['time_series'])
+            local_uids = set(ts_df['unique_id'].unique())
+            fc_df = None
+            if data_cache.get('forecasts') is not None:
+                fc_df = _compute(data_cache['forecasts'])
+            elif True:
+                fc_df = pd.read_sql(f"SELECT DISTINCT unique_id FROM {schema}.forecast_results", conn)
+            if fc_df is not None:
+                forecast_uids = set(fc_df['unique_id'].unique())
+                missing = forecast_uids - local_uids
+                if missing:
+                    logger.info(f"Backfill: {len(missing)} series in forecasts but not in demand_actuals — querying source DB…")
+                    # Read config directly from file (data_cache['config'] isn't loaded yet)
+                    _bf_cfg_path = Path(cfg_path) if not isinstance(cfg_path, Path) else cfg_path
+                    with open(_bf_cfg_path, 'r') as _bf_fh:
+                        cfg = yaml.safe_load(_bf_fh)
+                    src = cfg.get('data_source', {}).get('source_db', {})
+                    if src.get('host'):
+                        import psycopg2
+                        src_conn = psycopg2.connect(
+                            host=src['host'], port=src.get('port', 5432),
+                            dbname=src.get('database', 'postgres'),
+                            user=src.get('user'), password=src.get('password'),
+                            sslmode=src.get('sslmode', 'require'),
+                        )
+                        cols = src.get('columns', {})
+                        item_col = cols.get('item_id', 'item_id')
+                        site_col = cols.get('site_id', 'site_id')
+                        date_col = cols.get('date', 'date')
+                        qty_col  = cols.get('qty', 'qty')
+                        table    = src.get('demand_table', 'dp_plan.calc_dp_actual')
+                        agg_freq = cfg.get('etl', {}).get('aggregation', {}).get('frequency', 'W')
+                        # Build a list of (item, site) pairs to query
+                        pairs = [(uid.split('_', 1)[0], uid.split('_', 1)[1]) for uid in missing if '_' in uid]
+                        if pairs:
+                            # Query source in batches
+                            batch_size = 200
+                            src_frames = []
+                            for i in range(0, len(pairs), batch_size):
+                                batch = pairs[i:i+batch_size]
+                                where_clauses = " OR ".join(
+                                    [f"({item_col}='{it}' AND {site_col}='{si}')" for it, si in batch]
+                                )
+                                q = (f"SELECT {item_col} || '_' || {site_col} AS unique_id, "
+                                     f"{date_col} AS date, {qty_col} AS y "
+                                     f"FROM {table} WHERE {where_clauses} "
+                                     f"ORDER BY unique_id, date")
+                                batch_df = pd.read_sql(q, src_conn)
+                                if not batch_df.empty:
+                                    src_frames.append(batch_df)
+                            src_conn.close()
+                            if src_frames:
+                                src_pdf = pd.concat(src_frames, ignore_index=True)
+                                src_pdf['date'] = pd.to_datetime(src_pdf['date'])
+                                # Aggregate to the same frequency as ETL config
+                                if agg_freq:
+                                    src_pdf = (src_pdf.groupby('unique_id')
+                                               .apply(lambda g: g.set_index('date').resample(agg_freq)['y'].sum().reset_index(), include_groups=False)
+                                               .reset_index(level=0))
+                                # Merge with existing time_series
+                                ts_merged = pd.concat([ts_df, src_pdf], ignore_index=True)
+                                data_cache['time_series'] = _to_dask(ts_merged, "time_series")
+                                # Also update time_series_original
+                                orig_df = _compute(data_cache['time_series_original'])
+                                orig_merged = pd.concat([orig_df, src_pdf], ignore_index=True)
+                                data_cache['time_series_original'] = _to_dask(orig_merged, "time_series_original")
+                                logger.info(f"Backfill: added {len(src_pdf)} rows for {src_pdf['unique_id'].nunique()} series from source DB")
+                            else:
+                                logger.warning("Backfill: source DB returned no data for missing series")
+                    else:
+                        logger.warning("Backfill: no source_db config — cannot load missing series")
+        except Exception as backfill_err:
+            logger.warning(f"Backfill from source DB failed (non-fatal): {backfill_err}")
+
         # ── characteristics ──
         if data_cache['characteristics'] is None:
             pdf = pd.read_sql(f"SELECT * FROM {schema}.time_series_characteristics", conn)
@@ -291,6 +369,106 @@ async def reload_data():
     sizes = {k: (len(_compute(v)) if v is not None and hasattr(v, '__len__') else 0)
              for k, v in data_cache.items() if k != 'config'}
     return {"status": "reloaded", "cache_sizes": sizes}
+
+
+@app.get("/api/config")
+async def get_config():
+    """Return the global YAML config (read-only, with sensitive fields redacted)."""
+    config = _get_config()
+    if not config:
+        raise HTTPException(status_code=404, detail="Config not loaded")
+
+    import copy
+    safe = copy.deepcopy(config)
+
+    # Redact sensitive fields
+    def _redact(d, keys=('password', 'account_key', 'secret', 'token', 'connection_string')):
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if any(s in k.lower() for s in keys) and isinstance(v, str):
+                    d[k] = '********'
+                else:
+                    _redact(v, keys)
+        elif isinstance(d, list):
+            for item in d:
+                _redact(item, keys)
+
+    _redact(safe)
+
+    # Also return as raw YAML string for display
+    raw_yaml = yaml.dump(safe, default_flow_style=False, sort_keys=False)
+
+    return {"config": safe, "config_yaml": raw_yaml}
+
+
+@app.put("/api/config")
+async def update_config(body: dict):
+    """
+    Update specific config keys and persist to config.yaml.
+
+    Expects JSON body like:
+      { "path": "forecasting.horizon", "value": 52 }
+    or batch:
+      { "updates": [ {"path": "forecasting.horizon", "value": 52}, ... ] }
+    """
+    config_path = Path(_api_config_path())
+    if not config_path.exists():
+        raise HTTPException(status_code=404, detail="config.yaml not found")
+
+    # Load current config
+    with open(config_path, 'r') as fh:
+        config = yaml.safe_load(fh)
+
+    # Build list of updates
+    updates = body.get('updates', [])
+    if 'path' in body and 'value' in body:
+        updates = [{'path': body['path'], 'value': body['value']}]
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+
+    # Sensitive keys that cannot be written via API
+    BLOCKED_KEYS = {'password', 'secret', 'token', 'account_key', 'connection_string', 'sslmode'}
+
+    applied = []
+    for upd in updates:
+        key_path = upd.get('path', '')
+        value = upd.get('value')
+        parts = key_path.split('.')
+
+        if not parts or not key_path:
+            continue
+
+        # Block sensitive keys
+        if any(bk in parts[-1].lower() for bk in BLOCKED_KEYS):
+            continue
+
+        # Navigate to parent
+        node = config
+        for p in parts[:-1]:
+            if isinstance(node, dict) and p in node:
+                node = node[p]
+            else:
+                node = None
+                break
+
+        if node is not None and isinstance(node, dict):
+            old_val = node.get(parts[-1])
+            node[parts[-1]] = value
+            applied.append({'path': key_path, 'old': old_val, 'new': value})
+
+    if not applied:
+        raise HTTPException(status_code=400, detail="No valid updates applied")
+
+    # Write back
+    with open(config_path, 'w') as fh:
+        yaml.dump(config, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    # Refresh in-memory cache
+    data_cache['config'] = config
+
+    logger.info(f"Config updated: {[a['path'] for a in applied]}")
+    return {"status": "ok", "applied": applied}
 
 
 # API Endpoints
@@ -512,9 +690,39 @@ async def get_forecasts(
             'training_time': float(row['training_time']) if pd.notna(row.get('training_time')) else None
         })
 
+    # Include date_range_end from characteristics so the frontend can compute
+    # forecast dates even when historical demand_actuals data is unavailable.
+    date_range_end = None
+    frequency = None
+    if data_cache.get('characteristics') is not None:
+        chars_df = _compute(data_cache['characteristics'])
+        char_row = chars_df[chars_df['unique_id'] == unique_id]
+        if not char_row.empty:
+            dre = char_row.iloc[0].get('date_range_end')
+            if pd.notna(dre):
+                date_range_end = pd.Timestamp(dre).strftime('%Y-%m-%d')
+            freq = char_row.iloc[0].get('frequency') or char_row.iloc[0].get('obs_per_year')
+            if freq is not None:
+                frequency = str(freq)
+
+    # Also include lightweight historical data inline when available so
+    # the frontend doesn't need a separate /series/{uid}/data call.
+    historical = None
+    if data_cache.get('time_series') is not None:
+        ts_df = _compute(data_cache['time_series'])
+        series_ts = ts_df[ts_df['unique_id'] == unique_id].sort_values('date')
+        if not series_ts.empty:
+            historical = {
+                'date': series_ts['date'].dt.strftime('%Y-%m-%d').tolist(),
+                'value': series_ts['y'].tolist(),
+            }
+
     return {
         'unique_id': unique_id,
-        'forecasts': forecasts
+        'forecasts': forecasts,
+        'date_range_end': date_range_end,
+        'frequency': frequency,
+        'historical': historical,
     }
 
 
@@ -1828,6 +2036,65 @@ async def get_series_distributions(unique_id: str):
 _pipeline_jobs: Dict[str, Dict] = {}
 _pipeline_lock = threading.Lock()
 
+_STALE_JOB_TIMEOUT_SEC = 7200  # 2 hours — mark "running" jobs as stale after this
+
+
+def _cleanup_stale_jobs():
+    """Mark any job that has been 'running' for longer than the timeout as 'error'.
+
+    Also checks whether the process is actually alive (via PID).
+    Must be called **inside** _pipeline_lock.
+    """
+    now = datetime.utcnow()
+    for job in _pipeline_jobs.values():
+        if job.get("status") != "running":
+            continue
+
+        # Check if the process is still alive
+        pid = job.get("pid")
+        process_alive = False
+        if pid:
+            try:
+                if sys.platform == "win32":
+                    result = subprocess.run(
+                        ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    process_alive = str(pid) in result.stdout
+                else:
+                    os.kill(pid, 0)
+                    process_alive = True
+            except (ProcessLookupError, PermissionError, OSError):
+                process_alive = False
+            except Exception:
+                process_alive = False
+
+        if not process_alive:
+            job["status"] = "error"
+            job["ended_at"] = now.isoformat()
+            job["log_lines"].append("[STALE] Process no longer running — marked as failed")
+            job["exit_code"] = -2
+            logger.warning(f"Stale job {job['job_id']} (pid={pid}) marked as error — process not alive")
+            continue
+
+        # Check timeout
+        started = job.get("started_at")
+        if started:
+            try:
+                started_dt = datetime.fromisoformat(started)
+                elapsed = (now - started_dt).total_seconds()
+                if elapsed > _STALE_JOB_TIMEOUT_SEC:
+                    job["status"] = "error"
+                    job["ended_at"] = now.isoformat()
+                    job["log_lines"].append(
+                        f"[TIMEOUT] Job exceeded {_STALE_JOB_TIMEOUT_SEC}s — marked as stale"
+                    )
+                    job["exit_code"] = -3
+                    logger.warning(f"Stale job {job['job_id']} timed out after {elapsed:.0f}s")
+            except Exception:
+                pass
+
+
 PIPELINE_STEPS = {
     "etl":               {"label": "ETL",               "arg": "etl",               "desc": "Extract data from the source database into demand_actuals"},
     "outlier-detection": {"label": "Outlier Detection",  "arg": "outlier-detection", "desc": "Detect and correct outliers in the time series"},
@@ -1979,8 +2246,9 @@ def _run_full_pipeline_thread(job_id: str):
 @app.post("/api/pipeline/run-all")
 async def run_full_pipeline():
     """Launch all pipeline steps in order as a single background job."""
-    # Reject if any step or full-pipeline job is already running
+    # Clean up stale jobs first, then reject if any job is genuinely running
     with _pipeline_lock:
+        _cleanup_stale_jobs()
         for job in _pipeline_jobs.values():
             if job.get("status") == "running":
                 raise HTTPException(
@@ -2021,8 +2289,9 @@ async def run_pipeline_step(step: str):
     if step not in PIPELINE_STEPS:
         raise HTTPException(status_code=400, detail=f"Unknown step '{step}'. Valid: {list(PIPELINE_STEPS)}")
 
-    # Reject if same step is already running
+    # Clean up stale jobs first, then reject if same step is genuinely running
     with _pipeline_lock:
+        _cleanup_stale_jobs()
         for job in _pipeline_jobs.values():
             if job.get("step") == step and job.get("status") == "running":
                 raise HTTPException(status_code=409, detail=f"Step '{step}' is already running (job {job['job_id']})")
@@ -2057,8 +2326,9 @@ async def run_forecast_for_series(req: RunForecastRequest):
     if not req.series:
         raise HTTPException(status_code=400, detail="No series provided")
 
-    # Reject if a series-forecast job is already running
+    # Clean up stale jobs first, then reject if a series-forecast is genuinely running
     with _pipeline_lock:
+        _cleanup_stale_jobs()
         for job in _pipeline_jobs.values():
             if job.get("step") == "forecast-series" and job.get("status") == "running":
                 raise HTTPException(
@@ -2254,6 +2524,38 @@ async def kill_pipeline_job(job_id: str):
         _pipeline_jobs[job_id]["exit_code"] = -1
 
     return {"job_id": job_id, "status": "error", "message": "Job interrupted"}
+
+
+@app.post("/api/pipeline/jobs/reset")
+async def reset_pipeline_jobs():
+    """Force-clear all stale/completed jobs from the in-memory store.
+
+    Running jobs whose process is still alive are left untouched.
+    Dead-process "running" jobs are marked as error.
+    Completed/errored jobs older than 10 minutes are removed.
+    """
+    with _pipeline_lock:
+        _cleanup_stale_jobs()
+        now = datetime.utcnow()
+        to_remove = []
+        for job_id, job in _pipeline_jobs.items():
+            if job.get("status") in ("success", "error"):
+                ended = job.get("ended_at")
+                if ended:
+                    try:
+                        ended_dt = datetime.fromisoformat(ended)
+                        if (now - ended_dt).total_seconds() > 600:  # 10 min
+                            to_remove.append(job_id)
+                    except Exception:
+                        to_remove.append(job_id)
+                else:
+                    to_remove.append(job_id)
+            elif job.get("status") == "pending":
+                to_remove.append(job_id)
+        for jid in to_remove:
+            del _pipeline_jobs[jid]
+        remaining = {jid: j.get("status") for jid, j in _pipeline_jobs.items()}
+    return {"status": "ok", "removed": len(to_remove), "remaining": remaining}
 
 
 @app.get("/api/pipeline/jobs/{job_id}/stream")

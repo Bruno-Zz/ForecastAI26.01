@@ -8,6 +8,9 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
+import { useLocale } from '../contexts/LocaleContext';
+import { useTheme } from '../contexts/ThemeContext';
+import { formatTime, formatNumber } from '../utils/formatting';
 
 const API_BASE_URL = '/api';
 
@@ -36,12 +39,12 @@ const Spinner = ({ cls = 'w-4 h-4' }) => (
 /** Status badge */
 const StatusBadge = ({ status }) => {
   const map = {
-    pending:  { cls: 'bg-gray-100 text-gray-600',         label: 'Pending' },
-    running:  { cls: 'bg-blue-100 text-blue-700',         label: 'Running…' },
-    success:  { cls: 'bg-emerald-100 text-emerald-700',   label: 'Success' },
-    error:    { cls: 'bg-red-100 text-red-700',           label: 'Error' },
+    pending:  { cls: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400',         label: 'Pending' },
+    running:  { cls: 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300',         label: 'Running…' },
+    success:  { cls: 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300',   label: 'Success' },
+    error:    { cls: 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300',           label: 'Error' },
   };
-  const { cls, label } = map[status] || { cls: 'bg-gray-100 text-gray-500', label: status };
+  const { cls, label } = map[status] || { cls: 'bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400', label: status };
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
       {status === 'running' && <Spinner cls="w-3 h-3" />}
@@ -52,11 +55,25 @@ const StatusBadge = ({ status }) => {
   );
 };
 
-/** Log viewer with auto-scroll */
+/** Log viewer with auto-scroll (contained — does NOT hijack the page scroll) */
 const LogViewer = ({ lines, visible }) => {
-  const bottomRef = useRef(null);
+  const containerRef = useRef(null);
+  const userScrolledUp = useRef(false);
+
+  // Track whether the user manually scrolled away from the bottom
+  const handleScroll = () => {
+    const el = containerRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    userScrolledUp.current = !atBottom;
+  };
+
+  // Auto-scroll ONLY within the container, and only if user hasn't scrolled up
   useEffect(() => {
-    if (visible && bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    const el = containerRef.current;
+    if (visible && el && !userScrolledUp.current) {
+      el.scrollTop = el.scrollHeight;
+    }
   }, [lines, visible]);
 
   if (!visible) return null;
@@ -71,12 +88,15 @@ const LogViewer = ({ lines, visible }) => {
   };
 
   return (
-    <div className="mt-3 bg-gray-900 rounded-lg p-3 max-h-72 overflow-y-auto font-mono text-xs leading-5 border border-gray-700">
+    <div
+      ref={containerRef}
+      onScroll={handleScroll}
+      className="mt-3 bg-gray-900 rounded-lg p-3 max-h-72 overflow-y-auto font-mono text-xs leading-5 border border-gray-700"
+    >
       {lines.length === 0
         ? <span className="text-gray-500 italic">Waiting for output…</span>
         : lines.map((l, i) => <div key={i} className={colorLine(l)}>{l || '\u00A0'}</div>)
       }
-      <div ref={bottomRef} />
     </div>
   );
 };
@@ -97,23 +117,23 @@ const PipelineProgress = ({ steps, currentStepId, jobStatus }) => {
         <React.Fragment key={step.id}>
           <div className="flex flex-col items-center gap-0.5">
             <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border-2 transition-colors ${
-              stepDone(step.id)   ? 'bg-emerald-100 border-emerald-400 text-emerald-700' :
-              stepActive(step.id) ? 'bg-blue-100 border-blue-400 text-blue-700' :
-              stepError(step.id)  ? 'bg-red-100 border-red-400 text-red-700' :
-              'bg-gray-100 border-gray-300 text-gray-400'
+              stepDone(step.id)   ? 'bg-emerald-100 dark:bg-emerald-900/30 border-emerald-400 text-emerald-700 dark:text-emerald-300' :
+              stepActive(step.id) ? 'bg-blue-100 dark:bg-blue-900/30 border-blue-400 text-blue-700 dark:text-blue-300' :
+              stepError(step.id)  ? 'bg-red-100 dark:bg-red-900/30 border-red-400 text-red-700 dark:text-red-300' :
+              'bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-400'
             }`}>
               {stepDone(step.id) ? '✓' : stepError(step.id) ? '✕' : i + 1}
             </div>
             <span className={`text-[9px] font-medium leading-none ${
-              stepActive(step.id) ? 'text-blue-600' :
-              stepDone(step.id)   ? 'text-emerald-600' :
-              stepError(step.id)  ? 'text-red-600' :
-              'text-gray-400'
+              stepActive(step.id) ? 'text-blue-600 dark:text-blue-400' :
+              stepDone(step.id)   ? 'text-emerald-600 dark:text-emerald-400' :
+              stepError(step.id)  ? 'text-red-600 dark:text-red-400' :
+              'text-gray-400 dark:text-gray-500'
             }`}>{step.label.replace(' ', '\u00A0')}</span>
           </div>
           {i < steps.length - 1 && (
             <div className={`h-0.5 w-4 mb-3 flex-shrink-0 rounded ${
-              stepDone(step.id) ? 'bg-emerald-300' : 'bg-gray-200'
+              stepDone(step.id) ? 'bg-emerald-300 dark:bg-emerald-600' : 'bg-gray-200 dark:bg-gray-600'
             }`} />
           )}
         </React.Fragment>
@@ -123,35 +143,35 @@ const PipelineProgress = ({ steps, currentStepId, jobStatus }) => {
 };
 
 /** Full-pipeline card at the top */
-const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs }) => {
+const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs, locale }) => {
   const isRunning = job?.status === 'running';
   const isDone    = job?.status === 'success' || job?.status === 'error';
 
   return (
-    <div className={`bg-white rounded-xl border-2 transition-colors mb-6 ${
-      isRunning        ? 'border-blue-300 shadow-lg' :
-      job?.status === 'success' ? 'border-emerald-300' :
-      job?.status === 'error'   ? 'border-red-300' :
-      'border-indigo-200'
+    <div className={`bg-white dark:bg-gray-800 rounded-xl border-2 transition-colors mb-6 ${
+      isRunning        ? 'border-blue-300 dark:border-blue-600 shadow-lg dark:shadow-blue-900/30' :
+      job?.status === 'success' ? 'border-emerald-300 dark:border-emerald-600' :
+      job?.status === 'error'   ? 'border-red-300 dark:border-red-600' :
+      'border-indigo-200 dark:border-indigo-700'
     }`}>
       <div className="p-4">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
           <div className="flex items-start gap-3 min-w-0">
             <span className="text-2xl flex-shrink-0">🚀</span>
             <div className="min-w-0">
-              <h3 className="font-bold text-gray-900 text-sm">Run Full Pipeline</h3>
-              <p className="text-xs text-gray-500 mt-0.5">
+              <h3 className="font-bold text-gray-900 dark:text-gray-100 text-sm">Run Full Pipeline</h3>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                 Run all 6 steps in order: ETL → Outlier Detection → Forecast → Backtest → Best Method → Distributions.
                 Stops automatically if any step fails.
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-auto">
             {job && <StatusBadge status={job.status} />}
             {isRunning && (
               <button
                 onClick={() => onKill(job.job_id)}
-                className="px-3 py-1.5 rounded-lg text-sm font-medium bg-red-100 text-red-700 hover:bg-red-200 active:scale-95 transition-colors flex items-center gap-1"
+                className="px-3 py-1.5 rounded-lg text-sm font-medium bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 hover:bg-red-200 dark:hover:bg-red-900/50 active:scale-95 transition-colors flex items-center gap-1"
                 title="Interrupt the pipeline"
               >
                 <span>■</span> Stop
@@ -162,7 +182,7 @@ const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs })
               disabled={isRunning}
               className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-colors ${
                 isRunning
-                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  ? 'bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'
                   : 'bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95'
               }`}
             >
@@ -182,12 +202,13 @@ const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs })
 
         {/* Timing */}
         {job?.started_at && (
-          <div className="mt-2 flex items-center gap-3 text-xs text-gray-400">
-            <span>Started: {parseUTC(job.started_at).toLocaleTimeString()}</span>
+          <div className="mt-2 flex items-center gap-3 text-xs text-gray-400 dark:text-gray-500">
+            <span>Started: {formatTime(job.started_at, locale)}</span>
             {job.ended_at && (
-              <span>· Duration: {(
-                (parseUTC(job.ended_at) - parseUTC(job.started_at)) / 1000
-              ).toFixed(1)}s</span>
+              <span>· Duration: {formatNumber(
+                (parseUTC(job.ended_at) - parseUTC(job.started_at)) / 1000,
+                locale, 1
+              )}s</span>
             )}
           </div>
         )}
@@ -196,10 +217,10 @@ const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs })
         {job && (
           <button
             onClick={onToggleLogs}
-            className="mt-2 text-xs text-blue-500 hover:text-blue-700 flex items-center gap-1"
+            className="mt-2 text-xs text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 flex items-center gap-1"
           >
             <span>{showLogs ? '▲ Hide' : '▼ Show'} combined logs</span>
-            <span className="text-gray-400">({job.log_lines?.length ?? 0} lines)</span>
+            <span className="text-gray-400 dark:text-gray-500">({job.log_lines?.length ?? 0} lines)</span>
           </button>
         )}
       </div>
@@ -211,34 +232,34 @@ const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs })
 };
 
 /** Single step card */
-const StepCard = ({ step, onRun, onKill, activeJob, onToggleLogs, showLogs, isFullPipelineRunning }) => {
+const StepCard = ({ step, onRun, onKill, activeJob, onToggleLogs, showLogs, isFullPipelineRunning, locale }) => {
   const isRunning = activeJob?.status === 'running';
   const isDone    = activeJob?.status === 'success' || activeJob?.status === 'error';
   const hasJob    = !!activeJob;
   const disabled  = isRunning || isFullPipelineRunning;
 
   return (
-    <div className={`bg-white rounded-xl border-2 transition-colors ${
-      isRunning           ? 'border-blue-300 shadow-md' :
-      activeJob?.status === 'success' ? 'border-emerald-200' :
-      activeJob?.status === 'error'   ? 'border-red-200' :
-      'border-gray-200'
+    <div className={`bg-white dark:bg-gray-800 rounded-xl border-2 transition-colors ${
+      isRunning           ? 'border-blue-300 dark:border-blue-600 shadow-md dark:shadow-blue-900/30' :
+      activeJob?.status === 'success' ? 'border-emerald-200 dark:border-emerald-700' :
+      activeJob?.status === 'error'   ? 'border-red-200 dark:border-red-700' :
+      'border-gray-200 dark:border-gray-600'
     }`}>
       <div className="p-4">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
           <div className="flex items-start gap-3 min-w-0">
             <span className="text-2xl flex-shrink-0">{ICONS[step.id] || '⚙️'}</span>
             <div className="min-w-0">
-              <h3 className="font-semibold text-gray-900 text-sm">{step.label}</h3>
-              <p className="text-xs text-gray-500 mt-0.5 leading-relaxed">{step.desc}</p>
+              <h3 className="font-semibold text-gray-900 dark:text-gray-100 text-sm">{step.label}</h3>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 leading-relaxed">{step.desc}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-auto">
             {hasJob && <StatusBadge status={activeJob.status} />}
             {isRunning && (
               <button
                 onClick={() => onKill(activeJob.job_id)}
-                className="px-3 py-1.5 rounded-lg text-sm font-medium bg-red-100 text-red-700 hover:bg-red-200 active:scale-95 transition-colors flex items-center gap-1"
+                className="px-3 py-1.5 rounded-lg text-sm font-medium bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 hover:bg-red-200 dark:hover:bg-red-900/50 active:scale-95 transition-colors flex items-center gap-1"
                 title="Interrupt running process"
               >
                 <span>■</span> Stop
@@ -249,7 +270,7 @@ const StepCard = ({ step, onRun, onKill, activeJob, onToggleLogs, showLogs, isFu
               disabled={disabled}
               className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                 disabled
-                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  ? 'bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'
                   : 'bg-blue-600 text-white hover:bg-blue-700 active:scale-95'
               }`}
             >
@@ -260,15 +281,16 @@ const StepCard = ({ step, onRun, onKill, activeJob, onToggleLogs, showLogs, isFu
 
         {/* Timing */}
         {activeJob?.started_at && (
-          <div className="mt-2 flex items-center gap-3 text-xs text-gray-400">
-            <span>Started: {parseUTC(activeJob.started_at).toLocaleTimeString()}</span>
+          <div className="mt-2 flex items-center gap-3 text-xs text-gray-400 dark:text-gray-500">
+            <span>Started: {formatTime(activeJob.started_at, locale)}</span>
             {activeJob.ended_at && (
-              <span>· Duration: {(
-                (parseUTC(activeJob.ended_at) - parseUTC(activeJob.started_at)) / 1000
-              ).toFixed(1)}s</span>
+              <span>· Duration: {formatNumber(
+                (parseUTC(activeJob.ended_at) - parseUTC(activeJob.started_at)) / 1000,
+                locale, 1
+              )}s</span>
             )}
             {activeJob.exit_code != null && activeJob.exit_code !== 0 && (
-              <span className="text-red-400">· Exit code: {activeJob.exit_code}</span>
+              <span className="text-red-400 dark:text-red-300">· Exit code: {activeJob.exit_code}</span>
             )}
           </div>
         )}
@@ -277,10 +299,10 @@ const StepCard = ({ step, onRun, onKill, activeJob, onToggleLogs, showLogs, isFu
         {hasJob && (
           <button
             onClick={() => onToggleLogs(step.id)}
-            className="mt-2 text-xs text-blue-500 hover:text-blue-700 flex items-center gap-1"
+            className="mt-2 text-xs text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 flex items-center gap-1"
           >
             <span>{showLogs ? '▲ Hide' : '▼ Show'} logs</span>
-            <span className="text-gray-400">({activeJob.log_lines?.length ?? 0} lines)</span>
+            <span className="text-gray-400 dark:text-gray-500">({activeJob.log_lines?.length ?? 0} lines)</span>
           </button>
         )}
       </div>
@@ -292,6 +314,8 @@ const StepCard = ({ step, onRun, onKill, activeJob, onToggleLogs, showLogs, isFu
 };
 
 export const PipelineRunner = () => {
+  const { locale } = useLocale();
+  const { isDark } = useTheme();
   const [steps, setSteps]           = useState([]);
   const [jobs, setJobs]             = useState({});        // stepId -> latest job object
   const [fullJob, setFullJob]       = useState(null);      // full-pipeline job object
@@ -417,6 +441,18 @@ export const PipelineRunner = () => {
     }
   };
 
+  const handleResetJobs = async () => {
+    try {
+      setError(null);
+      const r = await axios.post(`${API_BASE_URL}/pipeline/jobs/reset`);
+      setFullJob(null);
+      setJobs({});
+      setShowFullLogs(false);
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message);
+    }
+  };
+
   const toggleLogs = (stepId) => setShowLogs(prev => ({ ...prev, [stepId]: !prev[stepId] }));
 
   const orderedSteps = STEP_ORDER.map(id => steps.find(s => s.id === id)).filter(Boolean);
@@ -426,17 +462,27 @@ export const PipelineRunner = () => {
   return (
     <div className="p-4 sm:p-6 max-w-3xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Pipeline Runner</h1>
-        <p className="text-sm text-gray-500 mt-1">
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Pipeline Runner</h1>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
           Run the full pipeline in one click, or trigger individual steps independently.
         </p>
       </div>
 
       {error && (
-        <div className="mb-4 bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700 flex items-start gap-2">
+        <div className="mb-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-4 py-3 text-sm text-red-700 dark:text-red-300 flex items-start gap-2">
           <span className="flex-shrink-0 mt-0.5">⚠️</span>
-          <span>{error}</span>
-          <button onClick={() => setError(null)} className="ml-auto text-red-400 hover:text-red-600">✕</button>
+          <span className="flex-1">
+            {error}
+            {error.toLowerCase().includes('already running') && (
+              <button
+                onClick={handleResetJobs}
+                className="ml-2 underline text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 text-xs font-medium"
+              >
+                Reset stale jobs
+              </button>
+            )}
+          </span>
+          <button onClick={() => setError(null)} className="ml-auto text-red-400 hover:text-red-300 flex-shrink-0">✕</button>
         </div>
       )}
 
@@ -449,18 +495,19 @@ export const PipelineRunner = () => {
         onKill={handleKill}
         showLogs={showFullLogs}
         onToggleLogs={() => setShowFullLogs(v => !v)}
+        locale={locale}
       />
       </div>
 
       {/* Divider */}
       <div className="flex items-center gap-3 mb-4">
-        <div className="flex-1 h-px bg-gray-200" />
-        <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Or run individual steps</span>
-        <div className="flex-1 h-px bg-gray-200" />
+        <div className="flex-1 h-px bg-gray-200 dark:bg-gray-700" />
+        <span className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wide">Or run individual steps</span>
+        <div className="flex-1 h-px bg-gray-200 dark:bg-gray-700" />
       </div>
 
       {anyRunning && !isFullPipelineRunning && (
-        <div className="mb-4 bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5 text-sm text-blue-700 flex items-center gap-2">
+        <div className="mb-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg px-4 py-2.5 text-sm text-blue-700 dark:text-blue-300 flex items-center gap-2">
           <Spinner />
           A pipeline step is currently running… Use the <strong className="mx-1">■ Stop</strong> button to interrupt it.
         </div>
@@ -473,15 +520,15 @@ export const PipelineRunner = () => {
             {/* Step number + connector line */}
             <div className="flex flex-col items-center flex-shrink-0 w-8">
               <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold border-2 flex-shrink-0 ${
-                jobs[step.id]?.status === 'success' ? 'bg-emerald-100 border-emerald-400 text-emerald-700' :
-                jobs[step.id]?.status === 'error'   ? 'bg-red-100 border-red-400 text-red-700' :
-                jobs[step.id]?.status === 'running' ? 'bg-blue-100 border-blue-400 text-blue-700' :
-                'bg-gray-100 border-gray-300 text-gray-500'
+                jobs[step.id]?.status === 'success' ? 'bg-emerald-100 dark:bg-emerald-900/30 border-emerald-400 text-emerald-700 dark:text-emerald-300' :
+                jobs[step.id]?.status === 'error'   ? 'bg-red-100 dark:bg-red-900/30 border-red-400 text-red-700 dark:text-red-300' :
+                jobs[step.id]?.status === 'running' ? 'bg-blue-100 dark:bg-blue-900/30 border-blue-400 text-blue-700 dark:text-blue-300' :
+                'bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400'
               }`}>
                 {i + 1}
               </div>
               {i < orderedSteps.length - 1 && (
-                <div className="w-0.5 flex-1 mt-1 bg-gray-200 min-h-4" />
+                <div className="w-0.5 flex-1 mt-1 bg-gray-200 dark:bg-gray-700 min-h-4" />
               )}
             </div>
 
@@ -494,6 +541,7 @@ export const PipelineRunner = () => {
                 onToggleLogs={toggleLogs}
                 showLogs={!!showLogs[step.id]}
                 isFullPipelineRunning={isFullPipelineRunning}
+                locale={locale}
               />
             </div>
           </div>
@@ -501,9 +549,9 @@ export const PipelineRunner = () => {
       </div>
 
       {/* Notes */}
-      <div id="pipeline-notes" className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
-        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Notes</p>
-        <ul className="text-xs text-gray-500 space-y-1 list-disc list-inside">
+      <div id="pipeline-notes" className="mt-6 p-4 bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-gray-200 dark:border-gray-700">
+        <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">Notes</p>
+        <ul className="text-xs text-gray-500 dark:text-gray-400 space-y-1 list-disc list-inside">
           <li>Individual steps run independently — you can re-run any step without re-running earlier ones.</li>
           <li><strong>Run All</strong> stops at the first step that fails.</li>
           <li><strong>ETL</strong> requires a live database connection (see <code>config/config.yaml</code>).</li>
