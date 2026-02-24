@@ -30,6 +30,7 @@ try:
         SeasonalWindowAverage,
         TSB  # Teunter-Syntetos-Babai for intermittent
     )
+    from statsforecast.utils import ConformalIntervals
     STATSFORECAST_AVAILABLE = True
 except ImportError:
     STATSFORECAST_AVAILABLE = False
@@ -92,20 +93,20 @@ class StatisticalForecaster:
         raw_freq = self.forecast_config['frequency']
         self.frequency = _FREQ_ALIAS.get(raw_freq, raw_freq)
         
-    def get_model_instance(self, 
-                          method_name: str, 
+    def get_model_instance(self,
+                          method_name: str,
                           characteristics: Dict,
-                          season_length: Optional[int] = None) -> Any:
+                          season_length: Optional[int] = None) -> Tuple[Any, Dict[str, Any]]:
         """
-        Get configured model instance based on method name and characteristics.
-        
+        Get configured model instance and its hyperparameters.
+
         Args:
             method_name: Name of the forecasting method
             characteristics: Time series characteristics for hyperparameter tuning
             season_length: Seasonal period length
-            
+
         Returns:
-            Configured model instance
+            Tuple of (configured model instance, hyperparameters dict)
         """
         # Determine season length from characteristics if not provided
         if season_length is None:
@@ -123,43 +124,132 @@ class StatisticalForecaster:
         # adjust seasonal models".  Use AutoARIMA(season_length=1) instead.
         mstl_trend = AutoARIMA(season_length=1)
 
+        # Conformal prediction intervals for intermittent-demand models
+        # (CrostonOptimized, ADIDA, IMAPA, TSB) which don't produce native PIs.
+        # ConformalIntervals requires n_windows * h + 1 observations; use None
+        # when the series is too short — the model still runs, just no intervals.
+        n_obs = characteristics.get('n_observations', 0)
+        _min_for_conformal = 2 * self.horizon + 1  # n_windows=2
+        _conformal = ConformalIntervals(n_windows=2, h=self.horizon) if n_obs >= _min_for_conformal else None
+
+        # Common hyperparameters shared by all methods
+        _base_hyper = {
+            'horizon': self.horizon,
+            'frequency': self.frequency,
+            'confidence_levels': self.confidence_levels,
+            'n_observations': n_obs,
+        }
+
+        approximation = True if characteristics.get('n_observations', 0) > 150 else False
+        decomp_type = 'multiplicative' if characteristics.get('complexity_level') == 'high' else 'additive'
+        conformal_enabled = _conformal is not None
+        conformal_info = {
+            'conformal_intervals': conformal_enabled,
+            'conformal_n_windows': 2 if conformal_enabled else None,
+            'conformal_h': self.horizon if conformal_enabled else None,
+        }
+
         # Model mapping with hyperparameter configuration
+        # Each entry returns (model_instance, method-specific hyperparameters)
         model_configs = {
-            'AutoARIMA': lambda: AutoARIMA(
-                season_length=season_length,
-                approximation=True if characteristics['n_observations'] > 150 else False
+            'AutoARIMA': lambda: (
+                AutoARIMA(season_length=season_length, approximation=approximation),
+                {**_base_hyper, 'season_length': season_length,
+                 'approximation': approximation,
+                 'method_family': 'ARIMA',
+                 'description': 'Automatic ARIMA model selection via Hyndman-Khandakar algorithm. '
+                                'Searches over (p,d,q)(P,D,Q)m orders and selects by AICc.'}
             ),
-            'AutoETS': lambda: AutoETS(
-                season_length=season_length,
-                model='ZZZ'  # Automatic selection
+            'AutoETS': lambda: (
+                AutoETS(season_length=season_length, model='ZZZ'),
+                {**_base_hyper, 'season_length': season_length,
+                 'model': 'ZZZ',
+                 'description': 'Automatic Exponential Smoothing (ETS) model selection. '
+                                'ZZZ = auto-select Error, Trend, and Seasonal components. '
+                                'Optimizes smoothing parameters (alpha, beta, gamma, phi) via MLE.',
+                 'method_family': 'ETS',
+                 'selection_criterion': 'AICc'}
             ),
-            'AutoTheta': lambda: AutoTheta(
-                season_length=season_length,
-                decomposition_type='multiplicative' if characteristics.get('complexity_level') == 'high' else 'additive'
+            'AutoTheta': lambda: (
+                AutoTheta(season_length=season_length, decomposition_type=decomp_type),
+                {**_base_hyper, 'season_length': season_length,
+                 'decomposition_type': decomp_type,
+                 'description': f'Automatic Theta method with {decomp_type} decomposition. '
+                                'Decomposes series into trend and seasonality, applies Theta lines.',
+                 'method_family': 'Theta'}
             ),
-            'AutoCES': lambda: AutoCES(
-                season_length=season_length
+            'AutoCES': lambda: (
+                AutoCES(season_length=season_length),
+                {**_base_hyper, 'season_length': season_length,
+                 'description': 'Complex Exponential Smoothing. Auto-selects between '
+                                'simple (N), partial (P), full (F) seasonal models.',
+                 'method_family': 'CES'}
             ),
-            'MSTL': lambda: MSTL(
-                season_length=season_length,
-                trend_forecaster=mstl_trend
+            'MSTL': lambda: (
+                MSTL(season_length=season_length, trend_forecaster=mstl_trend),
+                {**_base_hyper, 'season_length': season_length,
+                 'trend_forecaster': 'AutoARIMA(season_length=1)',
+                 'description': 'Multiple Seasonal-Trend decomposition using LOESS. '
+                                'Decomposes into trend + seasonal + remainder, then forecasts '
+                                'trend with AutoARIMA(season_length=1).',
+                 'method_family': 'Decomposition'}
             ),
-            'CrostonOptimized': lambda: CrostonOptimized(),
-            'ADIDA': lambda: ADIDA(),
-            'IMAPA': lambda: IMAPA(),
-            'TSB': lambda: TSB(
-                alpha_d=0.1,
-                alpha_p=0.1
+            'CrostonOptimized': lambda: (
+                CrostonOptimized(prediction_intervals=_conformal),
+                {**_base_hyper, **conformal_info,
+                 'description': 'Optimized Croston method for intermittent demand. '
+                                'Separately models demand size and inter-arrival intervals. '
+                                'Optimizes smoothing parameter via MSE.',
+                 'method_family': 'Intermittent'}
             ),
-            'SeasonalNaive': lambda: SeasonalNaive(
-                season_length=season_length
+            'ADIDA': lambda: (
+                ADIDA(prediction_intervals=_conformal),
+                {**_base_hyper, **conformal_info,
+                 'description': 'Aggregate-Disaggregate Intermittent Demand Approach. '
+                                'Aggregates demand to remove intermittency, forecasts, then disaggregates.',
+                 'method_family': 'Intermittent'}
             ),
-            'HistoricAverage': lambda: HistoricAverage(),
-            'Naive': lambda: Naive(),
-            'SeasonalWindowAverage': lambda: SeasonalWindowAverage(
-                season_length=season_length,
-                window_size=2
-            )
+            'IMAPA': lambda: (
+                IMAPA(prediction_intervals=_conformal),
+                {**_base_hyper, **conformal_info,
+                 'description': 'Intermittent Multiple Aggregation Prediction Algorithm. '
+                                'Aggregates at multiple temporal levels and combines forecasts.',
+                 'method_family': 'Intermittent'}
+            ),
+            'TSB': lambda: (
+                TSB(alpha_d=0.1, alpha_p=0.1, prediction_intervals=_conformal),
+                {**_base_hyper, **conformal_info,
+                 'alpha_d': 0.1,
+                 'alpha_p': 0.1,
+                 'description': 'Teunter-Syntetos-Babai method for intermittent demand. '
+                                'Smoothes demand probability (alpha_p=0.1) and demand size (alpha_d=0.1) separately.',
+                 'method_family': 'Intermittent'}
+            ),
+            'SeasonalNaive': lambda: (
+                SeasonalNaive(season_length=season_length),
+                {**_base_hyper, 'season_length': season_length,
+                 'description': f'Repeats last seasonal cycle (season_length={season_length}). '
+                                'Forecast for h steps ahead equals the value from h-season_length steps ago.',
+                 'method_family': 'Naive'}
+            ),
+            'HistoricAverage': lambda: (
+                HistoricAverage(),
+                {**_base_hyper,
+                 'description': 'Flat forecast equal to the mean of all historical observations.',
+                 'method_family': 'Naive'}
+            ),
+            'Naive': lambda: (
+                Naive(),
+                {**_base_hyper,
+                 'description': 'Random walk forecast — repeats the last observed value for all horizons.',
+                 'method_family': 'Naive'}
+            ),
+            'SeasonalWindowAverage': lambda: (
+                SeasonalWindowAverage(season_length=season_length, window_size=2),
+                {**_base_hyper, 'season_length': season_length, 'window_size': 2,
+                 'description': f'Average of last {2} seasonal cycles (season_length={season_length}).',
+                 'method_family': 'Naive'}
+            ),
         }
 
         if method_name not in model_configs:
@@ -228,51 +318,98 @@ class StatisticalForecaster:
                 )
                 continue
 
+            # MSTL requires at least 2 full seasonal cycles to decompose;
+            # with fewer observations the internal np.min on an empty array
+            # raises "zero-size array to reduction operation minimum".
+            if method == 'MSTL' and n_obs < 2 * season_length + 1:
+                self.logger.debug(
+                    f"{unique_id}: skipping MSTL — only {n_obs} obs, need >= {2 * season_length + 1}"
+                )
+                continue
+
+            # AutoETS, AutoARIMA, AutoTheta, AutoCES need enough data to
+            # fit; models raise "tiny datasets" or similar errors when there
+            # are fewer than ~2*season_length observations.
+            if method in ('AutoETS', 'AutoARIMA', 'AutoTheta', 'AutoCES') and n_obs < max(2 * season_length, 10):
+                self.logger.debug(
+                    f"{unique_id}: skipping {method} — only {n_obs} obs, need >= {max(2 * season_length, 10)}"
+                )
+                continue
+
             try:
                 start_time = time.time()
 
-                # Get model instance
-                model = self.get_model_instance(method, characteristics, season_length)
-                
+                # Get model instance AND its hyperparameters
+                model, method_hyperparams = self.get_model_instance(method, characteristics, season_length)
+
                 # Create StatsForecast instance
                 sf = StatsForecast(
                     models=[model],
                     freq=self.frequency,
                     n_jobs=1  # Single job per series (parallelization at series level)
                 )
-                
+
+                # Intermittent-demand models (CrostonOptimized, ADIDA, IMAPA, TSB)
+                # don't produce native prediction intervals.  They can only produce
+                # PIs via ConformalIntervals, which needs enough observations.
+                # When the series is too short we call forecast() WITHOUT level=
+                # so the model produces point forecasts only.
+                _INTERMITTENT_MODELS = {'CrostonOptimized', 'ADIDA', 'IMAPA', 'TSB'}
+                _conformal_available = n_obs >= 2 * self.horizon + 1
+                _skip_level = method in _INTERMITTENT_MODELS and not _conformal_available
+
                 # Generate forecast with prediction intervals
-                forecast_df = sf.forecast(
-                    df=series_df,
-                    h=self.horizon,
-                    level=self.confidence_levels
-                )
-                
+                forecast_kwargs = dict(df=series_df, h=self.horizon)
+                if not _skip_level:
+                    forecast_kwargs['level'] = self.confidence_levels
+                forecast_df = sf.forecast(**forecast_kwargs)
+
                 training_time = time.time() - start_time
-                
+
                 # Extract point forecast (mean)
                 point_forecast = forecast_df[method].values
-                
+
                 # Extract quantiles from prediction intervals
                 quantiles = {}
                 for level in self.confidence_levels:
                     # StatsForecast uses lo-{level} and hi-{level} columns
                     lo_col = f'{method}-lo-{level}'
                     hi_col = f'{method}-hi-{level}'
-                    
+
                     if lo_col in forecast_df.columns and hi_col in forecast_df.columns:
                         # Calculate quantile from prediction interval
                         # lo corresponds to (100-level)/2 percentile
                         # hi corresponds to 100-(100-level)/2 percentile
                         lower_q = (100 - level) / 200
                         upper_q = 1 - lower_q
-                        
+
                         quantiles[lower_q] = forecast_df[lo_col].values
                         quantiles[upper_q] = forecast_df[hi_col].values
-                
+
                 # Add median (point forecast)
                 quantiles[0.5] = point_forecast
-                
+
+                # ---- Extract fitted model parameters ----
+                # After fitting, some StatsForecast models expose their estimated
+                # parameters (e.g. ARIMA orders, ETS smoothing weights).
+                try:
+                    fitted_models = sf.fitted_[0, 0]  # first model, first series
+                    if hasattr(fitted_models, 'model_') and hasattr(fitted_models.model_, '__dict__'):
+                        _fitted = fitted_models.model_.__dict__
+                        # Extract only JSON-serialisable primitives
+                        for k, v in _fitted.items():
+                            if k.startswith('_'):
+                                continue
+                            if isinstance(v, (int, float, bool, str)):
+                                method_hyperparams[f'fitted_{k}'] = v
+                            elif isinstance(v, np.ndarray) and v.size <= 10:
+                                method_hyperparams[f'fitted_{k}'] = v.tolist()
+                except Exception:
+                    pass  # Not all models expose fitted internals
+
+                method_hyperparams['training_time_seconds'] = round(training_time, 4)
+                method_hyperparams['prediction_intervals_available'] = not _skip_level
+
                 # Get fitted values if available
                 fitted_values = None
                 residuals = None
@@ -283,7 +420,7 @@ class StatisticalForecaster:
                         residuals = series_df['y'].values - fitted_values
                 except:
                     pass
-                
+
                 # Create result
                 result = ForecastResult(
                     unique_id=unique_id,
@@ -292,7 +429,7 @@ class StatisticalForecaster:
                     quantiles=quantiles,
                     fitted_values=fitted_values,
                     residuals=residuals,
-                    hyperparameters={'season_length': season_length},
+                    hyperparameters=method_hyperparams,
                     training_time=training_time,
                     insample_actual=series_df['y'].values
                 )
@@ -434,25 +571,35 @@ class StatisticalForecaster:
 
 def main():
     """Example usage of statistical forecaster."""
-    # Load data
-    df = pd.read_parquet('./data/time_series.parquet')
-    characteristics_df = pd.read_parquet('./output/time_series_characteristics.parquet')
-    
+    from db.db import load_table, get_schema, bulk_insert, jsonb_serialize
+
+    config_path = 'config/config.yaml'
+    schema = get_schema(config_path)
+
+    # Load data from PostgreSQL
+    df = load_table(config_path, f"{schema}.demand_actuals",
+                    columns="unique_id, date, COALESCE(corrected_qty, qty) AS y")
+    df['date'] = pd.to_datetime(df['date'])
+    characteristics_df = load_table(config_path, f"{schema}.time_series_characteristics")
+
     # Initialize forecaster
     forecaster = StatisticalForecaster()
-    
+
     # Generate forecasts
     forecasts_df = forecaster.forecast_multiple_series(
         df=df,
         characteristics_df=characteristics_df.head(5)  # Test with first 5 series
     )
-    
-    # Save results
-    output_path = './output/forecasts_statistical.parquet'
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    forecasts_df.to_parquet(output_path, index=False)
-    
-    print(f"\nForecasts saved to: {output_path}")
+
+    # Save results to PostgreSQL
+    if not forecasts_df.empty:
+        cols = list(forecasts_df.columns)
+        rows = [
+            tuple(jsonb_serialize(v) for v in row)
+            for row in forecasts_df.itertuples(index=False, name=None)
+        ]
+        n = bulk_insert(config_path, f"{schema}.forecast_results", cols, rows, truncate=False)
+        print(f"\nForecasts saved to {schema}.forecast_results ({n} rows)")
     print(f"Generated {len(forecasts_df)} forecasts")
 
 

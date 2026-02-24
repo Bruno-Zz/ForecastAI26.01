@@ -3,23 +3,17 @@ ForecastAI Pipeline Runner
 CLI entry point for running the full or partial forecasting pipeline.
 
 Usage:
-    # Full pipeline (ETL → Characterize → Forecast → Backtest → Best Method → Distributions)
+    # Full pipeline (ETL -> Characterize -> Forecast -> Backtest -> Best Method -> Distributions)
     python run_pipeline.py
 
-    # Skip ETL (use existing time_series.parquet)
+    # Skip ETL (use existing data in PostgreSQL)
     python run_pipeline.py --skip-etl
-
-    # Skip ETL and characterization (use existing parquet files)
-    python run_pipeline.py --skip-etl --skip-characterization
 
     # Only run ETL
     python run_pipeline.py --only etl
 
-    # Only run characterization (requires existing time_series.parquet)
+    # Only run characterization (requires data in demand_actuals)
     python run_pipeline.py --only characterize
-
-    # Run from specific data files
-    python run_pipeline.py --skip-etl --data ./data/time_series.parquet
 
     # Custom config and output
     python run_pipeline.py --config ./config/config.yaml --output ./output
@@ -39,6 +33,7 @@ sys.path.insert(0, str(project_root))
 
 from utils.orchestrator import ForecastOrchestrator
 from etl.etl import ETLPipeline
+from db.db import load_table, get_schema
 
 
 def setup_logging(level: str = "INFO", log_file: str = None):
@@ -75,9 +70,38 @@ def discover_schema(config_path: str):
         print("  Could not discover schema. Check database connection.")
 
 
-def run_single_step(step: str, config_path: str, data_path: str = None, output_dir: str = None):
-    """Run a single pipeline step."""
+def _load_demand_actuals(config_path: str):
+    """Load demand_actuals from DB in the standard (unique_id, date, y) format.
+
+    Only the three canonical columns are returned — extra metadata columns
+    (item_id, site_id, channel, …) are intentionally excluded so that
+    StatsForecast does not interpret them as exogenous features.
+    """
+    import pandas as pd
+    schema = get_schema(config_path)
+    df = load_table(
+        config_path,
+        f"{schema}.demand_actuals",
+        columns="unique_id, date, COALESCE(corrected_qty, qty) AS y",
+    )
+    df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
+def run_single_step(step: str, config_path: str, output_dir: str = None,
+                    series_filter: list = None, all_methods: bool = False):
+    """Run a single pipeline step.  All data is read from / written to PostgreSQL.
+
+    Args:
+        step: Pipeline step name.
+        config_path: Path to config.yaml.
+        output_dir: Unused (kept for API compat).
+        series_filter: Optional list of unique_ids to restrict processing to.
+        all_methods: If True, override recommended_methods with ALL methods
+                     from the config (statistical + ML + neural + foundation).
+    """
     orchestrator = ForecastOrchestrator(config_path)
+    schema = get_schema(config_path)
 
     import pandas as pd
 
@@ -86,24 +110,44 @@ def run_single_step(step: str, config_path: str, data_path: str = None, output_d
         print(f"ETL complete: {len(df)} rows, {df['unique_id'].nunique()} series")
 
     elif step == 'outlier-detection':
-        data_file = data_path or orchestrator.config['etl']['output_path']
-        df = pd.read_parquet(data_file)
+        df = _load_demand_actuals(config_path)
         corrected_df, outliers_df = orchestrator.step_outlier_detection(df)
         n_adjusted = outliers_df['unique_id'].nunique() if not outliers_df.empty else 0
         print(f"Outlier detection complete: {len(outliers_df)} outliers in {n_adjusted} series")
 
     elif step == 'characterize':
-        data_file = data_path or orchestrator.config['etl']['output_path']
-        df = pd.read_parquet(data_file)
+        df = _load_demand_actuals(config_path)
         chars_df = orchestrator.step_characterize(df)
         print(f"Characterization complete: {len(chars_df)} series analyzed")
 
     elif step == 'forecast':
-        data_file = data_path or orchestrator.config['etl']['output_path']
-        output_base = output_dir or orchestrator.config['output']['base_path']
-        df = pd.read_parquet(data_file)
-        chars_df = pd.read_parquet(str(Path(output_base) / "time_series_characteristics.parquet"))
-        # Start Dask for parallel batch processing (mirrors run_complete_pipeline behaviour)
+        df = _load_demand_actuals(config_path)
+        chars_df = load_table(config_path, f"{schema}.time_series_characteristics")
+
+        # Filter to specific series if requested
+        if series_filter:
+            df = df[df['unique_id'].isin(series_filter)]
+            chars_df = chars_df[chars_df['unique_id'].isin(series_filter)]
+            print(f"Filtered to {len(chars_df)} series: {series_filter}")
+
+        # Override recommended_methods with ALL methods from config
+        if all_methods and not chars_df.empty:
+            import yaml as _yaml
+            with open(config_path, 'r') as _f:
+                _cfg = _yaml.safe_load(_f)
+            fc = _cfg.get('forecasting', {})
+            full_list = (
+                fc.get('statsforecast_models', [])
+                + fc.get('ml_models', [])
+                + fc.get('neuralforecast_models', [])
+            )
+            if fc.get('timesfm', {}).get('model_name'):
+                full_list.append('TimesFM')
+            chars_df = chars_df.copy()
+            chars_df['recommended_methods'] = [full_list] * len(chars_df)
+            print(f"All-methods mode: using {len(full_list)} methods per series")
+
+        # Start Dask for parallel batch processing
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
             orchestrator.start_dask_client()
@@ -115,11 +159,9 @@ def run_single_step(step: str, config_path: str, data_path: str = None, output_d
         print(f"Forecasting complete: {len(forecasts_df)} forecasts generated")
 
     elif step == 'backtest':
-        data_file = data_path or orchestrator.config['etl']['output_path']
-        output_base = output_dir or orchestrator.config['output']['base_path']
-        df = pd.read_parquet(data_file)
-        chars_df = pd.read_parquet(str(Path(output_base) / "time_series_characteristics.parquet"))
-        # Start Dask for parallel backtesting (mirrors forecast step behaviour)
+        df = _load_demand_actuals(config_path)
+        chars_df = load_table(config_path, f"{schema}.time_series_characteristics")
+        # Start Dask for parallel backtesting
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
             orchestrator.start_dask_client()
@@ -131,15 +173,13 @@ def run_single_step(step: str, config_path: str, data_path: str = None, output_d
         print(f"Backtesting complete: {len(metrics_df)} metric rows, {len(origin_df)} origin forecast rows")
 
     elif step == 'best-method':
-        output_base = output_dir or orchestrator.config['output']['base_path']
-        metrics_df = pd.read_parquet(str(Path(output_base) / "backtest_metrics.parquet"))
+        metrics_df = load_table(config_path, f"{schema}.backtest_metrics")
         best_df = orchestrator.step_select_best_methods(metrics_df)
         print(f"Best method selection complete: {len(best_df)} series ranked")
 
     elif step == 'distributions':
-        output_base = output_dir or orchestrator.config['output']['base_path']
-        forecasts_df = pd.read_parquet(str(Path(output_base) / "forecasts_all_methods.parquet"))
-        # Start Dask for parallel distribution fitting (mirrors forecast/backtest steps)
+        forecasts_df = load_table(config_path, f"{schema}.forecast_results")
+        # Start Dask for parallel distribution fitting
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
             orchestrator.start_dask_client()
@@ -152,7 +192,7 @@ def run_single_step(step: str, config_path: str, data_path: str = None, output_d
 
     else:
         print(f"Unknown step: {step}")
-        print("Available steps: etl, characterize, forecast, backtest, best-method, distributions")
+        print("Available steps: etl, outlier-detection, characterize, forecast, backtest, best-method, distributions")
         sys.exit(1)
 
 
@@ -179,14 +219,6 @@ Examples:
         '--output', type=str, default=None,
         help='Output directory override (default: from config)'
     )
-    parser.add_argument(
-        '--data', type=str, default=None,
-        help='Path to existing time_series.parquet (implies --skip-etl)'
-    )
-    parser.add_argument(
-        '--characteristics', type=str, default=None,
-        help='Path to existing characteristics.parquet (implies --skip-characterization)'
-    )
 
     # Step control
     parser.add_argument('--skip-etl', action='store_true', help='Skip ETL step')
@@ -202,6 +234,16 @@ Examples:
         '--only', type=str, default=None,
         choices=['etl', 'outlier-detection', 'characterize', 'forecast', 'backtest', 'best-method', 'distributions'],
         help='Run only a single step'
+    )
+
+    # Series filtering and method override (used by the "Run Forecast" UI button)
+    parser.add_argument(
+        '--series', type=str, default=None,
+        help='Comma-separated list of unique_ids to process (e.g., 63530_517,63531_518)'
+    )
+    parser.add_argument(
+        '--all-methods', action='store_true',
+        help='Run ALL forecast methods instead of only recommended ones'
     )
 
     # Schema discovery
@@ -230,14 +272,6 @@ Examples:
     setup_logging(args.log_level, log_file)
     logger = logging.getLogger('run_pipeline')
 
-    # If data file provided, skip ETL
-    if args.data:
-        args.skip_etl = True
-
-    # If characteristics file provided, skip characterization
-    if args.characteristics:
-        args.skip_characterization = True
-
     # Schema discovery mode
     if args.discover_schema:
         discover_schema(args.config)
@@ -246,7 +280,12 @@ Examples:
     # Single step mode
     if args.only:
         logger.info(f"Running single step: {args.only}")
-        run_single_step(args.only, args.config, args.data, args.output)
+        series_filter = args.series.split(',') if args.series else None
+        run_single_step(
+            args.only, args.config, args.output,
+            series_filter=series_filter,
+            all_methods=args.all_methods,
+        )
         return
 
     # Full pipeline
@@ -254,9 +293,7 @@ Examples:
 
     orchestrator = ForecastOrchestrator(args.config)
 
-    output_paths = orchestrator.run_complete_pipeline(
-        time_series_path=args.data,
-        characteristics_path=args.characteristics,
+    output_tables = orchestrator.run_complete_pipeline(
         output_dir=args.output,
         skip_etl=args.skip_etl,
         skip_outlier_detection=args.skip_outlier_detection,
@@ -270,10 +307,10 @@ Examples:
     print("\n" + "=" * 80)
     print("PIPELINE COMPLETE!")
     print("=" * 80)
-    print("\nOutput files:")
-    for key, path in output_paths.items():
-        if path:
-            print(f"  {key}: {path}")
+    print("\nOutput tables:")
+    for key, table in output_tables.items():
+        if table:
+            print(f"  {key}: {table}")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,20 @@
 """
 ETL Pipeline for Demand Forecasting System
-Extracts data from PostgreSQL (Neon) via DuckDB's postgres_scanner extension,
-joins plan.item, plan.site, and plan.demand_actual tables,
-transforms into standardized time series format, and loads to Parquet.
+
+Two-database architecture:
+  * **Source DB** (Neon remote) — ``dp_plan.calc_dp_actual``
+    Contains the raw demand actuals that are the single source of truth.
+  * **Local DB** (localhost / zcube) — ``zcube.demand_actuals``
+    Working copy populated by this ETL and consumed by every downstream
+    pipeline step (characterization, forecasting, evaluation, API).
+
+The extract step reads from the source DB; the load step writes to the
+local DB.  If source_db is not configured the pipeline falls back to
+extracting from the local DB (self-reload mode).
 """
 
-import duckdb
+import psycopg2
+import psycopg2.extras
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Any
@@ -14,12 +23,21 @@ import logging
 import yaml
 from datetime import datetime
 
+# Local DB helper
+import sys
+_files_dir = Path(__file__).resolve().parent.parent
+if str(_files_dir) not in sys.path:
+    sys.path.insert(0, str(_files_dir))
+
+from db.db import get_conn, init_schema
+
 
 class ETLPipeline:
     """
-    ETL pipeline that extracts demand data from PostgreSQL using DuckDB,
-    transforms it into a standardized time series format (unique_id, date, y),
-    and saves it as a Parquet file.
+    ETL pipeline that extracts demand data from a remote source database
+    (dp_plan.calc_dp_actual on Neon), transforms it into a standardized
+    time series format (unique_id, date, y), and loads it into the local
+    working table (zcube.demand_actuals) for downstream consumers.
     """
 
     # Frequency mapping from config shorthand to pandas offset aliases
@@ -50,7 +68,6 @@ class ETLPipeline:
 
         # Resolve config path
         if config_path is None:
-            # Default: files/config/config.yaml
             files_dir = Path(__file__).resolve().parent.parent
             config_path = str(files_dir / "config" / "config.yaml")
 
@@ -67,17 +84,36 @@ class ETLPipeline:
         self.query_config = self.etl_config["query"]
         self.agg_config = self.etl_config.get("aggregation", {})
 
-        # Table mappings from config
+        # ── Source DB (remote Neon) — for extraction ──
+        self.source_db_config = self.config["data_source"].get("source_db")
+        if self.source_db_config:
+            self.source_demand_table = self.source_db_config.get(
+                "demand_table", "dp_plan.calc_dp_actual"
+            )
+            # Column mapping — allows the remote table to have different names
+            src_cols = self.source_db_config.get("columns", {})
+            self.src_col_item_id = src_cols.get("item_id", "item_id")
+            self.src_col_site_id = src_cols.get("site_id", "site_id")
+            self.src_col_date    = src_cols.get("date", "date")
+            self.src_col_qty     = src_cols.get("qty", "qty")
+            self.src_col_channel = src_cols.get("channel", "channel")  # None = skip
+        else:
+            self.source_demand_table = None
+
+        # ── Local DB tables (for load + downstream) ──
         self.tables = self.pg_config.get("tables", {
-            "item": "plan.item",
-            "site": "plan.site",
-            "demand_actual": "plan.demand_actual",
+            "item": "zcube.item",
+            "site": "zcube.site",
+            "demand_actual": "zcube.demand_actuals",
+            "forecast_results": "zcube.forecast_results",
+            "forecast_adjustments": "zcube.forecast_adjustments",
+            "process_log": "zcube.process_log",
         })
 
-        # Column name overrides from config
+        # Column name overrides from config (used during transform)
         self.date_column = self.query_config.get("date_column", "date")
-        self.value_column = self.query_config.get("value_column", "demand")
-        self.id_column = self.query_config.get("id_column", "sku_id")
+        self.value_column = self.query_config.get("value_column", "qty")
+        self.id_column = self.query_config.get("id_column", "item_id")
 
         # Data quality settings
         self.min_observations = self.query_config.get("min_observations", 12)
@@ -88,298 +124,180 @@ class ETLPipeline:
         self.frequency = self.agg_config.get("frequency", "M")
         self.agg_method = self.agg_config.get("method", "sum")
 
-        # Output path (relative to files/ directory)
-        files_dir = Path(__file__).resolve().parent.parent
-        raw_output = self.etl_config.get("output_path", "./data/time_series.parquet")
-        self.output_path = files_dir / raw_output
+        # Output table (PostgreSQL — no parquet)
+        self.output_table = self.tables.get("demand_actual", "zcube.demand_actuals")
 
-        # DuckDB connection (in-memory)
-        self.con = None
-
+        src_label = self.source_demand_table or "(local fallback)"
         self.logger.info("ETLPipeline initialized")
-        self.logger.info(f"  Config: {self.config_path}")
-        self.logger.info(f"  Tables: {self.tables}")
-        self.logger.info(f"  Output: {self.output_path}")
+        self.logger.info(f"  Config : {self.config_path}")
+        self.logger.info(f"  Source : {src_label}")
+        self.logger.info(f"  Output : {self.output_table}")
 
     # ------------------------------------------------------------------
-    # Connection helpers
+    # Schema initialisation
     # ------------------------------------------------------------------
 
-    def _build_dsn(self) -> str:
-        """Build a PostgreSQL DSN string from config."""
-        host = self.pg_config["host"]
-        port = self.pg_config.get("port", 5432)
-        database = self.pg_config["database"]
-        user = self.pg_config["user"]
-        password = self.pg_config["password"]
-        sslmode = self.pg_config.get("sslmode", "require")
-        return (
-            f"host={host} port={port} dbname={database} "
-            f"user={user} password={password} sslmode={sslmode}"
-        )
-
-    def _get_connection(self) -> duckdb.DuckDBPyConnection:
-        """
-        Get or create a DuckDB connection with the postgres_scanner
-        extension installed and a PostgreSQL source attached.
-        """
-        if self.con is not None:
-            return self.con
-
-        self.logger.info("Creating DuckDB connection and attaching PostgreSQL...")
-        self.con = duckdb.connect(database=":memory:")
-
-        # Install and load the postgres extension
-        self.con.execute("INSTALL postgres;")
-        self.con.execute("LOAD postgres;")
-
-        # Attach the remote Neon PostgreSQL database
-        dsn = self._build_dsn()
-        self.con.execute(f"""
-            ATTACH '{dsn}' AS pg_db (TYPE POSTGRES, READ_ONLY);
-        """)
-        self.logger.info("PostgreSQL database attached as 'pg_db'")
-
-        return self.con
-
-    def _close_connection(self):
-        """Close the DuckDB connection."""
-        if self.con is not None:
-            try:
-                self.con.execute("DETACH pg_db;")
-            except Exception:
-                pass
-            self.con.close()
-            self.con = None
-            self.logger.info("DuckDB connection closed")
-
-    # ------------------------------------------------------------------
-    # Schema discovery
-    # ------------------------------------------------------------------
-
-    def discover_schema(self) -> Dict[str, List[str]]:
-        """
-        Connect to PostgreSQL and print the columns of each table in the
-        plan schema.  Useful for understanding the data model before
-        building the join query.
-
-        Returns:
-            Dictionary mapping table name to list of column names.
-        """
-        con = self._get_connection()
-        schema_info: Dict[str, List[str]] = {}
-
-        for label, full_table in self.tables.items():
-            self.logger.info(f"Discovering schema for {full_table}...")
-            try:
-                cols_df = con.execute(f"""
-                    SELECT column_name, data_type
-                    FROM pg_db.information_schema.columns
-                    WHERE table_schema || '.' || table_name = '{full_table}'
-                    ORDER BY ordinal_position;
-                """).fetchdf()
-
-                if cols_df.empty:
-                    # Fallback: try PRAGMA table_info via DuckDB
-                    self.logger.info(f"  information_schema empty, trying PRAGMA for {full_table}...")
-                    cols_df = con.execute(f"""
-                        PRAGMA table_info('pg_db.{full_table}');
-                    """).fetchdf()
-
-                col_names = cols_df["column_name"].tolist() if "column_name" in cols_df.columns else []
-                schema_info[label] = col_names
-
-                self.logger.info(f"  {label} ({full_table}):")
-                if not cols_df.empty:
-                    for _, row in cols_df.iterrows():
-                        col = row.get("column_name", row.get("name", "?"))
-                        dtype = row.get("data_type", row.get("type", "?"))
-                        self.logger.info(f"    - {col}  ({dtype})")
-                else:
-                    self.logger.warning(f"    No columns found for {full_table}")
-
-            except Exception as e:
-                self.logger.error(f"  Failed to discover {full_table}: {e}")
-                schema_info[label] = []
-
-        return schema_info
+    def init_db(self) -> None:
+        """Ensure the local zcube schema and all tables exist."""
+        self.logger.info("Initialising local database schema...")
+        init_schema(str(self.config_path))
+        self.logger.info("Database schema ready")
 
     # ------------------------------------------------------------------
     # Extraction
     # ------------------------------------------------------------------
 
-    def _build_extract_query(self) -> str:
+    # ------------------------------------------------------------------
+    # Source DB connection helper
+    # ------------------------------------------------------------------
+
+    def _get_source_conn(self):
         """
-        Build the SQL query that joins item, site, and demand_actual.
-
-        The join logic:
-        - demand_actual is the fact table containing date, value, and
-          foreign keys to item and site.
-        - item and site are dimension tables.
-        - unique_id is constructed as <item_identifier>_<site_identifier>.
-
-        Because exact column names may vary, the query uses the configured
-        column names (date_column, value_column, id_column) and makes
-        reasonable assumptions about foreign key columns.  The
-        discover_schema() method can be run first to verify.
+        Return a psycopg2 connection to the **source** database (remote Neon).
+        Falls back to the local DB if source_db is not configured.
         """
-        item_table = f"pg_db.{self.tables['item']}"
-        site_table = f"pg_db.{self.tables['site']}"
-        demand_table = f"pg_db.{self.tables['demand_actual']}"
+        cfg = self.source_db_config
+        if cfg:
+            return psycopg2.connect(
+                host=cfg["host"],
+                port=cfg.get("port", 5432),
+                database=cfg["database"],
+                user=cfg["user"],
+                password=cfg["password"],
+                sslmode=cfg.get("sslmode", "require"),
+            )
+        # Fallback: use local DB
+        return get_conn(str(self.config_path))
 
-        # Build WHERE clause for date filtering and original-rows-only filter
-        where_clauses = ["d.original = 1"]   # only keep original (non-mapped) demand rows
+    # ------------------------------------------------------------------
+    # Query builders
+    # ------------------------------------------------------------------
+
+    def _build_source_extract_query(self) -> str:
+        """
+        Build the SQL query for the *remote* source table
+        (dp_plan.calc_dp_actual).  No joins — the source table is a flat
+        fact table; we construct unique_id from item_id || '_' || site_id.
+        """
+        tbl = self.source_demand_table
+        col_item = self.src_col_item_id
+        col_site = self.src_col_site_id
+        col_date = self.src_col_date
+        col_qty  = self.src_col_qty
+        col_chan  = self.src_col_channel
+
+        where_clauses: List[str] = []
         if self.min_date:
-            where_clauses.append(f"d.{self.date_column} >= '{self.min_date}'")
+            where_clauses.append(f"d.{col_date} >= %(min_date)s")
         if self.max_date:
-            where_clauses.append(f"d.{self.date_column} <= '{self.max_date}'")
+            where_clauses.append(f"d.{col_date} <= %(max_date)s")
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-        where_sql = ""
-        if where_clauses:
-            where_sql = "WHERE " + " AND ".join(where_clauses)
+        channel_expr = f"d.{col_chan}" if col_chan else "''"
 
-        # The query joins demand_actual (d) with item (i) and site (s).
-        # We construct unique_id from item and site identifiers so every
-        # combination is a distinct time series.
-        # Only select the columns we need to avoid duplicate 'id' clashes.
         query = f"""
             SELECT
-                CONCAT(CAST(d.item_id AS VARCHAR),
-                       '_',
-                       CAST(d.site_id AS VARCHAR))
+                CAST(d.{col_item} AS TEXT) || '_' || CAST(d.{col_site} AS TEXT)
                     AS unique_id,
-                d.{self.date_column}  AS date,
-                d.{self.value_column} AS y,
-                i.name AS item_name,
-                i.xuid AS item_xuid,
-                s.name AS site_name,
-                s.xuid AS site_xuid
-            FROM {demand_table} d
-            LEFT JOIN {item_table} i
-                ON d.item_id = i.id
-            LEFT JOIN {site_table} s
-                ON d.site_id = s.id
+                d.{col_item}  AS item_id,
+                d.{col_site}  AS site_id,
+                {channel_expr} AS channel,
+                d.{col_date}  AS date,
+                d.{col_qty}   AS y,
+                ''            AS item_name,
+                ''            AS site_name
+            FROM {tbl} d
             {where_sql}
-            ORDER BY unique_id, d.{self.date_column};
+            ORDER BY 1, d.{col_date}
         """
         return query
 
+    def _build_local_extract_query(self) -> str:
+        """
+        Fallback query when source_db is not configured — reads from the
+        local zcube.demand_actuals table (self-reload mode).
+        """
+        demand_table = self.tables.get("demand_actual", "zcube.demand_actuals")
+        item_table   = self.tables.get("item",           "zcube.item")
+        site_table   = self.tables.get("site",           "zcube.site")
+
+        where_clauses: List[str] = []
+        if self.min_date:
+            where_clauses.append(f"d.{self.date_column} >= %(min_date)s")
+        if self.max_date:
+            where_clauses.append(f"d.{self.date_column} <= %(max_date)s")
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        query = f"""
+            SELECT
+                COALESCE(d.unique_id,
+                         CAST(d.item_id AS TEXT) || '_' || CAST(d.site_id AS TEXT)
+                ) AS unique_id,
+                d.item_id,
+                d.site_id,
+                d.channel,
+                d.{self.date_column}  AS date,
+                d.{self.value_column} AS y,
+                COALESCE(d.item_name, i.name, '') AS item_name,
+                COALESCE(d.site_name, s.name, '') AS site_name
+            FROM {demand_table} d
+            LEFT JOIN {item_table} i ON d.item_id = i.id
+            LEFT JOIN {site_table} s ON d.site_id = s.id
+            {where_sql}
+            ORDER BY unique_id, d.{self.date_column}
+        """
+        return query
+
+    # ------------------------------------------------------------------
+    # Extraction
+    # ------------------------------------------------------------------
+
     def extract(self) -> pd.DataFrame:
         """
-        Extract data from PostgreSQL via DuckDB.
+        Extract demand data.
+
+        When ``source_db`` is configured, connects to the remote Neon
+        database and reads from ``dp_plan.calc_dp_actual``.  Otherwise
+        falls back to the local ``zcube.demand_actuals`` table.
 
         Returns:
-            Raw DataFrame with at least (unique_id, date, y) plus any
-            dimension columns from the item and site tables.
+            Raw DataFrame with columns:
+            unique_id, item_id, site_id, channel, date, y, item_name, site_name
         """
-        con = self._get_connection()
+        params: Dict[str, Any] = {}
+        if self.min_date:
+            params["min_date"] = self.min_date
+        if self.max_date:
+            params["max_date"] = self.max_date
 
-        query = self._build_extract_query()
-        self.logger.info("Executing extraction query...")
+        use_remote = self.source_db_config is not None
+        if use_remote:
+            query = self._build_source_extract_query()
+            label = f"remote ({self.source_demand_table})"
+        else:
+            query = self._build_local_extract_query()
+            label = f"local ({self.output_table})"
+
+        self.logger.info(f"Extracting from {label}...")
         self.logger.debug(f"Query:\n{query}")
 
+        conn = self._get_source_conn()
         try:
-            df = con.execute(query).fetchdf()
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(query, params or None)
+                rows = cur.fetchall()
+                cols = [desc[0] for desc in cur.description]
+            df = pd.DataFrame(rows, columns=cols)
         except Exception as e:
-            self.logger.error(f"Extraction query failed: {e}")
-            self.logger.info("Attempting fallback extraction with simplified query...")
-            df = self._extract_fallback(con)
+            self.logger.error(f"Extraction from {label} failed: {e}")
+            raise
+        finally:
+            conn.close()
 
         self.logger.info(
             f"Extracted {len(df):,} rows, "
-            f"{df['unique_id'].nunique():,} unique series"
+            f"{df['unique_id'].nunique() if not df.empty else 0:,} unique series"
         )
-        return df
-
-    def _extract_fallback(self, con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
-        """
-        Fallback extraction when the primary join query fails.
-        Pulls each table individually and attempts a pandas-level merge.
-        """
-        demand_table = f"pg_db.{self.tables['demand_actual']}"
-        item_table = f"pg_db.{self.tables['item']}"
-        site_table = f"pg_db.{self.tables['site']}"
-
-        self.logger.info("Fallback: reading tables individually...")
-
-        demand_df = con.execute(f"SELECT * FROM {demand_table};").fetchdf()
-        self.logger.info(f"  demand_actual: {len(demand_df):,} rows, columns: {list(demand_df.columns)}")
-        # Keep only original (non-mapped) demand rows
-        if "original" in demand_df.columns:
-            before = len(demand_df)
-            demand_df = demand_df[demand_df["original"] == 1].copy()
-            self.logger.info(f"  Filtered to original=1: {before - len(demand_df):,} mapped rows removed, {len(demand_df):,} remain")
-
-        item_df = con.execute(f"SELECT * FROM {item_table};").fetchdf()
-        self.logger.info(f"  item: {len(item_df):,} rows, columns: {list(item_df.columns)}")
-
-        site_df = con.execute(f"SELECT * FROM {site_table};").fetchdf()
-        self.logger.info(f"  site: {len(site_df):,} rows, columns: {list(site_df.columns)}")
-
-        # Find the join keys by looking for common columns
-        demand_cols = set(demand_df.columns)
-
-        # Item join key
-        item_key_candidates = ["item_id", "item", "id"]
-        item_join_demand = None
-        item_join_item = None
-        for key in item_key_candidates:
-            if key in demand_cols and ("id" in item_df.columns):
-                item_join_demand = key
-                item_join_item = "id"
-                break
-        if item_join_demand is None:
-            # Try matching column names directly
-            common_item = demand_cols.intersection(set(item_df.columns))
-            if common_item:
-                item_join_demand = item_join_item = list(common_item)[0]
-
-        # Site join key
-        site_key_candidates = ["site_id", "site", "id"]
-        site_join_demand = None
-        site_join_site = None
-        for key in site_key_candidates:
-            if key in demand_cols and ("id" in site_df.columns):
-                site_join_demand = key
-                site_join_site = "id"
-                break
-        if site_join_demand is None:
-            common_site = demand_cols.intersection(set(site_df.columns))
-            if common_site:
-                site_join_demand = site_join_site = list(common_site)[0]
-
-        # Merge
-        df = demand_df.copy()
-        if item_join_demand and item_join_item:
-            self.logger.info(f"  Merging item on demand.{item_join_demand} = item.{item_join_item}")
-            df = df.merge(
-                item_df, left_on=item_join_demand, right_on=item_join_item,
-                how="left", suffixes=("", "_item")
-            )
-        if site_join_demand and site_join_site:
-            self.logger.info(f"  Merging site on demand.{site_join_demand} = site.{site_join_site}")
-            df = df.merge(
-                site_df, left_on=site_join_demand, right_on=site_join_site,
-                how="left", suffixes=("", "_site")
-            )
-
-        # Build unique_id
-        item_id_col = item_join_demand or "item_id"
-        site_id_col = site_join_demand or "site_id"
-        if item_id_col in df.columns and site_id_col in df.columns:
-            df["unique_id"] = (
-                df[item_id_col].astype(str) + "_" + df[site_id_col].astype(str)
-            )
-        elif item_id_col in df.columns:
-            df["unique_id"] = df[item_id_col].astype(str)
-        else:
-            df["unique_id"] = df.index.astype(str)
-
-        # Rename value/date columns to standard names
-        date_renames = {self.date_column: "date"} if self.date_column in df.columns and self.date_column != "date" else {}
-        value_renames = {self.value_column: "y"} if self.value_column in df.columns and self.value_column != "y" else {}
-        df.rename(columns={**date_renames, **value_renames}, inplace=True)
-
         return df
 
     # ------------------------------------------------------------------
@@ -390,26 +308,25 @@ class ETLPipeline:
         """
         Transform raw extracted data into the standardized time series format.
 
+        Preserves extra columns (item_id, site_id, channel, item_name, site_name)
+        alongside the required (unique_id, date, y) so they can be written
+        back to zcube.demand_actuals.
+
         Steps:
-            1. Ensure standard column names (unique_id, date, y).
+            1. Rename source columns to standard names.
             2. Parse and validate date column.
             3. Cast value column to numeric.
-            4. Aggregate to the configured frequency.
-            5. Filter series with too few observations.
-            6. Sort by (unique_id, date).
-
-        Args:
-            df: Raw extracted DataFrame.
-
-        Returns:
-            Cleaned DataFrame with columns [unique_id, date, y].
+            4. Apply date range filters.
+            5. Aggregate to the configured frequency.
+            6. Filter series with too few observations.
+            7. Sort by (unique_id, date).
         """
         self.logger.info("Starting transformation...")
         initial_rows = len(df)
-        initial_series = df["unique_id"].nunique()
+        initial_series = df["unique_id"].nunique() if not df.empty else 0
 
         # --- 1. Standardize column names ---
-        rename_map = {}
+        rename_map: Dict[str, str] = {}
         if self.date_column in df.columns and self.date_column != "date":
             rename_map[self.date_column] = "date"
         if self.value_column in df.columns and self.value_column != "y":
@@ -426,8 +343,9 @@ class ETLPipeline:
                 f"Available columns: {list(df.columns)}"
             )
 
-        # Keep only the standardized columns
-        df = df[["unique_id", "date", "y"]].copy()
+        # Extra dimension columns to carry through
+        extra_cols = [c for c in ["item_id", "site_id", "channel", "item_name", "site_name"]
+                      if c in df.columns]
 
         # --- 2. Parse dates ---
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -440,10 +358,12 @@ class ETLPipeline:
         df["y"] = pd.to_numeric(df["y"], errors="coerce")
         null_values = df["y"].isna().sum()
         if null_values > 0:
-            self.logger.info(f"Dropping {null_values:,} rows with null/non-numeric values (expected: some source records have no quantity)")
+            self.logger.info(
+                f"Dropping {null_values:,} rows with null/non-numeric values"
+            )
             df = df.dropna(subset=["y"])
 
-        # --- 4. Apply date range filter (post-extraction safety net) ---
+        # --- 4. Apply date range filter ---
         if self.min_date:
             min_dt = pd.to_datetime(self.min_date)
             before = len(df)
@@ -464,12 +384,18 @@ class ETLPipeline:
         pd_freq = self.FREQ_MAP.get(self.frequency, "MS")
         agg_func = self.AGG_MAP.get(self.agg_method, "sum")
 
-        self.logger.info(f"Aggregating to frequency={self.frequency} ({pd_freq}), method={agg_func}")
+        self.logger.info(
+            f"Aggregating to frequency={self.frequency} ({pd_freq}), method={agg_func}"
+        )
+
+        # Build aggregation dict: y is aggregated; extras use first value
+        agg_dict: Dict[str, Any] = {"y": (agg_func)}
+        extra_agg = {col: "first" for col in extra_cols}
 
         df = (
             df
             .groupby(["unique_id", pd.Grouper(key="date", freq=pd_freq)])
-            .agg(y=("y", agg_func))
+            .agg(y=("y", agg_func), **{col: (col, "first") for col in extra_cols})
             .reset_index()
         )
 
@@ -502,26 +428,89 @@ class ETLPipeline:
     # Loading
     # ------------------------------------------------------------------
 
-    def load(self, df: pd.DataFrame) -> Path:
+    def _load_to_db(self, df: pd.DataFrame) -> int:
         """
-        Save the transformed DataFrame to Parquet.
-
-        Args:
-            df: Transformed DataFrame with columns [unique_id, date, y].
+        Bulk-insert the transformed DataFrame into zcube.demand_actuals.
+        Uses TRUNCATE + execute_values for a clean reload on each ETL run.
 
         Returns:
-            Path to the saved Parquet file.
+            Number of rows inserted.
         """
-        output = Path(self.output_path)
-        output.parent.mkdir(parents=True, exist_ok=True)
+        demand_table = self.tables.get("demand_actual", "zcube.demand_actuals")
 
-        compression = self.config.get("output", {}).get("compression", "snappy")
+        # Columns we write — must match zcube.demand_actuals schema
+        db_cols = ["item_id", "site_id", "channel", "date", "qty", "item_name", "site_name", "unique_id"]
 
-        df.to_parquet(output, index=False, compression=compression)
-        file_size_mb = output.stat().st_size / (1024 * 1024)
+        # Map from transformed df columns to DB columns
+        col_map = {
+            "item_id":   "item_id",
+            "site_id":   "site_id",
+            "channel":   "channel",
+            "date":      "date",
+            "y":         "qty",
+            "item_name": "item_name",
+            "site_name": "site_name",
+            "unique_id": "unique_id",
+        }
 
-        self.logger.info(f"Saved to {output} ({file_size_mb:.2f} MB, {compression} compression)")
-        return output
+        # Build rows list
+        rows = []
+        for _, row in df.iterrows():
+            rows.append((
+                int(row.get("item_id", 0) or 0),
+                int(row.get("site_id", 0) or 0),
+                str(row.get("channel", "") or ""),
+                row["date"].date() if hasattr(row["date"], "date") else row["date"],
+                float(row["y"]),
+                str(row.get("item_name", "") or ""),
+                str(row.get("site_name", "") or ""),
+                str(row["unique_id"]),
+            ))
+
+        if not rows:
+            self.logger.warning("No rows to insert into demand_actuals")
+            return 0
+
+        conn = get_conn(str(self.config_path))
+        try:
+            with conn.cursor() as cur:
+                # Truncate for a clean reload
+                self.logger.info(f"Truncating {demand_table}...")
+                cur.execute(f"TRUNCATE TABLE {demand_table}")
+
+                # Bulk insert
+                insert_sql = f"""
+                    INSERT INTO {demand_table}
+                        (item_id, site_id, channel, date, qty, item_name, site_name, unique_id)
+                    VALUES %s
+                """
+                self.logger.info(f"Inserting {len(rows):,} rows into {demand_table}...")
+                psycopg2.extras.execute_values(cur, insert_sql, rows, page_size=5000)
+            conn.commit()
+            self.logger.info(f"Inserted {len(rows):,} rows into {demand_table}")
+            return len(rows)
+        except Exception as e:
+            conn.rollback()
+            self.logger.error(f"DB load failed: {e}", exc_info=True)
+            raise
+        finally:
+            conn.close()
+
+    def load(self, df: pd.DataFrame) -> Path:
+        """
+        Write the transformed DataFrame to PostgreSQL (zcube.demand_actuals).
+
+        Args:
+            df: Transformed DataFrame.
+
+        Returns:
+            The DataFrame (for downstream pipeline consumption).
+        """
+        rows_inserted = self._load_to_db(df)
+        self.logger.info(
+            f"Loaded {rows_inserted:,} rows into {self.output_table}"
+        )
+        return df
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -529,7 +518,7 @@ class ETLPipeline:
 
     def run(self) -> pd.DataFrame:
         """
-        Execute the full ETL pipeline: Extract -> Transform -> Load.
+        Execute the full ETL pipeline: Init DB -> Extract -> Transform -> Load.
 
         Returns:
             The final standardized DataFrame.
@@ -538,24 +527,31 @@ class ETLPipeline:
         self.logger.info("=" * 80)
         self.logger.info("ETL PIPELINE START")
         self.logger.info(f"  Timestamp : {start_time.isoformat()}")
-        self.logger.info(f"  Source    : {self.pg_config['host']}:{self.pg_config['port']}/{self.pg_config['database']}")
+        self.logger.info(
+            f"  Source    : {self.pg_config['host']}:"
+            f"{self.pg_config['port']}/{self.pg_config['database']}"
+        )
         self.logger.info(f"  Tables    : {list(self.tables.values())}")
         self.logger.info(f"  Frequency : {self.frequency}")
-        self.logger.info(f"  Output    : {self.output_path}")
+        self.logger.info(f"  Output    : {self.output_table}")
         self.logger.info("=" * 80)
 
         try:
-            # Extract
+            # 0. Ensure DB schema exists
+            self.logger.info("\n--- INIT DB ---")
+            self.init_db()
+
+            # 1. Extract
             self.logger.info("\n--- EXTRACT ---")
             raw_df = self.extract()
 
-            # Transform
+            # 2. Transform
             self.logger.info("\n--- TRANSFORM ---")
             clean_df = self.transform(raw_df)
 
-            # Load
+            # 3. Load
             self.logger.info("\n--- LOAD ---")
-            output_path = self.load(clean_df)
+            self.load(clean_df)
 
             # Summary
             elapsed = (datetime.now() - start_time).total_seconds()
@@ -564,8 +560,11 @@ class ETLPipeline:
             self.logger.info(f"  Duration        : {elapsed:.1f}s")
             self.logger.info(f"  Total rows      : {len(clean_df):,}")
             self.logger.info(f"  Total series    : {clean_df['unique_id'].nunique():,}")
-            self.logger.info(f"  Date range      : {clean_df['date'].min()} to {clean_df['date'].max()}")
-            self.logger.info(f"  Output file     : {output_path}")
+            if not clean_df.empty:
+                self.logger.info(
+                    f"  Date range      : {clean_df['date'].min()} to {clean_df['date'].max()}"
+                )
+            self.logger.info(f"  Output table    : {self.output_table}")
             self.logger.info("=" * 80)
 
             return clean_df
@@ -574,9 +573,6 @@ class ETLPipeline:
             self.logger.error(f"ETL pipeline failed: {e}", exc_info=True)
             raise
 
-        finally:
-            self._close_connection()
-
 
 # --------------------------------------------------------------------------
 # Convenience entry point
@@ -584,26 +580,12 @@ class ETLPipeline:
 
 def main():
     """Run the ETL pipeline from the command line."""
-    # Configure logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
     pipeline = ETLPipeline()
-
-    # Optionally discover the schema first
-    import sys
-    if "--discover" in sys.argv:
-        schema = pipeline.discover_schema()
-        print("\nDiscovered Schema:")
-        for table, columns in schema.items():
-            print(f"\n  {table}:")
-            for col in columns:
-                print(f"    - {col}")
-        return
-
-    # Run full ETL
     df = pipeline.run()
     print(f"\nETL complete. Output shape: {df.shape}")
     print(f"Series: {df['unique_id'].nunique()}")

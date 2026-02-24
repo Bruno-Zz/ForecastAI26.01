@@ -351,26 +351,35 @@ class NeuralForecaster:
 
 def main():
     """Example usage of neural forecaster."""
-    # Load data
-    df = pd.read_parquet('./data/time_series.parquet')
-    characteristics_df = pd.read_parquet('./output/time_series_characteristics.parquet')
-    
+    from db.db import load_table, get_schema, bulk_insert, jsonb_serialize
+
+    config_path = 'config/config.yaml'
+    schema = get_schema(config_path)
+
+    # Load data from PostgreSQL
+    df = load_table(config_path, f"{schema}.demand_actuals",
+                    columns="unique_id, date, COALESCE(corrected_qty, qty) AS y")
+    df['date'] = pd.to_datetime(df['date'])
+    characteristics_df = load_table(config_path, f"{schema}.time_series_characteristics")
+
     # Initialize forecaster
     forecaster = NeuralForecaster()
-    
+
     # Generate forecasts (only for series with sufficient data)
     forecasts_df = forecaster.forecast_multiple_series(
         df=df,
         characteristics_df=characteristics_df
     )
-    
+
     if not forecasts_df.empty:
-        # Save results
-        output_path = './output/forecasts_neural.parquet'
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        forecasts_df.to_parquet(output_path, index=False)
-        
-        print(f"\nNeural forecasts saved to: {output_path}")
+        # Save results to PostgreSQL
+        cols = list(forecasts_df.columns)
+        rows = [
+            tuple(jsonb_serialize(v) for v in row)
+            for row in forecasts_df.itertuples(index=False, name=None)
+        ]
+        n = bulk_insert(config_path, f"{schema}.forecast_results", cols, rows, truncate=False)
+        print(f"\nNeural forecasts saved to {schema}.forecast_results ({n} rows)")
         print(f"Generated {len(forecasts_df)} forecasts")
     else:
         print("\nNo series with sufficient data for neural models")

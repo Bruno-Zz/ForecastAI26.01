@@ -632,19 +632,25 @@ class ForecastEvaluator:
 def main():
     """Example usage of evaluator."""
     from forecasting.statistical_models import StatisticalForecaster
-    
-    # Load data
-    df = pd.read_parquet('./data/time_series.parquet')
-    characteristics_df = pd.read_parquet('./output/time_series_characteristics.parquet')
-    
+    from db.db import load_table, get_schema, bulk_insert
+
+    config_path = 'config/config.yaml'
+    schema = get_schema(config_path)
+
+    # Load data from PostgreSQL
+    df = load_table(config_path, f"{schema}.demand_actuals",
+                    columns="unique_id, date, COALESCE(corrected_qty, qty) AS y")
+    df['date'] = pd.to_datetime(df['date'])
+    characteristics_df = load_table(config_path, f"{schema}.time_series_characteristics")
+
     # Initialize
     evaluator = ForecastEvaluator()
     forecaster = StatisticalForecaster()
-    
+
     # Backtest first series
     first_id = characteristics_df['unique_id'].iloc[0]
     first_char = characteristics_df[characteristics_df['unique_id'] == first_id].iloc[0]
-    
+
     metrics_df = evaluator.backtest_series(
         df=df,
         unique_id=first_id,
@@ -652,13 +658,13 @@ def main():
         methods=first_char['recommended_methods'][:3],  # Test top 3 methods
         characteristics=first_char.to_dict()
     )
-    
-    # Save results
-    output_path = './output/backtest_metrics.parquet'
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    metrics_df.to_parquet(output_path, index=False)
-    
-    print(f"\nBacktest metrics saved to: {output_path}")
+
+    # Save results to PostgreSQL
+    if not metrics_df.empty:
+        cols = list(metrics_df.columns)
+        rows = [tuple(row) for row in metrics_df.itertuples(index=False, name=None)]
+        n = bulk_insert(config_path, f"{schema}.backtest_metrics", cols, rows, truncate=False)
+        print(f"\nBacktest metrics saved to {schema}.backtest_metrics ({n} rows)")
     print(f"\nSummary by method:")
     print(metrics_df.groupby('method')[['mae', 'rmse', 'bias', 'coverage_90']].mean())
 

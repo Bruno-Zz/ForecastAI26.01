@@ -341,20 +341,25 @@ class MethodSelector:
         )
 
     def _save_output(self, result_df: pd.DataFrame) -> None:
-        """Persist the selection results to parquet."""
-        output_path = Path("output/best_method_per_series.parquet")
+        """Persist the selection results to the database."""
         try:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            result_df.to_parquet(output_path, index=False)
+            from db.db import bulk_insert, get_schema, jsonb_serialize
+            config_path = 'config/config.yaml'
+            schema = get_schema(config_path)
+            cols = list(result_df.columns)
+            rows = [
+                tuple(jsonb_serialize(v) for v in row)
+                for row in result_df.itertuples(index=False, name=None)
+            ]
+            n = bulk_insert(config_path, f"{schema}.best_method_per_series", cols, rows)
             self.logger.info(
-                "Best-method results saved to %s (%d series).",
-                output_path,
-                len(result_df),
+                "Best-method results saved to %s.best_method_per_series (%d series).",
+                schema,
+                n,
             )
         except Exception as exc:
             self.logger.error(
-                "Failed to save best-method results to %s: %s",
-                output_path,
+                "Failed to save best-method results to DB: %s",
                 exc,
             )
 
@@ -369,16 +374,20 @@ def main():
         format="%(asctime)s  %(name)s  %(levelname)s  %(message)s",
     )
 
-    # Load backtest metrics (expected to already exist)
-    metrics_path = Path("output/backtest_metrics.parquet")
-    if not metrics_path.exists():
+    from db.db import load_table, get_schema
+
+    config_path = 'config/config.yaml'
+    schema = get_schema(config_path)
+
+    # Load backtest metrics from PostgreSQL
+    metrics_df = load_table(config_path, f"{schema}.backtest_metrics")
+    if metrics_df.empty:
         print(
-            f"Backtest metrics not found at {metrics_path}. "
+            "Backtest metrics table is empty. "
             "Run the evaluation pipeline first."
         )
         return
 
-    metrics_df = pd.read_parquet(metrics_path)
     print(f"Loaded {len(metrics_df)} backtest metric rows.")
 
     selector = MethodSelector()

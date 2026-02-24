@@ -170,6 +170,7 @@ class TimeSeriesCharacterizer:
         Args:
             config_path: Path to the project config.yaml.
         """
+        self.config_path = config_path
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
 
@@ -215,7 +216,7 @@ class TimeSeriesCharacterizer:
             id_col: Column containing the series identifier.
             date_col: Column containing the date / timestamp.
             value_col: Column containing the numeric values.
-            save: If True, persist results to output/time_series_characteristics.parquet.
+            save: If True, persist results to the time_series_characteristics DB table.
 
         Returns:
             DataFrame where each row describes one time series.
@@ -251,17 +252,43 @@ class TimeSeriesCharacterizer:
         # Logging summary
         self._log_summary(characteristics_df)
 
-        # Persist
+        # Persist to PostgreSQL
         if save:
-            output_base = self.output_config.get('base_path', './output')
-            output_path = Path(output_base) / 'time_series_characteristics.parquet'
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            characteristics_df.to_parquet(
-                output_path,
-                index=False,
-                engine='pyarrow',
-            )
-            self.logger.info(f"Characteristics saved to {output_path}")
+            try:
+                from db.db import bulk_insert, jsonb_serialize, get_schema
+                schema = get_schema(self.config_path)
+                c_cols = [
+                    "unique_id", "n_observations", "date_range_start", "date_range_end",
+                    "mean", "std", "has_seasonality", "seasonal_periods", "seasonal_strength",
+                    "has_trend", "trend_direction", "trend_strength",
+                    "is_intermittent", "zero_ratio", "adi", "cov",
+                    "is_stationary", "adf_pvalue",
+                    "complexity_score", "complexity_level",
+                    "sufficient_for_ml", "sufficient_for_deep_learning",
+                    "recommended_methods",
+                ]
+                c_rows = []
+                for _, r in characteristics_df.iterrows():
+                    row = []
+                    for c in c_cols:
+                        v = r.get(c)
+                        if c in ("seasonal_periods", "recommended_methods"):
+                            row.append(jsonb_serialize(v))
+                        elif c in ("has_seasonality", "has_trend", "is_intermittent",
+                                   "is_stationary", "sufficient_for_ml", "sufficient_for_deep_learning"):
+                            row.append(bool(v) if pd.notna(v) else None)
+                        elif c in ("n_observations",):
+                            row.append(int(v) if pd.notna(v) else None)
+                        elif c in ("unique_id", "date_range_start", "date_range_end",
+                                   "trend_direction", "complexity_level"):
+                            row.append(str(v) if v is not None else None)
+                        else:
+                            row.append(float(v) if pd.notna(v) else None)
+                    c_rows.append(tuple(row))
+                bulk_insert(self.config_path, f"{schema}.time_series_characteristics", c_cols, c_rows)
+                self.logger.info(f"Characteristics saved to DB ({len(c_rows)} rows)")
+            except Exception as e:
+                self.logger.warning(f"DB save failed, skipping: {e}")
 
         return characteristics_df
 
@@ -631,7 +658,7 @@ class TimeSeriesCharacterizer:
         Select forecasting methods based on detected characteristics.
 
         Decision logic (in priority order):
-            1. Very short series (< min_for_seasonal) -> sparse_data methods.
+            1. Sparse data (< 5 obs/year on average) -> sparse_data methods.
             2. Intermittent demand -> intermittent methods.
             3. High complexity -> complex methods (filtered by data sufficiency).
             4. Seasonal patterns -> seasonal methods (filtered by data sufficiency).
@@ -639,14 +666,30 @@ class TimeSeriesCharacterizer:
 
         Deep-learning and ML methods are excluded when data is insufficient.
         """
-        min_for_seasonal = self.sufficiency_cfg.get('min_for_seasonal', 24)
+        sparse_obs_per_year = self.sufficiency_cfg.get('sparse_obs_per_year', 5)
 
         # Methods that require substantial data
         ml_methods = {'LightGBM', 'XGBoost'}
         dl_methods = {'NHITS', 'NBEATS', 'PatchTST', 'TFT', 'DeepAR'}
 
-        # ----- 1. Sparse data -----
-        if chars.n_observations < min_for_seasonal:
+        # ----- 1. Sparse data: fewer than 5 observations per year on average -----
+        # Compute the span in years from the stored date range; fall back to
+        # a period-count estimate if dates are unavailable.
+        is_sparse = False
+        try:
+            if chars.date_range_start and chars.date_range_end:
+                start = pd.Timestamp(chars.date_range_start)
+                end   = pd.Timestamp(chars.date_range_end)
+                span_years = max((end - start).days / 365.25, 1 / 12)
+                obs_per_year = chars.n_observations / span_years
+                is_sparse = obs_per_year < sparse_obs_per_year
+            else:
+                # Fallback: assume monthly — fewer than 5 obs means < 5 months
+                is_sparse = chars.n_observations < sparse_obs_per_year
+        except Exception:
+            is_sparse = chars.n_observations < sparse_obs_per_year
+
+        if is_sparse:
             methods = list(self.method_selection.get('sparse_data', []))
             return self._filter_by_sufficiency(methods, chars, ml_methods, dl_methods)
 
@@ -747,7 +790,7 @@ class TimeSeriesCharacterizer:
 
 def main():
     """
-    Standalone entry point: load time series parquet, characterize,
+    Standalone entry point: load time series from DB, characterize,
     and save results.
     """
     # Setup logging
@@ -759,7 +802,6 @@ def main():
 
     # Paths (relative to project root)
     config_path = 'config/config.yaml'
-    data_path = './data/time_series.parquet'
 
     # Load configuration
     with open(config_path, 'r') as f:
@@ -771,12 +813,19 @@ def main():
     date_col = query_config.get('date_column', 'ds')
     value_col = query_config.get('value_column', 'y')
 
-    # Load data
-    logger.info(f"Loading time series data from {data_path}")
-    df = pd.read_parquet(data_path)
+    # Load data from PostgreSQL
+    from db.db import load_table, get_schema
+    schema = get_schema(config_path)
+    logger.info(f"Loading time series data from {schema}.demand_actuals")
+    df = load_table(
+        config_path,
+        f"{schema}.demand_actuals",
+        columns="unique_id, date, COALESCE(corrected_qty, qty) AS y",
+    )
+    df['date'] = pd.to_datetime(df['date'])
     logger.info(
         f"Loaded {len(df)} rows, "
-        f"{df[id_col].nunique()} unique series"
+        f"{df['unique_id'].nunique()} unique series"
     )
 
     # Rename columns to canonical names if needed

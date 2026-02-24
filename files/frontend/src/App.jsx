@@ -3,8 +3,10 @@ import { Routes, Route, Link, useLocation } from 'react-router-dom';
 import Dashboard from './components/Dashboard';
 import TimeSeriesViewer from './components/TimeSeriesViewer';
 import PipelineRunner from './components/PipelineRunner';
+import ProcessLog from './components/ProcessLog';
+import { useTour } from './tour/useTour';
 
-function Sidebar({ open, onToggle }) {
+function Sidebar({ open, onToggle, onStartTour }) {
   const location = useLocation();
   const [lastSeries, setLastSeries] = useState(null);
 
@@ -62,14 +64,28 @@ function Sidebar({ open, onToggle }) {
       </div>
 
       {/* Nav links */}
-      <nav className="flex-1 p-2 space-y-1 overflow-hidden">
+      <nav id="sidebar-nav" className="flex-1 p-2 space-y-1 overflow-hidden">
         {navLink('/', '🏠', 'Dashboard')}
         {lastSeries
           ? navLink(`/series/${encodeURIComponent(lastSeries)}`, '📈', `Series: ${lastSeries}`)
           : navLink('/', '📈', 'Time Series', true)
         }
         {navLink('/pipeline', '⚙️', 'Pipeline')}
+        {navLink('/logs', '📋', 'Process Log')}
       </nav>
+
+      {/* Tour trigger */}
+      <div className="px-2 pb-1">
+        <button
+          id="tour-trigger"
+          onClick={onStartTour}
+          className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-700 hover:bg-gray-100 hover:text-gray-900 w-full"
+          title="Start guided tour"
+        >
+          <span className="text-base flex-shrink-0">🎯</span>
+          {open && <span className="truncate">Tour</span>}
+        </button>
+      </div>
 
       {/* Footer */}
       {open && (
@@ -82,6 +98,7 @@ function Sidebar({ open, onToggle }) {
 }
 
 function App() {
+  const { startTour } = useTour();
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     const stored = localStorage.getItem('sidebar_open');
     return stored === null ? true : stored === 'true';
@@ -108,11 +125,11 @@ function App() {
 
       {/* Sidebar — inline on desktop, drawer on mobile */}
       <div className="hidden md:flex">
-        <Sidebar open={sidebarOpen} onToggle={toggleSidebar} />
+        <Sidebar open={sidebarOpen} onToggle={toggleSidebar} onStartTour={startTour} />
       </div>
       {mobileMenuOpen && (
         <div className="fixed inset-y-0 left-0 z-50 flex md:hidden">
-          <Sidebar open={true} onToggle={() => setMobileMenuOpen(false)} />
+          <Sidebar open={true} onToggle={() => setMobileMenuOpen(false)} onStartTour={startTour} />
         </div>
       )}
 
@@ -137,6 +154,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/series/:uniqueId" element={<TimeSeriesViewer />} />
             <Route path="/pipeline" element={<PipelineRunner />} />
+            <Route path="/logs" element={<ProcessLog />} />
           </Routes>
         </main>
       </div>
