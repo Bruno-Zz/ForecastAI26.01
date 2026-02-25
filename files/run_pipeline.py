@@ -159,9 +159,8 @@ def _load_segment_series(segment_id: int, config_path: str):
         conn.close()
 
 
-def run_single_step(step: str, config_path: str, data_path: str = None,
-                    output_dir: str = None, segment_id: int = None):
-    """Run a single pipeline step, loading inputs from PostgreSQL (or optional file override)."""
+def run_single_step(step: str, config_path: str, segment_id: int = None):
+    """Run a single pipeline step, loading inputs from PostgreSQL."""
     orchestrator = ForecastOrchestrator(config_path)
 
     import pandas as pd
@@ -180,11 +179,8 @@ def run_single_step(step: str, config_path: str, data_path: str = None,
         print(f"ETL complete: {len(df)} rows, {df['unique_id'].nunique()} series")
 
     elif step == 'outlier-detection':
-        if data_path:
-            df = pd.read_parquet(data_path)
-        else:
-            print("Loading demand data from PostgreSQL (original qty)...")
-            df = _load_demand_from_db(config_path, use_corrected=False)
+        print("Loading demand data from PostgreSQL (original qty)...")
+        df = _load_demand_from_db(config_path, use_corrected=False)
         if segment_id is not None:
             series_filter = _load_segment_series(segment_id, config_path)
             df = df[df['unique_id'].isin(series_filter)]
@@ -194,11 +190,8 @@ def run_single_step(step: str, config_path: str, data_path: str = None,
         print(f"Outlier detection complete: {len(outliers_df)} outliers in {n_adjusted} series")
 
     elif step == 'characterize':
-        if data_path:
-            df = pd.read_parquet(data_path)
-        else:
-            print("Loading demand data from PostgreSQL (corrected)...")
-            df = _load_demand_from_db(config_path, use_corrected=True)
+        print("Loading demand data from PostgreSQL (corrected)...")
+        df = _load_demand_from_db(config_path, use_corrected=True)
         if segment_id is not None:
             series_filter = _load_segment_series(segment_id, config_path)
             df = df[df['unique_id'].isin(series_filter)]
@@ -207,11 +200,8 @@ def run_single_step(step: str, config_path: str, data_path: str = None,
         print(f"Characterization complete: {len(chars_df)} series analyzed")
 
     elif step == 'forecast':
-        if data_path:
-            df = pd.read_parquet(data_path)
-        else:
-            print("Loading demand data from PostgreSQL (corrected)...")
-            df = _load_demand_from_db(config_path, use_corrected=True)
+        print("Loading demand data from PostgreSQL (corrected)...")
+        df = _load_demand_from_db(config_path, use_corrected=True)
         print("Loading characteristics from PostgreSQL...")
         chars_df = _load_characteristics_from_db(config_path)
         if segment_id is not None:
@@ -231,11 +221,8 @@ def run_single_step(step: str, config_path: str, data_path: str = None,
         print(f"Forecasting complete: {len(forecasts_df)} forecasts generated")
 
     elif step == 'backtest':
-        if data_path:
-            df = pd.read_parquet(data_path)
-        else:
-            print("Loading demand data from PostgreSQL (corrected)...")
-            df = _load_demand_from_db(config_path, use_corrected=True)
+        print("Loading demand data from PostgreSQL (corrected)...")
+        df = _load_demand_from_db(config_path, use_corrected=True)
         print("Loading characteristics from PostgreSQL...")
         chars_df = _load_characteristics_from_db(config_path)
         if segment_id is not None:
@@ -299,18 +286,6 @@ Examples:
         '--config', type=str, default='config/config.yaml',
         help='Path to config.yaml (default: config/config.yaml)'
     )
-    parser.add_argument(
-        '--output', type=str, default=None,
-        help='Output directory override (default: from config)'
-    )
-    parser.add_argument(
-        '--data', type=str, default=None,
-        help='Path to existing data file (optional override, implies --skip-etl)'
-    )
-    parser.add_argument(
-        '--characteristics', type=str, default=None,
-        help='Path to existing characteristics file (optional override, implies --skip-characterization)'
-    )
 
     # Step control
     parser.add_argument('--skip-etl', action='store_true', help='Skip ETL step')
@@ -362,14 +337,6 @@ Examples:
     setup_logging(args.log_level, log_file)
     logger = logging.getLogger('run_pipeline')
 
-    # If data file provided, skip ETL
-    if args.data:
-        args.skip_etl = True
-
-    # If characteristics file provided, skip characterization
-    if args.characteristics:
-        args.skip_characterization = True
-
     # Schema discovery mode
     if args.discover_schema:
         discover_schema(args.config)
@@ -378,8 +345,7 @@ Examples:
     # Single step mode
     if args.only:
         logger.info(f"Running single step: {args.only}")
-        run_single_step(args.only, args.config, args.data, args.output,
-                        segment_id=args.segment_id)
+        run_single_step(args.only, args.config, segment_id=args.segment_id)
         return
 
     # Full pipeline
@@ -388,9 +354,6 @@ Examples:
     orchestrator = ForecastOrchestrator(args.config)
 
     output_paths = orchestrator.run_complete_pipeline(
-        time_series_path=args.data,
-        characteristics_path=args.characteristics,
-        output_dir=args.output,
         skip_etl=args.skip_etl,
         skip_outlier_detection=args.skip_outlier_detection,
         skip_segmentation=args.skip_segmentation,

@@ -3,7 +3,7 @@ Parallel Forecast Orchestrator
 Coordinates all forecasting methods across time series using Dask.
 
 Pipeline steps:
-  1. ETL: Extract from PostgreSQL, transform, load to Parquet
+  1. ETL: Extract from source, transform, load to PostgreSQL
   2. Characterization: Analyze each series (seasonality, trend, intermittency, complexity)
   3. Forecasting: Statistical + Neural + Foundation + ML models
   4. Backtesting: Rolling-window evaluation with per-origin forecast storage
@@ -83,9 +83,24 @@ def _dask_forecast_batch(config_path: str,
         logger.warning(f"Statistical forecasting failed in worker: {e}")
 
     # ML forecasts (LightGBM / XGBoost) — only for eligible series
-    ml_eligible = batch_chars[
-        batch_chars.get('sufficient_for_ml', pd.Series(dtype=bool)).fillna(False)
-    ] if 'sufficient_for_ml' in batch_chars.columns else pd.DataFrame()
+    # Recompute eligibility from current config thresholds so we don't rely on
+    # stale booleans that may have been stored with different threshold settings.
+    try:
+        import yaml as _yaml
+        with open(config_path, 'r') as _fh:
+            _cfg = _yaml.safe_load(_fh)
+        _sufficiency = _cfg.get('characterization', {}).get('data_sufficiency', {})
+        _min_ml = _sufficiency.get('min_for_ml', 100)
+        _min_dl = _sufficiency.get('min_for_deep_learning', 200)
+    except Exception:
+        _min_ml, _min_dl = 100, 200
+
+    if 'n_observations' in batch_chars.columns:
+        ml_eligible = batch_chars[batch_chars['n_observations'] >= _min_ml]
+    else:
+        ml_eligible = batch_chars[
+            batch_chars.get('sufficient_for_ml', pd.Series(dtype=bool)).fillna(False)
+        ] if 'sufficient_for_ml' in batch_chars.columns else pd.DataFrame()
 
     if len(ml_eligible) > 0:
         try:
@@ -379,7 +394,7 @@ class ForecastOrchestrator:
 
     def step_etl(self) -> pd.DataFrame:
         """
-        Step 1: Extract data from PostgreSQL, transform, load to Parquet.
+        Step 1: Extract data from source, transform, load to PostgreSQL.
 
         Returns:
             DataFrame with columns [unique_id, date, y, ...]
@@ -435,13 +450,8 @@ class ForecastOrchestrator:
             finally:
                 conn.close()
         except Exception as db_err:
-            self.logger.warning(f"Could not save corrected data to DB: {db_err}")
-            # Fallback: save to parquet
-            output_base = Path(self.output_config['base_path'])
-            output_base.mkdir(parents=True, exist_ok=True)
-            corrected_path = output_base / "time_series_corrected.parquet"
-            corrected_df.to_parquet(str(corrected_path), index=False)
-            self.logger.info(f"Corrected data saved (fallback): {corrected_path}")
+            self.logger.error(f"Could not save corrected data to DB: {db_err}")
+            raise
 
         # Save outlier log to PostgreSQL
         if not outliers_df.empty:
@@ -472,13 +482,8 @@ class ForecastOrchestrator:
                 bulk_insert(config_path, outlier_table, db_cols, rows, truncate=True)
                 self.logger.info(f"Outliers saved to {outlier_table} ({len(rows):,} outliers)")
             except Exception as db_err:
-                self.logger.warning(f"Could not save outliers to DB: {db_err}")
-                # Fallback: save to parquet
-                output_base = Path(self.output_config['base_path'])
-                output_base.mkdir(parents=True, exist_ok=True)
-                outlier_path = output_base / "detected_outliers.parquet"
-                outliers_df.to_parquet(str(outlier_path), index=False)
-                self.logger.info(f"Outliers saved (fallback): {outlier_path}")
+                self.logger.error(f"Could not save outliers to DB: {db_err}")
+                raise
         else:
             self.logger.info("No outliers detected")
 
@@ -559,12 +564,20 @@ class ForecastOrchestrator:
             self.logger.warning(f"Statistical forecasting failed: {e}")
 
         # --- ML forecasts (LightGBM / XGBoost) ---
-        ml_eligible = characteristics_df[
-            characteristics_df.get('sufficient_for_ml', pd.Series(dtype=bool)).fillna(False)
-        ] if 'sufficient_for_ml' in characteristics_df.columns else pd.DataFrame()
+        # Recompute eligibility from current config so stale DB booleans are ignored.
+        _sufficiency = self.config.get('characterization', {}).get('data_sufficiency', {})
+        _min_ml = _sufficiency.get('min_for_ml', 100)
+        _min_dl = _sufficiency.get('min_for_deep_learning', 200)
+
+        if 'n_observations' in characteristics_df.columns:
+            ml_eligible = characteristics_df[characteristics_df['n_observations'] >= _min_ml]
+        else:
+            ml_eligible = characteristics_df[
+                characteristics_df.get('sufficient_for_ml', pd.Series(dtype=bool)).fillna(False)
+            ] if 'sufficient_for_ml' in characteristics_df.columns else pd.DataFrame()
 
         if len(ml_eligible) > 0:
-            self.logger.info(f"ML forecasts for {len(ml_eligible)} series...")
+            self.logger.info(f"ML forecasts for {len(ml_eligible)} series (min_obs={_min_ml})...")
             try:
                 ml_forecasts = self.ml_forecaster.forecast_multiple_series(
                     df=df,
@@ -576,12 +589,15 @@ class ForecastOrchestrator:
                 self.logger.warning(f"ML forecasting failed: {e}")
 
         # --- Neural forecasts ---
-        neural_eligible = characteristics_df[
-            characteristics_df.get('sufficient_for_deep_learning', pd.Series(dtype=bool)).fillna(False)
-        ] if 'sufficient_for_deep_learning' in characteristics_df.columns else pd.DataFrame()
+        if 'n_observations' in characteristics_df.columns:
+            neural_eligible = characteristics_df[characteristics_df['n_observations'] >= _min_dl]
+        else:
+            neural_eligible = characteristics_df[
+                characteristics_df.get('sufficient_for_deep_learning', pd.Series(dtype=bool)).fillna(False)
+            ] if 'sufficient_for_deep_learning' in characteristics_df.columns else pd.DataFrame()
 
         if len(neural_eligible) > 0:
-            self.logger.info(f"Neural forecasts for {len(neural_eligible)} series...")
+            self.logger.info(f"Neural forecasts for {len(neural_eligible)} series (min_obs={_min_dl})...")
             try:
                 neural_forecasts = self.neural_forecaster.forecast_multiple_series(
                     df=df,
@@ -693,11 +709,19 @@ class ForecastOrchestrator:
             self.logger.warning("No forecasts generated!")
             return forecasts_df
 
-        # Save
-        output_path = Path(self.output_config['base_path']) / "forecasts_all_methods.parquet"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        forecasts_df.to_parquet(str(output_path), index=False)
-        self.logger.info(f"Forecasts saved: {output_path} ({len(forecasts_df)} rows)")
+        # Save to PostgreSQL
+        try:
+            from db.db import bulk_insert, get_schema, jsonb_serialize
+            schema = get_schema(str(self.config_path))
+            cols = list(forecasts_df.columns)
+            rows = [tuple(jsonb_serialize(v) for v in row)
+                    for row in forecasts_df.itertuples(index=False, name=None)]
+            n = bulk_insert(str(self.config_path), f"{schema}.forecast_results",
+                            cols, rows, truncate=True)
+            self.logger.info(f"Forecasts saved to {schema}.forecast_results ({n} rows)")
+        except Exception as db_err:
+            self.logger.error(f"Could not save forecasts to DB: {db_err}")
+            raise
 
         return forecasts_df
 
@@ -824,23 +848,37 @@ class ForecastOrchestrator:
         # Combine per-origin forecasts
         origin_df = pd.concat(all_origin_forecasts, ignore_index=True) if all_origin_forecasts else pd.DataFrame()
 
-        # Save outputs
-        output_base = Path(self.output_config['base_path'])
-        output_base.mkdir(parents=True, exist_ok=True)
+        # Save outputs to PostgreSQL
+        from db.db import bulk_insert, get_schema, jsonb_serialize
+        schema = get_schema(str(self.config_path))
 
         if not metrics_df.empty:
-            metrics_path = output_base / "backtest_metrics.parquet"
-            metrics_df.to_parquet(str(metrics_path), index=False)
-            self.logger.info(f"Backtest metrics saved: {metrics_path} ({len(metrics_df)} rows)")
+            try:
+                cols = list(metrics_df.columns)
+                rows = [tuple(jsonb_serialize(v) for v in row)
+                        for row in metrics_df.itertuples(index=False, name=None)]
+                n = bulk_insert(str(self.config_path), f"{schema}.backtest_metrics",
+                                cols, rows, truncate=True)
+                self.logger.info(f"Backtest metrics saved to {schema}.backtest_metrics ({n} rows)")
+            except Exception as db_err:
+                self.logger.error(f"Could not save backtest metrics to DB: {db_err}")
+                raise
 
-            # Log summary
             summary = metrics_df.groupby('method')[['mae', 'rmse']].mean()
-            self.logger.info(f"Backtest summary by method:\n{summary}")
+            self.logger.info(f"Backtest summary by method:
+{summary}")
 
         if not origin_df.empty:
-            origin_path = output_base / "forecasts_by_origin.parquet"
-            origin_df.to_parquet(str(origin_path), index=False)
-            self.logger.info(f"Per-origin forecasts saved: {origin_path} ({len(origin_df)} rows)")
+            try:
+                cols = list(origin_df.columns)
+                rows = [tuple(jsonb_serialize(v) for v in row)
+                        for row in origin_df.itertuples(index=False, name=None)]
+                n = bulk_insert(str(self.config_path), f"{schema}.forecasts_by_origin",
+                                cols, rows, truncate=True)
+                self.logger.info(f"Per-origin forecasts saved to {schema}.forecasts_by_origin ({n} rows)")
+            except Exception as db_err:
+                self.logger.error(f"Could not save origin forecasts to DB: {db_err}")
+                raise
 
         return metrics_df, origin_df
 
@@ -864,11 +902,19 @@ class ForecastOrchestrator:
 
         best_methods_df = self.method_selector.select_best_methods(metrics_df)
 
-        # Save
-        output_path = Path(self.output_config['base_path']) / "best_method_per_series.parquet"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        best_methods_df.to_parquet(str(output_path), index=False)
-        self.logger.info(f"Best methods saved: {output_path} ({len(best_methods_df)} rows)")
+        # Save to PostgreSQL
+        try:
+            from db.db import bulk_insert, get_schema, jsonb_serialize
+            schema = get_schema(str(self.config_path))
+            cols = list(best_methods_df.columns)
+            rows = [tuple(jsonb_serialize(v) for v in row)
+                    for row in best_methods_df.itertuples(index=False, name=None)]
+            n = bulk_insert(str(self.config_path), f"{schema}.best_method_per_series",
+                            cols, rows, truncate=True)
+            self.logger.info(f"Best methods saved to {schema}.best_method_per_series ({n} rows)")
+        except Exception as db_err:
+            self.logger.error(f"Could not save best methods to DB: {db_err}")
+            raise
 
         # Log distribution
         if 'best_method' in best_methods_df.columns:
@@ -927,20 +973,25 @@ class ForecastOrchestrator:
             self.logger.info(f"Running serial distribution fitting ({n_rows} rows)...")
             distributions_df = self.dist_fitter.fit_forecast_distributions(forecasts_df)
 
-        # Save
-        output_path = Path(self.output_config['base_path']) / "fitted_distributions.parquet"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        distributions_df.to_parquet(str(output_path), index=False)
-        self.logger.info(f"Distributions saved: {output_path} ({len(distributions_df)} rows)")
+        # Save to PostgreSQL
+        try:
+            from db.db import bulk_insert, get_schema, jsonb_serialize
+            schema = get_schema(str(self.config_path))
+            cols = list(distributions_df.columns)
+            rows = [tuple(jsonb_serialize(v) for v in row)
+                    for row in distributions_df.itertuples(index=False, name=None)]
+            n = bulk_insert(str(self.config_path), f"{schema}.fitted_distributions",
+                            cols, rows, truncate=True)
+            self.logger.info(f"Distributions saved to {schema}.fitted_distributions ({n} rows)")
+        except Exception as db_err:
+            self.logger.error(f"Could not save distributions to DB: {db_err}")
+            raise
 
         return distributions_df
 
     # -- Full pipeline --
 
     def run_complete_pipeline(self,
-                              time_series_path: Optional[str] = None,
-                              characteristics_path: Optional[str] = None,
-                              output_dir: Optional[str] = None,
                               skip_etl: bool = False,
                               skip_outlier_detection: bool = False,
                               skip_segmentation: bool = False,
@@ -951,19 +1002,16 @@ class ForecastOrchestrator:
                               skip_distributions: bool = False) -> Dict[str, str]:
         """
         Run the complete forecasting pipeline.
+        All data is read from and written to PostgreSQL.
 
         Args:
-            time_series_path: Path to pre-existing time series parquet (skips ETL)
-            characteristics_path: Path to pre-existing characteristics (skips characterization)
-            output_dir: Output directory override
-            skip_*: Flags to skip individual steps
+            skip_*: Flags to skip individual steps (skipped steps load their
+                    inputs from PostgreSQL instead of re-computing them)
 
         Returns:
-            Dictionary with output file paths
+            Dictionary describing what each step wrote to (PostgreSQL table names)
         """
         start_time = time.time()
-        output_base = Path(output_dir or self.output_config['base_path'])
-        output_base.mkdir(parents=True, exist_ok=True)
         output_paths = {}
 
         self.logger.info("=" * 80)
@@ -981,36 +1029,20 @@ class ForecastOrchestrator:
 
         try:
             # Step 1: ETL
-            if skip_etl and time_series_path:
-                self.logger.info("Skipping ETL, loading from file...")
-                df = pd.read_parquet(time_series_path)
-            elif skip_etl:
-                # Load from PostgreSQL instead of parquet
+            if skip_etl:
                 self.logger.info("Skipping ETL, loading demand data from PostgreSQL...")
+                from db.db import get_conn, get_schema
+                _schema = get_schema(str(self.config_path))
+                _table = f"{_schema}.demand_actuals" if _schema != "public" else "demand_actuals"
+                _conn = get_conn(str(self.config_path))
                 try:
-                    from db.db import get_conn, get_schema
-                    _schema = get_schema(str(self.config_path))
-                    _table = f"{_schema}.demand_actuals" if _schema != "public" else "demand_actuals"
-                    _conn = get_conn(str(self.config_path))
-                    try:
-                        df = pd.read_sql(
-                            f"SELECT unique_id, date, COALESCE(corrected_qty, qty) AS y FROM {_table} ORDER BY unique_id, date",
-                            _conn,
-                        )
-                    finally:
-                        _conn.close()
-                    self.logger.info(f"Loaded {len(df):,} rows from {_table}")
-                except Exception as db_err:
-                    # Fallback to parquet if DB read fails
-                    default_path = self.config.get('etl', {}).get('output_path')
-                    if default_path and Path(default_path).exists():
-                        self.logger.warning(f"DB load failed ({db_err}), falling back to {default_path}")
-                        df = pd.read_parquet(default_path)
-                    else:
-                        raise RuntimeError(
-                            f"Cannot load demand data: DB read failed ({db_err}) "
-                            f"and no parquet fallback available"
-                        ) from db_err
+                    df = pd.read_sql(
+                        f"SELECT unique_id, date, COALESCE(corrected_qty, qty) AS y FROM {_table} ORDER BY unique_id, date",
+                        _conn,
+                    )
+                finally:
+                    _conn.close()
+                self.logger.info(f"Loaded {len(df):,} rows from {_table}")
             else:
                 df = self._run_step(pl, "etl", self.step_etl)
                 output_paths['time_series'] = 'PostgreSQL: demand_actuals'
@@ -1034,64 +1066,53 @@ class ForecastOrchestrator:
                 self.logger.info("Skipping segmentation step")
 
             # Step 2: Characterization
-            if skip_characterization and characteristics_path:
-                self.logger.info("Skipping characterization, loading from file...")
-                characteristics_df = pd.read_parquet(characteristics_path)
-            elif skip_characterization:
-                # Load from PostgreSQL instead of parquet
+            if skip_characterization:
                 self.logger.info("Skipping characterization, loading from PostgreSQL...")
-                try:
-                    from db.db import load_table, get_schema
-                    _schema = get_schema(str(self.config_path))
-                    _table = f"{_schema}.time_series_characteristics" if _schema != "public" else "time_series_characteristics"
-                    characteristics_df = load_table(str(self.config_path), _table)
-                    self.logger.info(f"Loaded {len(characteristics_df):,} characteristics from {_table}")
-                except Exception as db_err:
-                    default_char_path = str(output_base / "time_series_characteristics.parquet")
-                    if Path(default_char_path).exists():
-                        self.logger.warning(f"DB load failed ({db_err}), falling back to {default_char_path}")
-                        characteristics_df = pd.read_parquet(default_char_path)
-                    else:
-                        raise RuntimeError(
-                            f"Cannot load characteristics: DB read failed ({db_err}) "
-                            f"and no parquet fallback at {default_char_path}"
-                        ) from db_err
+                from db.db import load_table, get_schema
+                _schema = get_schema(str(self.config_path))
+                _table = f"{_schema}.time_series_characteristics" if _schema != "public" else "time_series_characteristics"
+                characteristics_df = load_table(str(self.config_path), _table)
+                self.logger.info(f"Loaded {len(characteristics_df):,} characteristics from {_table}")
             else:
                 characteristics_df = self._run_step(pl, "characterization", self.step_characterize, df)
-                output_paths['characteristics'] = str(output_base / "time_series_characteristics.parquet")
+                output_paths['characteristics'] = 'PostgreSQL: time_series_characteristics'
 
             # Step 3: Forecasting
             if not skip_forecasting:
                 forecasts_df = self._run_step(pl, "forecasting", self.step_forecast, df, characteristics_df)
-                output_paths['forecasts'] = str(output_base / "forecasts_all_methods.parquet")
+                output_paths['forecasts'] = 'PostgreSQL: forecast_results'
             else:
-                self.logger.info("Skipping forecasting step")
-                forecasts_path = output_base / "forecasts_all_methods.parquet"
-                forecasts_df = pd.read_parquet(str(forecasts_path)) if forecasts_path.exists() else pd.DataFrame()
+                self.logger.info("Skipping forecasting step -- loading from PostgreSQL...")
+                from db.db import load_table, get_schema
+                _schema = get_schema(str(self.config_path))
+                forecasts_df = load_table(str(self.config_path),
+                                          f"{_schema}.forecast_results")
 
             # Step 4: Backtesting
             if not skip_backtest:
                 metrics_df, origin_df = self._run_step(pl, "backtesting", self.step_backtest, df, characteristics_df)
                 if not metrics_df.empty:
-                    output_paths['metrics'] = str(output_base / "backtest_metrics.parquet")
+                    output_paths['metrics'] = 'PostgreSQL: backtest_metrics'
                 if not origin_df.empty:
-                    output_paths['forecasts_by_origin'] = str(output_base / "forecasts_by_origin.parquet")
+                    output_paths['forecasts_by_origin'] = 'PostgreSQL: forecasts_by_origin'
             else:
-                self.logger.info("Skipping backtesting step")
-                metrics_path = output_base / "backtest_metrics.parquet"
-                metrics_df = pd.read_parquet(str(metrics_path)) if metrics_path.exists() else pd.DataFrame()
+                self.logger.info("Skipping backtesting step -- loading metrics from PostgreSQL...")
+                from db.db import load_table, get_schema
+                _schema = get_schema(str(self.config_path))
+                metrics_df = load_table(str(self.config_path),
+                                        f"{_schema}.backtest_metrics")
 
             # Step 5: Best method selection
             if not skip_best_method and not metrics_df.empty:
                 best_methods_df = self._run_step(pl, "best_method_selection", self.step_select_best_methods, metrics_df)
-                output_paths['best_methods'] = str(output_base / "best_method_per_series.parquet")
+                output_paths['best_methods'] = 'PostgreSQL: best_method_per_series'
             else:
                 self.logger.info("Skipping best method selection")
 
             # Step 6: Distribution fitting
             if not skip_distributions and not forecasts_df.empty:
                 distributions_df = self._run_step(pl, "distribution_fitting", self.step_fit_distributions, forecasts_df)
-                output_paths['distributions'] = str(output_base / "fitted_distributions.parquet")
+                output_paths['distributions'] = 'PostgreSQL: fitted_distributions'
             else:
                 self.logger.info("Skipping distribution fitting")
 

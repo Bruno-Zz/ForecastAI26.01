@@ -2579,8 +2579,8 @@ export const TimeSeriesViewer = () => {
                       {[
                         { label: 'Statistical models', ok: true, note: 'Always available' },
                         { label: 'Sparse check (obs/year)', ok: !chars.is_sparse, note: `${chars.obs_per_year != null ? formatNumber(chars.obs_per_year, locale, 1) : '—'} obs/yr — threshold < ${chars.sparse_obs_per_year_threshold ?? 5}` },
-                        { label: 'ML models (LightGBM, XGBoost)', ok: chars.sufficient_for_ml, note: `≥100 obs — has ${chars.n_observations}` },
-                        { label: 'Deep Learning (NHITS, NBEATS…)', ok: chars.sufficient_for_deep_learning, note: `≥200 obs — has ${chars.n_observations}` },
+                        { label: 'ML models (LightGBM, XGBoost)', ok: chars.sufficient_for_ml, note: `≥${chars.min_for_ml ?? 100} obs — has ${chars.n_observations}` },
+                        { label: 'Deep Learning (NHITS, NBEATS…)', ok: chars.sufficient_for_deep_learning, note: `≥${chars.min_for_dl ?? 200} obs — has ${chars.n_observations}` },
                       ].map(({ label, ok, note }) => (
                         <div key={label} className="flex items-center gap-2">
                           <span className={`flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center text-xs ${ok ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400' : 'bg-red-100 dark:bg-red-900/30 text-red-500 dark:text-red-400'}`}>

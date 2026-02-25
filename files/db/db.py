@@ -533,10 +533,9 @@ def init_schema(config_path: Union[str, Path]) -> None:
 
     conn = get_conn(config_path)
     try:
+        # Phase 1: CREATE TABLE statements + seed data — all or nothing
         with conn.cursor() as cur:
             cur.execute(ddl)
-            for stmt in alter_stmts:
-                cur.execute(stmt)
             # Seed the default "All" segment (matches every series)
             cur.execute(f"""
                 INSERT INTO {schema}.segment (name, description, criteria, is_default)
@@ -544,7 +543,21 @@ def init_schema(config_path: Union[str, Path]) -> None:
                 ON CONFLICT (name) DO NOTHING
             """)
         conn.commit()
-        logger.info(f"Schema '{schema}' and tables initialised")
+        logger.info(f"Schema '{schema}' tables created/verified")
+
+        # Phase 2: ALTER statements run independently so one failure doesn't
+        # roll back all the others (e.g. adding abc_class to a table that may
+        # not exist yet if characterisation has never been run).
+        for stmt in alter_stmts:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(stmt)
+                conn.commit()
+            except Exception as alter_err:
+                conn.rollback()
+                logger.warning(f"ALTER skipped (will retry next startup): {alter_err}")
+
+        logger.info(f"Schema '{schema}' fully initialised")
     except Exception:
         conn.rollback()
         raise

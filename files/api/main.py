@@ -47,7 +47,7 @@ except ImportError:
 app = FastAPI(
     title="Time Series Forecasting API",
     description="API for accessing forecasts, demand analytics, and MEIO data",
-    version="1.0.0"
+    version="1.1.0"  # bump when routes change — used to verify the right server is running
 )
 
 # Configure CORS for React frontend
@@ -324,11 +324,12 @@ def load_data():
 
         # ── config (YAML, not DB) ──
         if data_cache['config'] is None:
-            config_path = Path('./config/config.yaml')
+            # Use absolute path derived from __file__ so it works regardless of cwd
+            config_path = Path(_api_config_path())
             if config_path.exists():
                 with open(config_path, 'r') as fh:
                     data_cache['config'] = yaml.safe_load(fh)
-                logger.info("Loaded config.yaml")
+                logger.info(f"Loaded config.yaml from {config_path}")
 
     except Exception as e:
         logger.error(f"Error loading data from DB: {e}", exc_info=True)
@@ -1687,11 +1688,13 @@ async def get_method_explanation(unique_id: str):
     is_intermittent = bool(char.get('is_intermittent', False))
     has_seasonality = bool(char.get('has_seasonality', False))
     complexity_level = str(char.get('complexity_level', 'low'))
-    sufficient_ml = bool(char.get('sufficient_for_ml', False))
-    sufficient_dl = bool(char.get('sufficient_for_deep_learning', False))
     sparse_obs_per_year = sufficiency.get('sparse_obs_per_year', 5)
     min_for_ml = sufficiency.get('min_for_ml', 100)
     min_for_dl = sufficiency.get('min_for_deep_learning', 200)
+    # Compute dynamically from current config so UI stays correct even before
+    # the user re-runs characterisation (which updates the stored DB booleans).
+    sufficient_ml = n_obs >= min_for_ml
+    sufficient_dl = n_obs >= min_for_dl
 
     # Sparse: fewer than sparse_obs_per_year observations per year on average
     try:
@@ -1848,9 +1851,11 @@ async def get_method_explanation(unique_id: str):
             # Complexity
             'complexity_level': complexity_level,
             'complexity_score': float(char.get('complexity_score', 0) or 0),
-            # Data sufficiency
+            # Data sufficiency (booleans + thresholds from current config)
             'sufficient_for_ml': sufficient_ml,
             'sufficient_for_deep_learning': sufficient_dl,
+            'min_for_ml': min_for_ml,
+            'min_for_dl': min_for_dl,
             # Sparse check
             'obs_per_year': round(obs_per_year, 2),
             'sparse_obs_per_year_threshold': sparse_obs_per_year,
@@ -2889,6 +2894,47 @@ async def create_segment(body: SegmentIn):
         conn.close()
 
 
+# NOTE: /fields must be declared BEFORE /{segment_id} routes so FastAPI
+# matches the literal path segment "fields" before the int path parameter.
+@app.get("/api/segments/fields")
+async def get_segment_fields():
+    """
+    Return dynamic attribute key lists for item and site tables.
+    Used by the criteria builder to populate the field selector.
+    """
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT DISTINCT jsonb_object_keys(attributes)
+                FROM {schema}.item
+                WHERE attributes IS NOT NULL
+                ORDER BY 1
+                """
+            )
+            item_attrs = [r[0] for r in cur.fetchall()]
+
+            cur.execute(
+                f"""
+                SELECT DISTINCT jsonb_object_keys(attributes)
+                FROM {schema}.site
+                WHERE attributes IS NOT NULL
+                ORDER BY 1
+                """
+            )
+            site_attrs = [r[0] for r in cur.fetchall()]
+
+        return {"item": item_attrs, "site": site_attrs}
+    except Exception as exc:
+        logger.error(f"get_segment_fields failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
 @app.put("/api/segments/{segment_id}")
 async def update_segment(segment_id: int, body: SegmentIn):
     """Update an existing segment (cannot update the default 'All' segment)."""
@@ -3042,45 +3088,6 @@ async def assign_segment(segment_id: int):
     except Exception as exc:
         logger.error(f"assign_segment failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
-
-
-@app.get("/api/segments/fields")
-async def get_segment_fields():
-    """
-    Return dynamic attribute key lists for item and site tables.
-    Used by the criteria builder to populate the field selector.
-    """
-    _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT DISTINCT jsonb_object_keys(attributes)
-                FROM {schema}.item
-                WHERE attributes IS NOT NULL
-                ORDER BY 1
-                """
-            )
-            item_attrs = [r[0] for r in cur.fetchall()]
-
-            cur.execute(
-                f"""
-                SELECT DISTINCT jsonb_object_keys(attributes)
-                FROM {schema}.site
-                WHERE attributes IS NOT NULL
-                ORDER BY 1
-                """
-            )
-            site_attrs = [r[0] for r in cur.fetchall()]
-
-        return {"item": item_attrs, "site": site_attrs}
-    except Exception as exc:
-        logger.error(f"get_segment_fields failed: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-    finally:
-        conn.close()
 
 
 # ===========================================================================

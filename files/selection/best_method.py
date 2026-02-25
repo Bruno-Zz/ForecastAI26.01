@@ -127,9 +127,6 @@ class MethodSelector:
 
         result_df = pd.DataFrame(results)
 
-        # Persist to parquet
-        self._save_output(result_df)
-
         return result_df
 
     def get_best_method(
