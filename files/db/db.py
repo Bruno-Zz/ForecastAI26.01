@@ -118,18 +118,44 @@ def init_schema(config_path: Union[str, Path]) -> None:
     -- Schema
     CREATE SCHEMA IF NOT EXISTS {schema};
 
-    -- ─── Master tables ───────────────────────────────────────────────
+    -- ─── Lookup / type tables (must come before item/site) ───────────
 
-    -- Items
-    CREATE TABLE IF NOT EXISTS {schema}.item (
-        id          INTEGER PRIMARY KEY,
-        name        TEXT
+    -- Item types (mirrors dp_plan.dp_item_type)
+    CREATE TABLE IF NOT EXISTS {schema}.item_type (
+        id          BIGINT PRIMARY KEY,
+        xuid        TEXT,
+        name        TEXT,
+        description TEXT
     );
 
-    -- Sites
+    -- Site types (mirrors dp_plan.dp_site_type)
+    CREATE TABLE IF NOT EXISTS {schema}.site_type (
+        id          BIGINT PRIMARY KEY,
+        xuid        TEXT,
+        name        TEXT,
+        description TEXT
+    );
+
+    -- ─── Master tables ───────────────────────────────────────────────
+
+    -- Items (mirrors dp_plan.dp_item)
+    CREATE TABLE IF NOT EXISTS {schema}.item (
+        id          BIGINT PRIMARY KEY,
+        xuid        TEXT,
+        name        TEXT,
+        description TEXT,
+        attributes  JSONB,
+        type_id     BIGINT
+    );
+
+    -- Sites (mirrors dp_plan.dp_site)
     CREATE TABLE IF NOT EXISTS {schema}.site (
-        id          INTEGER PRIMARY KEY,
-        name        TEXT
+        id          BIGINT PRIMARY KEY,
+        xuid        TEXT,
+        name        TEXT,
+        description TEXT,
+        attributes  JSONB,
+        type_id     BIGINT
     );
 
     -- ─── Demand actuals ──────────────────────────────────────────────
@@ -335,6 +361,7 @@ def init_schema(config_path: Union[str, Path]) -> None:
 
     # Separate ALTER statements for adding columns to existing tables
     alter_stmts = [
+        # demand_actuals — corrected_qty (legacy add)
         f"""
         DO $$
         BEGIN
@@ -346,6 +373,118 @@ def init_schema(config_path: Union[str, Path]) -> None:
             ) THEN
                 ALTER TABLE {schema}.demand_actuals
                     ADD COLUMN corrected_qty DOUBLE PRECISION;
+            END IF;
+        END $$;
+        """,
+        # item — xuid
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'item'
+                  AND column_name = 'xuid'
+            ) THEN
+                ALTER TABLE {schema}.item ADD COLUMN xuid TEXT;
+            END IF;
+        END $$;
+        """,
+        # item — description
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'item'
+                  AND column_name = 'description'
+            ) THEN
+                ALTER TABLE {schema}.item ADD COLUMN description TEXT;
+            END IF;
+        END $$;
+        """,
+        # item — attributes
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'item'
+                  AND column_name = 'attributes'
+            ) THEN
+                ALTER TABLE {schema}.item ADD COLUMN attributes JSONB;
+            END IF;
+        END $$;
+        """,
+        # item — type_id
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'item'
+                  AND column_name = 'type_id'
+            ) THEN
+                ALTER TABLE {schema}.item ADD COLUMN type_id BIGINT;
+            END IF;
+        END $$;
+        """,
+        # site — xuid
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'site'
+                  AND column_name = 'xuid'
+            ) THEN
+                ALTER TABLE {schema}.site ADD COLUMN xuid TEXT;
+            END IF;
+        END $$;
+        """,
+        # site — description
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'site'
+                  AND column_name = 'description'
+            ) THEN
+                ALTER TABLE {schema}.site ADD COLUMN description TEXT;
+            END IF;
+        END $$;
+        """,
+        # site — attributes
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'site'
+                  AND column_name = 'attributes'
+            ) THEN
+                ALTER TABLE {schema}.site ADD COLUMN attributes JSONB;
+            END IF;
+        END $$;
+        """,
+        # site — type_id
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'site'
+                  AND column_name = 'type_id'
+            ) THEN
+                ALTER TABLE {schema}.site ADD COLUMN type_id BIGINT;
             END IF;
         END $$;
         """,

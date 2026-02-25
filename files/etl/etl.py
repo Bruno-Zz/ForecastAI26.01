@@ -13,6 +13,7 @@ local DB.  If source_db is not configured the pipeline falls back to
 extracting from the local DB (self-reload mode).
 """
 
+import json
 import psycopg2
 import psycopg2.extras
 import pandas as pd
@@ -496,6 +497,224 @@ class ETLPipeline:
         finally:
             conn.close()
 
+    def _load_dimension_tables(self) -> None:
+        """
+        Extract dimension data from the source DB and load into the local
+        zcube schema.
+
+        Extracted tables (source → local):
+            dp_plan.dp_item_type  →  zcube.item_type
+            dp_plan.dp_site_type  →  zcube.site_type
+            dp_plan.dp_item       →  zcube.item
+            dp_plan.dp_site       →  zcube.site
+
+        Uses INSERT … ON CONFLICT DO UPDATE (upsert) so the method is safe
+        to call repeatedly.  Skips silently when source_db is not configured.
+        """
+        if not self.source_db_config:
+            self.logger.info(
+                "No source_db configured — skipping dimension table load"
+            )
+            return
+
+        # Derive the source schema from the demand table name
+        # e.g. "dp_plan.calc_dp_actual"  →  "dp_plan"
+        src_schema = (
+            self.source_demand_table.split(".")[0]
+            if self.source_demand_table and "." in self.source_demand_table
+            else "dp_plan"
+        )
+
+        item_type_src = f"{src_schema}.dp_item_type"
+        site_type_src = f"{src_schema}.dp_site_type"
+        item_src      = f"{src_schema}.dp_item"
+        site_src      = f"{src_schema}.dp_site"
+
+        local_schema = self.pg_config.get("schema", "zcube")
+
+        self.logger.info(
+            f"Loading dimension tables from {src_schema} "
+            f"→ {local_schema}..."
+        )
+
+        src_conn = self._get_source_conn()
+        dst_conn = get_conn(str(self.config_path))
+
+        try:
+            # ── Item types ────────────────────────────────────────────────
+            self.logger.info(
+                f"  {item_type_src} → {local_schema}.item_type"
+            )
+            with src_conn.cursor(
+                cursor_factory=psycopg2.extras.DictCursor
+            ) as cur:
+                cur.execute(
+                    f"SELECT id, xuid, name, description FROM {item_type_src}"
+                )
+                item_type_rows = cur.fetchall()
+
+            with dst_conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    f"""
+                    INSERT INTO {local_schema}.item_type
+                        (id, xuid, name, description)
+                    VALUES %s
+                    ON CONFLICT (id) DO UPDATE SET
+                        xuid        = EXCLUDED.xuid,
+                        name        = EXCLUDED.name,
+                        description = EXCLUDED.description
+                    """,
+                    [
+                        (r["id"], r["xuid"], r["name"], r["description"])
+                        for r in item_type_rows
+                    ],
+                )
+            dst_conn.commit()
+            self.logger.info(
+                f"    → {len(item_type_rows):,} item type(s) upserted"
+            )
+
+            # ── Site types ────────────────────────────────────────────────
+            self.logger.info(
+                f"  {site_type_src} → {local_schema}.site_type"
+            )
+            with src_conn.cursor(
+                cursor_factory=psycopg2.extras.DictCursor
+            ) as cur:
+                cur.execute(
+                    f"SELECT id, xuid, name, description FROM {site_type_src}"
+                )
+                site_type_rows = cur.fetchall()
+
+            with dst_conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    f"""
+                    INSERT INTO {local_schema}.site_type
+                        (id, xuid, name, description)
+                    VALUES %s
+                    ON CONFLICT (id) DO UPDATE SET
+                        xuid        = EXCLUDED.xuid,
+                        name        = EXCLUDED.name,
+                        description = EXCLUDED.description
+                    """,
+                    [
+                        (r["id"], r["xuid"], r["name"], r["description"])
+                        for r in site_type_rows
+                    ],
+                )
+            dst_conn.commit()
+            self.logger.info(
+                f"    → {len(site_type_rows):,} site type(s) upserted"
+            )
+
+            # ── Items ─────────────────────────────────────────────────────
+            self.logger.info(f"  {item_src} → {local_schema}.item")
+            with src_conn.cursor(
+                cursor_factory=psycopg2.extras.DictCursor
+            ) as cur:
+                cur.execute(
+                    f"""
+                    SELECT id, xuid, name, description, attributes, type_id
+                    FROM {item_src}
+                    """
+                )
+                item_rows = cur.fetchall()
+
+            with dst_conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    f"""
+                    INSERT INTO {local_schema}.item
+                        (id, xuid, name, description, attributes, type_id)
+                    VALUES %s
+                    ON CONFLICT (id) DO UPDATE SET
+                        xuid        = EXCLUDED.xuid,
+                        name        = EXCLUDED.name,
+                        description = EXCLUDED.description,
+                        attributes  = EXCLUDED.attributes,
+                        type_id     = EXCLUDED.type_id
+                    """,
+                    [
+                        (
+                            r["id"],
+                            r["xuid"],
+                            r["name"],
+                            r["description"],
+                            # psycopg2 auto-deserialises JSONB → dict;
+                            # re-serialise to str for the INSERT adapter.
+                            psycopg2.extras.Json(r["attributes"])
+                            if r["attributes"] is not None
+                            else None,
+                            r["type_id"],
+                        )
+                        for r in item_rows
+                    ],
+                )
+            dst_conn.commit()
+            self.logger.info(
+                f"    → {len(item_rows):,} item(s) upserted"
+            )
+
+            # ── Sites ─────────────────────────────────────────────────────
+            self.logger.info(f"  {site_src} → {local_schema}.site")
+            with src_conn.cursor(
+                cursor_factory=psycopg2.extras.DictCursor
+            ) as cur:
+                cur.execute(
+                    f"""
+                    SELECT id, xuid, name, description, attributes, type_id
+                    FROM {site_src}
+                    """
+                )
+                site_rows = cur.fetchall()
+
+            with dst_conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    f"""
+                    INSERT INTO {local_schema}.site
+                        (id, xuid, name, description, attributes, type_id)
+                    VALUES %s
+                    ON CONFLICT (id) DO UPDATE SET
+                        xuid        = EXCLUDED.xuid,
+                        name        = EXCLUDED.name,
+                        description = EXCLUDED.description,
+                        attributes  = EXCLUDED.attributes,
+                        type_id     = EXCLUDED.type_id
+                    """,
+                    [
+                        (
+                            r["id"],
+                            r["xuid"],
+                            r["name"],
+                            r["description"],
+                            psycopg2.extras.Json(r["attributes"])
+                            if r["attributes"] is not None
+                            else None,
+                            r["type_id"],
+                        )
+                        for r in site_rows
+                    ],
+                )
+            dst_conn.commit()
+            self.logger.info(
+                f"    → {len(site_rows):,} site(s) upserted"
+            )
+
+            self.logger.info("Dimension tables loaded successfully")
+
+        except Exception as e:
+            dst_conn.rollback()
+            self.logger.error(
+                f"Dimension table load failed: {e}", exc_info=True
+            )
+            raise
+        finally:
+            src_conn.close()
+            dst_conn.close()
+
     def load(self, df: pd.DataFrame) -> Path:
         """
         Write the transformed DataFrame to PostgreSQL (zcube.demand_actuals).
@@ -540,6 +759,10 @@ class ETLPipeline:
             # 0. Ensure DB schema exists
             self.logger.info("\n--- INIT DB ---")
             self.init_db()
+
+            # 0b. Load dimension tables (item_type, site_type, item, site)
+            self.logger.info("\n--- DIMENSION TABLES ---")
+            self._load_dimension_tables()
 
             # 1. Extract
             self.logger.info("\n--- EXTRACT ---")

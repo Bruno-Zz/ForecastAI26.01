@@ -1,295 +1,249 @@
-# Forecasting System Configuration
-
-# Data Source Configuration
 data_source:
-  type: "postgres"  # Options: postgres, s3, azure, local
-
-  # ── Source database (Neon remote) — used by ETL extract step ──
+  type: postgres
   source_db:
-    host: "ep-gentle-rain-a5ba1hxu.us-east-2.aws.neon.tech"
+    host: ep-gentle-rain-a5ba1hxu.us-east-2.aws.neon.tech
     port: 5432
-    database: "scenario"
-    user: "ketteq"
-    password: "Zpg2TBlQydP1"
-    sslmode: "require"
-
-    # Source table for demand actuals
-    demand_table: "dp_plan.calc_dp_actual"
-
-    # Column mapping: source column → canonical name
-    # Adjust these if the remote table has different column names
+    database: scenario
+    user: ketteq
+    password: Zpg2TBlQydP1
+    sslmode: require
+    demand_table: dp_plan.calc_dp_actual
     columns:
-      item_id: "item_id"
-      site_id: "site_id"
-      date: "date"
-      qty: "qty"
-      channel: "channel_id"     # remote column name (mapped to 'channel' locally)
-
-  # ── Local working database — used by all pipeline steps ──
+      item_id: item_id
+      site_id: site_id
+      date: date
+      qty: qty
+      channel: channel_id
   postgres:
-    host: "localhost"
+    host: localhost
     port: 5432
-    database: "postgres"
-    schema: "zcube"
-    user: "postgres"
-    password: "postgres"
-    sslmode: "disable"
-
-    # Table mappings (local working tables)
+    database: postgres
+    schema: zcube
+    user: postgres
+    password: postgres
+    sslmode: disable
     tables:
-      item: "zcube.item"
-      site: "zcube.site"
-      demand_actual: "zcube.demand_actuals"
-      detected_outliers: "zcube.detected_outliers"
-      time_series_characteristics: "zcube.time_series_characteristics"
-      forecast_results: "zcube.forecast_results"
-      backtest_metrics: "zcube.backtest_metrics"
-      forecasts_by_origin: "zcube.forecasts_by_origin"
-      best_method_per_series: "zcube.best_method_per_series"
-      fitted_distributions: "zcube.fitted_distributions"
-      forecast_adjustments: "zcube.forecast_adjustments"
-      process_log: "zcube.process_log"
-  
-  # S3 configuration (alternative)
+      item: zcube.item
+      site: zcube.site
+      demand_actual: zcube.demand_actuals
+      detected_outliers: zcube.detected_outliers
+      time_series_characteristics: zcube.time_series_characteristics
+      forecast_results: zcube.forecast_results
+      backtest_metrics: zcube.backtest_metrics
+      forecasts_by_origin: zcube.forecasts_by_origin
+      best_method_per_series: zcube.best_method_per_series
+      fitted_distributions: zcube.fitted_distributions
+      forecast_adjustments: zcube.forecast_adjustments
+      process_log: zcube.process_log
   s3:
-    bucket: "demand-data"
-    prefix: "time_series/"
-    region: "us-east-1"
-  
-  # Azure configuration (alternative)
+    bucket: demand-data
+    prefix: time_series/
+    region: us-east-1
   azure:
-    container: "demand-data"
-    account_name: "${AZURE_ACCOUNT}"
-    account_key: "${AZURE_KEY}"
-
-# ETL Configuration
+    container: demand-data
+    account_name: ${AZURE_ACCOUNT}
+    account_key: ${AZURE_KEY}
 etl:
-  # Output is written directly to PostgreSQL (zcube.demand_actuals)
-  # output_path is kept for backward-compatibility but no parquet is written.
-  output_table: "zcube.demand_actuals"
-  partition_by: ["hierarchy_level_1", "category"]  # Partition strategy
-  
-  # Query configuration
+  output_table: zcube.demand_actuals
+  partition_by:
+  - hierarchy_level_1
+  - category
   query:
-    date_column: "date"
-    value_column: "qty"
-    id_column: "item_id"
-    hierarchy_columns: ["hierarchy_level_1", "hierarchy_level_2", "hierarchy_level_3"]
-    
-    # Filters
-    min_date: "2020-01-01"
-    max_date: null  # null = use current date
-    
-    # Data quality filters
-    min_observations: 52  # Minimum number of observations per time series (1 year weekly)
-    
-  # Aggregation if needed
+    date_column: date
+    value_column: qty
+    id_column: item_id
+    hierarchy_columns:
+    - hierarchy_level_1
+    - hierarchy_level_2
+    - hierarchy_level_3
+    min_date: '2020-01-01'
+    max_date: null
+    min_observations: 52
   aggregation:
-    frequency: "W"  # D=Daily, W=Weekly, M=Monthly
-    method: "sum"   # sum, mean, median
-
-# Outlier Detection & Correction
+    frequency: W
+    method: sum
 outlier_detection:
   enabled: true
-  detection_method: "iqr"          # iqr | zscore | stl_residuals
-  correction_method: "clip"        # clip | interpolate | median | none
-
-  # IQR method parameters
+  detection_method: iqr
+  correction_method: clip
   iqr:
-    multiplier: 1.5                # k * IQR beyond Q1/Q3
-
-  # Z-Score method parameters
+    multiplier: 1.5
   zscore:
-    threshold: 3.0                 # |z| > threshold flagged
-    use_mad: true                  # Use median/MAD instead of mean/std
-
-  # STL decomposition residuals method parameters
+    threshold: 3.0
+    use_mad: true
   stl_residuals:
-    seasonal_period: 52            # STL seasonal period (52 weeks)
-    residual_threshold: 3.0        # Residual z-score threshold
-
-  # Correction parameters
+    seasonal_period: 52
+    residual_threshold: 3.0
   correction:
-    interpolation_method: "linear" # For interpolate correction method
-    median_window: 5               # For median replacement window
-
-  min_observations: 6              # Skip detection for very short series
-
-# Time Series Characterization
+    interpolation_method: linear
+    median_window: 5
+  min_observations: 6
 characterization:
-  # Seasonality detection
   seasonality:
-    test_periods: [4, 13, 26, 52]  # Weeks: monthly(4), quarterly(13), semi-annual(26), annual(52)
+    test_periods:
+    - 4
+    - 13
+    - 26
+    - 52
     significance_level: 0.05
-    min_strength: 0.3  # Minimum seasonal strength to consider significant
-  
-  # Trend detection
+    min_strength: 0.3
   trend:
-    method: "mann_kendall"  # Options: mann_kendall, linear_regression
+    method: mann_kendall
     significance_level: 0.05
-  
-  # Intermittency thresholds
   intermittency:
-    zero_threshold: 0.5  # % of zeros to consider intermittent
-    adi_threshold: 1.32  # Average inter-demand interval threshold
-    cov_threshold: 0.49  # Coefficient of variation threshold
-  
-  # Stationarity test
+    zero_threshold: 0.5
+    adi_threshold: 1.32
+    cov_threshold: 0.49
   stationarity:
-    test: "adf"  # Augmented Dickey-Fuller
+    test: adf
     significance_level: 0.05
-  
-  # Data sufficiency thresholds
   data_sufficiency:
-    min_for_ml: 100
-    min_for_deep_learning: 200
-    sparse_obs_per_year: 5  # Fewer than 5 obs/year → sparse_data methods
-
-# Forecasting Configuration
+    min_for_ml: 20
+    min_for_deep_learning: 30
+    sparse_obs_per_year: 5
 forecasting:
-  horizon: 52  # Number of periods to forecast (1 year weekly)
-  frequency: "W"  # D, W, M, Q, Y
-  
-  # Backtesting configuration
+  horizon: 52
+  frequency: W
   backtesting:
-    n_windows: 3        # Number of rolling origins to evaluate
-    step_size: 4        # Periods (weeks) between consecutive origins
-    # First origin is always earliest_obs + 2 years (auto-detected from data).
-    # Backtest is attempted for ALL series regardless of length.
-    min_train_size: 52  # Minimum training size (1 year of weekly data)
-  
-  # Prediction intervals
-  confidence_levels: [10, 25, 50, 75, 90, 95, 99]  # For MEIO
-  
-  # Method selection based on characteristics
+    n_windows: 3
+    step_size: 4
+    min_train_size: 52
+  confidence_levels:
+  - 10
+  - 25
+  - 50
+  - 75
+  - 90
+  - 95
+  - 99
   method_selection:
-    sparse_data: ["SeasonalNaive", "HistoricAverage", "TimesFM"]
-    intermittent: ["CrostonOptimized", "ADIDA", "IMAPA", "TimesFM"]
-    seasonal: ["MSTL", "AutoETS", "NHITS", "PatchTST", "TimesFM", "LightGBM"]
-    complex: ["NHITS", "NBEATS", "TFT", "PatchTST", "AutoETS", "LightGBM", "XGBoost"]
-    standard: ["AutoETS", "AutoARIMA", "AutoTheta", "NHITS", "TimesFM", "LightGBM"]
-
-  # ML models
-  ml_models:
-    - LightGBM
-    - XGBoost
-  
-  # Nixtla StatsForecast models
-  statsforecast_models:
-    - AutoARIMA
-    - AutoETS
-    - AutoTheta
-    - AutoCES
-    - MSTL
+    sparse_data:
+    - SeasonalNaive
+    - HistoricAverage
+    - TimesFM
+    intermittent:
     - CrostonOptimized
     - ADIDA
     - IMAPA
-    - HistoricAverage
-    - SeasonalNaive
-  
-  # Nixtla NeuralForecast models
-  neuralforecast_models:
+    - TimesFM
+    seasonal:
+    - MSTL
+    - AutoETS
+    - NHITS
+    - PatchTST
+    - TimesFM
+    - LightGBM
+    complex:
     - NHITS
     - NBEATS
-    - PatchTST
     - TFT
-    - DeepAR
-  
-  # TimesFM configuration
+    - PatchTST
+    - AutoETS
+    - LightGBM
+    - XGBoost
+    standard:
+    - AutoETS
+    - AutoARIMA
+    - AutoTheta
+    - NHITS
+    - TimesFM
+    - LightGBM
+  ml_models:
+  - LightGBM
+  - XGBoost
+  statsforecast_models:
+  - AutoARIMA
+  - AutoETS
+  - AutoTheta
+  - AutoCES
+  - MSTL
+  - CrostonOptimized
+  - ADIDA
+  - IMAPA
+  - HistoricAverage
+  - SeasonalNaive
+  neuralforecast_models:
+  - NHITS
+  - NBEATS
+  - PatchTST
+  - TFT
+  - DeepAR
   timesfm:
-    model_name: "timesfm-1.0-200m"
+    model_name: timesfm-1.0-200m
     context_length: 512
     horizon_length: 128
-    quantiles: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
-
-# Hierarchical Forecasting
+    quantiles:
+    - 0.1
+    - 0.25
+    - 0.5
+    - 0.75
+    - 0.9
+    - 0.95
+    - 0.99
 hierarchical:
   enabled: true
   reconciliation_methods:
-    - "BottomUp"
-    - "TopDown"
-    - "MinTrace"
-    - "ERM"  # Empirical Risk Minimization
-  
-  # Structure definition
+  - BottomUp
+  - TopDown
+  - MinTrace
+  - ERM
   structure:
-    levels: ["hierarchy_level_1", "hierarchy_level_2", "hierarchy_level_3", "sku_id"]
-
-# Evaluation Metrics
+    levels:
+    - hierarchy_level_1
+    - hierarchy_level_2
+    - hierarchy_level_3
+    - sku_id
 evaluation:
   metrics:
     point_forecast:
-      - "mae"
-      - "rmse"
-      - "mape"
-      - "smape"
-      - "bias"
-      - "mase"
-    
+    - mae
+    - rmse
+    - mape
+    - smape
+    - bias
+    - mase
     probabilistic:
-      - "winkler_score"
-      - "crps"  # Continuous Ranked Probability Score
-      - "coverage"
-      - "quantile_loss"
-    
+    - winkler_score
+    - crps
+    - coverage
+    - quantile_loss
     information_criteria:
-      - "aic"
-      - "bic"
-      - "aicc"
-
-# Best Method Selection
+    - aic
+    - bic
+    - aicc
 best_method:
-  # Weights for composite scoring (must sum to 1.0)
   weights:
-    mae: 0.40
-    rmse: 0.20
+    mae: 0.4
+    rmse: 0.2
     bias: 0.15
     coverage_90: 0.15
-    mase: 0.10
-
-# Distribution Fitting for MEIO
+    mase: 0.1
 meio:
   enabled: true
-  
-  # Distribution types to test
   distributions:
-    - "normal"
-    - "gamma"
-    - "negative_binomial"
-    - "lognormal"
-  
-  # Fitting method
-  fitting_method: "quantile_matching"  # or "mle" (maximum likelihood)
-  
-  # Service levels for safety stock calculation
-  service_levels: [0.90, 0.95, 0.99]
-
-# Parallel Processing
+  - normal
+  - gamma
+  - negative_binomial
+  - lognormal
+  fitting_method: quantile_matching
+  service_levels:
+  - 0.9
+  - 0.95
+  - 0.99
 parallel:
-  backend: "dask"
-  
+  backend: dask
   dask:
-    scheduler: "processes"  # processes, threads, distributed
-    n_workers: 48  # 48 processes × 2 threads = 96 slots → 400% of 24 cores
-    threads_per_worker: 2  # numba/numpy releases GIL; 2 threads per worker is effective
-    memory_limit: "auto"
-
-    # Prevent heartbeat / comm timeouts on Windows under load
-    heartbeat_interval: "10s"
-    death_timeout: 120   # seconds before scheduler considers a worker dead
-
-    # For distributed setup
+    scheduler: processes
+    n_workers: 64
+    threads_per_worker: 2
+    memory_limit: auto
+    heartbeat_interval: 10s
+    death_timeout: 120
     distributed:
-      scheduler_address: null  # "tcp://scheduler:8786"
-
-  # Batch size for processing
-  batch_size: 100  # ~100 series per batch for stable worker task granularity
-
-# Output Configuration
+      scheduler_address: null
+  batch_size: 100
 output:
-  base_path: "./output"
-  
-  # What to save
+  base_path: ./output
   save:
     forecasts: true
     characteristics: true
@@ -297,16 +251,12 @@ output:
     distributions: true
     hyperparameters: true
     plots: true
-  
-  # Output formats
   formats:
-    forecasts: "postgres"
-    metrics: "postgres"
-    plots: "png"
-
-# Logging
+    forecasts: postgres
+    metrics: postgres
+    plots: png
 logging:
-  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file: "./logs/forecasting.log"
+  level: INFO
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+  file: ./logs/forecasting.log
   console: true

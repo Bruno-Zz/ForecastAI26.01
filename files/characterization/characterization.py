@@ -186,6 +186,19 @@ class TimeSeriesCharacterizer:
         self.stationarity_cfg = self.char_config['stationarity']
         self.sufficiency_cfg = self.char_config['data_sufficiency']
 
+        # Frequency used as a fallback when date information is unavailable
+        self.frequency = (
+            self.config.get('forecasting', {}).get('frequency')
+            or self.config.get('etl', {}).get('aggregation', {}).get('frequency', 'M')
+        )
+        self._freq_periods_year = {
+            'H': 8760, 'D': 365, 'B': 260,
+            'W': 52,
+            'M': 12, 'ME': 12,
+            'Q': 4,  'QE': 4,
+            'Y': 1,  'YE': 1, 'A': 1,
+        }
+
         # Validate that required libraries are present
         if not STATSMODELS_AVAILABLE:
             raise ImportError(
@@ -684,10 +697,15 @@ class TimeSeriesCharacterizer:
                 obs_per_year = chars.n_observations / span_years
                 is_sparse = obs_per_year < sparse_obs_per_year
             else:
-                # Fallback: assume monthly — fewer than 5 obs means < 5 months
-                is_sparse = chars.n_observations < sparse_obs_per_year
+                # Fallback: derive a 1-year threshold from the configured frequency
+                # e.g. W→52 periods/yr, M→12, so sparse = fewer than sparse_obs_per_year * (periods/yr / 12)
+                periods_per_year = self._freq_periods_year.get(self.frequency, 12)
+                fallback_threshold = max(sparse_obs_per_year, round(sparse_obs_per_year * periods_per_year / 12))
+                is_sparse = chars.n_observations < fallback_threshold
         except Exception:
-            is_sparse = chars.n_observations < sparse_obs_per_year
+            periods_per_year = self._freq_periods_year.get(self.frequency, 12)
+            fallback_threshold = max(sparse_obs_per_year, round(sparse_obs_per_year * periods_per_year / 12))
+            is_sparse = chars.n_observations < fallback_threshold
 
         if is_sparse:
             methods = list(self.method_selection.get('sparse_data', []))

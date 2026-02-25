@@ -34,7 +34,7 @@ export function getStepsForRoute(pathname) {
         id: 'sidebar',
         attachTo: { element: '#sidebar-nav', on: 'right' },
         title: 'Navigation',
-        text: 'Use the sidebar to switch between the Dashboard, a specific Time Series, the Pipeline runner, and the Process Log.',
+        text: 'Use the sidebar to switch between the Dashboard, a specific Time Series, the Pipeline runner, Process Log, and Settings.',
         buttons: backNext,
       },
       {
@@ -62,7 +62,7 @@ export function getStepsForRoute(pathname) {
         id: 'table',
         attachTo: { element: '#dash-table', on: 'top' },
         title: 'Series Table',
-        text: 'Click any row to drill into that series. Columns are sortable. Each row includes a sparkline showing historical demand and forecast.',
+        text: 'Click any row to drill into that series. Columns are sortable. Each row includes a sparkline showing historical demand and forecast. Use the Previous / Next buttons at the bottom to paginate.',
         scrollTo: true,
         buttons: backDone,
       },
@@ -88,6 +88,13 @@ export function getStepsForRoute(pathname) {
         buttons: backNext,
       },
       {
+        id: 'toggles',
+        attachTo: { element: '#tsv-toggles', on: 'bottom' },
+        title: 'Method Toggles & Reordering',
+        text: 'Toggle individual forecast methods on/off. Each section has a drag handle on the left — drag and drop to reorder them. Your preferred layout is saved automatically.',
+        buttons: backNext,
+      },
+      {
         id: 'main-chart',
         attachTo: { element: '#tsv-main-chart', on: 'top' },
         title: 'Historical Data & Forecasts',
@@ -96,26 +103,18 @@ export function getStepsForRoute(pathname) {
         buttons: backNext,
       },
       {
+        id: 'scoring',
+        attachTo: { element: '#tsv-scoring', on: 'top' },
+        title: 'Accuracy vs Precision & Composite Score',
+        text: 'The scatter chart plots each method by bias (accuracy) vs RMSE (precision). The green quadrant highlights the best performers. The composite score ranking bar chart shows the weighted score for each method — lower is better.',
+        scrollTo: true,
+        buttons: backNext,
+      },
+      {
         id: 'forecast-table',
         attachTo: { element: '#tsv-forecast-table', on: 'top' },
         title: 'Forecast Values & Adjustments',
         text: 'Point forecast values for each method and horizon month. For the best method, expand adjustment rows to apply additive deltas or full overrides. The Consensus row shows final adjusted values.',
-        scrollTo: true,
-        buttons: backNext,
-      },
-      {
-        id: 'scoring',
-        attachTo: { element: '#tsv-scoring', on: 'top' },
-        title: 'Accuracy vs Precision',
-        text: 'The scatter chart plots each method by bias (accuracy) vs RMSE (precision). The green quadrant highlights the best performers.',
-        scrollTo: true,
-        buttons: backNext,
-      },
-      {
-        id: 'drag-reorder',
-        attachTo: { element: '#tsv-toggles', on: 'top' },
-        title: 'Drag to Reorder Sections',
-        text: 'Every section has a drag handle on the left. Drag and drop sections to reorder them — your preferred layout is saved automatically.',
         scrollTo: true,
         buttons: backDone,
       },
@@ -130,14 +129,14 @@ export function getStepsForRoute(pathname) {
         id: 'full-pipeline',
         attachTo: { element: '#pipeline-full', on: 'bottom' },
         title: 'Run Full Pipeline',
-        text: 'Click "Run All" to execute all 6 pipeline steps in order. The numbered circles track progress. If any step fails, the pipeline stops automatically.',
+        text: 'Click "Run All" to execute all 6 pipeline steps in order. The numbered circles track progress. If any step fails, the pipeline stops automatically. The state persists even if you navigate away.',
         buttons: backNext,
       },
       {
         id: 'individual-steps',
         attachTo: { element: '#pipeline-steps', on: 'top' },
         title: 'Individual Steps',
-        text: 'Run any single step independently. Each card shows its status, timing, and a collapsible log viewer with color-coded output.',
+        text: 'Run any single step independently. Each card shows its status, timing, and a collapsible log viewer with color-coded output. Use the Stop button to interrupt a running step.',
         scrollTo: true,
         buttons: backNext,
       },
@@ -152,6 +151,50 @@ export function getStepsForRoute(pathname) {
     ];
   }
 
-  // ── Fallback (e.g. /logs) ──
+  // ── Process Log ──
+  if (pathname === '/logs') {
+    return [
+      welcome,
+      {
+        id: 'logs-header',
+        attachTo: { element: '#logs-header', on: 'bottom' },
+        title: 'Process Log Overview',
+        text: 'This page shows all pipeline execution history. Live running processes appear at the top with a pulsing indicator. Use the Refresh button to update.',
+        buttons: backNext,
+      },
+      {
+        id: 'logs-history',
+        attachTo: { element: '#logs-history', on: 'top' },
+        title: 'Run History',
+        text: 'Expand any historical run to see its individual steps, status, duration, and log output. Click a step to view its detailed console logs.',
+        scrollTo: true,
+        buttons: backDone,
+      },
+    ];
+  }
+
+  // ── Settings ──
+  if (pathname === '/settings') {
+    return [
+      welcome,
+      {
+        id: 'settings-tabs',
+        attachTo: { element: '#settings-tabs', on: 'bottom' },
+        title: 'Settings Tabs',
+        text: 'Switch between Appearance (theme, dark mode), Locale (regional format, number precision), and System Config (pipeline and model parameters).',
+        buttons: backNext,
+      },
+      {
+        id: 'settings-content',
+        attachTo: { element: '#settings-content', on: 'top' },
+        title: 'Edit Configuration',
+        text: 'Change theme or regional format in the first two tabs. In System Config, edit any pipeline parameter directly — arrays and objects open in a table editor popup. Changes are saved to config.yaml on the server.',
+        scrollTo: true,
+        buttons: backDone,
+      },
+    ];
+  }
+
+  // ── Fallback ──
   return [welcome];
 }

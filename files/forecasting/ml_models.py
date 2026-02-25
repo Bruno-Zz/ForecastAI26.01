@@ -90,6 +90,25 @@ class MLForecaster:
             'B': 5,
         }
 
+        # Frequency-aware feature window configuration.
+        # Lags, rolling windows and EWM span are expressed in *periods* so
+        # they capture the same "semantic" durations regardless of granularity.
+        # e.g. for weekly data lag_52 = 1 year; for monthly data lag_12 = 1 year.
+        self._freq_feature_cfg = {
+            'H':  {'lags': [1, 2, 3, 6, 12, 24],      'windows': [6, 12, 24],     'ewm_span': 6},
+            'D':  {'lags': [1, 2, 3, 7, 14, 30],       'windows': [7, 14, 30],     'ewm_span': 7},
+            'W':  {'lags': [1, 2, 4, 8, 13, 26, 52],   'windows': [4, 8, 13, 26],  'ewm_span': 13},
+            'M':  {'lags': [1, 2, 3, 6, 12],           'windows': [3, 6, 12],      'ewm_span': 12},
+            'ME': {'lags': [1, 2, 3, 6, 12],           'windows': [3, 6, 12],      'ewm_span': 12},
+            'Q':  {'lags': [1, 2, 4],                  'windows': [2, 4],          'ewm_span': 4},
+            'QE': {'lags': [1, 2, 4],                  'windows': [2, 4],          'ewm_span': 4},
+            'Y':  {'lags': [1, 2, 3],                  'windows': [2, 3],          'ewm_span': 3},
+            'YE': {'lags': [1, 2, 3],                  'windows': [2, 3],          'ewm_span': 3},
+            'B':  {'lags': [1, 2, 5, 10, 20],          'windows': [5, 10, 20],     'ewm_span': 5},
+        }
+        # Fall back to monthly config when frequency is unrecognised
+        self._default_feature_cfg = {'lags': [1, 2, 3, 6, 12], 'windows': [3, 6, 12], 'ewm_span': 12}
+
     # ------------------------------------------------------------------
     # Feature engineering
     # ------------------------------------------------------------------
@@ -100,13 +119,13 @@ class MLForecaster:
         """
         Generate engineered features from a univariate time series.
 
-        Features produced:
-            - Lag features at periods 1, 2, 3, 6, 12
+        Features produced (window sizes are frequency-aware, e.g. weekly → 4/8/13/26):
+            - Lag features at frequency-scaled periods (short + medium + long range)
             - Seasonal lag (if has_seasonality) at the dominant seasonal period
-            - Rolling statistics (mean, std, min, max) for windows 3, 6, 12
+            - Rolling statistics (mean, std, min, max) for frequency-scaled windows
             - Calendar features (month, quarter, day_of_week) when datetime index
             - Trend features: time_idx and time_idx_squared
-            - EWM features: exponentially weighted mean and std with span=12
+            - EWM features: exponentially weighted mean and std with frequency-scaled span
 
         Args:
             series: Time series values with a DatetimeIndex (preferred) or
@@ -119,8 +138,14 @@ class MLForecaster:
         """
         features = pd.DataFrame(index=series.index)
 
+        # Resolve frequency-aware window sizes
+        feat_cfg = self._freq_feature_cfg.get(self.frequency, self._default_feature_cfg)
+        lag_periods  = feat_cfg['lags']
+        window_sizes = feat_cfg['windows']
+        ewm_span     = feat_cfg['ewm_span']
+
         # --- Lag features ---
-        for lag in [1, 2, 3, 6, 12]:
+        for lag in lag_periods:
             if lag < len(series):
                 features[f'lag_{lag}'] = series.shift(lag)
 
@@ -132,11 +157,11 @@ class MLForecaster:
                 sp = int(seasonal_periods[0])
             else:
                 sp = self._freq_season_map.get(self.frequency, 12)
-            if sp < len(series):
+            if sp < len(series) and sp not in lag_periods:
                 features[f'seasonal_lag_{sp}'] = series.shift(sp)
 
         # --- Rolling statistics ---
-        for window in [3, 6, 12]:
+        for window in window_sizes:
             if window < len(series):
                 features[f'rolling_mean_{window}'] = series.rolling(window=window).mean()
                 features[f'rolling_std_{window}'] = series.rolling(window=window).std()
@@ -153,9 +178,9 @@ class MLForecaster:
         features['time_idx'] = np.arange(len(series))
         features['time_idx_squared'] = features['time_idx'] ** 2
 
-        # --- Exponentially weighted features ---
-        features['ewm_mean'] = series.ewm(span=12, min_periods=1).mean()
-        features['ewm_std'] = series.ewm(span=12, min_periods=1).std()
+        # --- Exponentially weighted features (span scaled to frequency) ---
+        features['ewm_mean'] = series.ewm(span=ewm_span, min_periods=1).mean()
+        features['ewm_std'] = series.ewm(span=ewm_span, min_periods=1).std()
 
         # Drop rows that have NaN values introduced by lags / rolling
         features = features.dropna()

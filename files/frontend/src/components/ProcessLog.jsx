@@ -223,8 +223,8 @@ const ProcessLog = () => {
   );
 
   return (
-    <div className="p-4 sm:p-6 max-w-4xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
+    <div id="logs-page" className="p-4 sm:p-6 max-w-4xl mx-auto">
+      <div id="logs-header" className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white">Process Log</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
@@ -302,7 +302,7 @@ const ProcessLog = () => {
       )}
 
       {/* ─── Historical Runs ─── */}
-      <div>
+      <div id="logs-history">
         <h2 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-3">
           Run History
           {dbRuns.length > 0 && <span className="ml-1.5 text-gray-300 dark:text-gray-600">({dbRuns.length})</span>}

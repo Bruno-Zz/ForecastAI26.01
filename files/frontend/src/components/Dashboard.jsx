@@ -387,12 +387,12 @@ export const Dashboard = () => {
             <div className="flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700">
               <button onClick={() => setPage(Math.max(0, page - 1))} disabled={page === 0}
                 className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm disabled:opacity-40 hover:bg-gray-100 dark:hover:bg-gray-800 dark:text-gray-300 transition-colors">
-                \u2190 Previous
+                {'\u2190'} Previous
               </button>
               <span className="text-sm text-gray-500 dark:text-gray-400">Page {page + 1} of {totalPages}</span>
               <button onClick={() => setPage(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1}
                 className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg text-sm disabled:opacity-40 hover:bg-gray-100 dark:hover:bg-gray-800 dark:text-gray-300 transition-colors">
-                Next \u2192
+                Next {'\u2192'}
               </button>
             </div>
           )}

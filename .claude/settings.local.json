@@ -87,7 +87,19 @@
       "Bash(wc:*)",
       "Bash(done)",
       "Bash(copy:*)",
-      "Bash(cmd.exe //c \"node_modules\\\\.bin\\\\vite.cmd build\")"
+      "Bash(cmd.exe //c \"node_modules\\\\.bin\\\\vite.cmd build\")",
+      "Bash(cmd.exe //c \"netstat -ano | findstr :8002\")",
+      "Bash(cmd.exe //c \"wmic process where ProcessId=49408 get CommandLine /format:list\")",
+      "Bash(cmd.exe //c \"tasklist /FI \"\"PID eq 49408\"\" /V /FO LIST\")",
+      "Bash(cmd.exe //c \"powershell -Command \"\"Get-Process -Id 49408 | Select-Object Id,ProcessName,Path | Format-List\"\"\")",
+      "Bash(cmd //c \"taskkill /PID 49408 /F\")",
+      "Bash(cmd //c \"tasklist /FI \"\"PID eq 49408\"\" /NH\")",
+      "Bash(Copy-Item -Path \"C:\\\\allDev\\\\ForecastAI2026.01\\\\.claude\\\\.claude\\\\worktrees\\\\beautiful-mcnulty\\\\files\\\\db\\\\db.py\" -Destination \"C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\db\\\\db.py\" -Force)",
+      "Bash(Write-Host \"db.py copied\")",
+      "Bash(Copy-Item -Path \"C:\\\\allDev\\\\ForecastAI2026.01\\\\.claude\\\\.claude\\\\worktrees\\\\beautiful-mcnulty\\\\files\\\\etl\\\\etl.py\" -Destination \"C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\etl\\\\etl.py\" -Force)",
+      "Bash(Write-Host \"etl.py copied\")",
+      "Bash(npx --no-install vite build)",
+      "Bash(Copy-Item -Path \"C:\\\\allDev\\\\ForecastAI2026.01\\\\.claude\\\\.claude\\\\worktrees\\\\beautiful-mcnulty\\\\files\\\\utils\\\\orchestrator.py\" -Destination \"C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\utils\\\\orchestrator.py\" -Force)"
     ]
   }
 }

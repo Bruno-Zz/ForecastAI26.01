@@ -28,6 +28,34 @@ const ICONS = {
   'distributions':     '📈',
 };
 
+/** Compact progress bar used for Forecast and Backtest steps */
+const ForecastProgressBar = ({ progress, label = 'series' }) => {
+  if (!progress || !progress.total) return null;
+  const { completed, total, batches_done, batches_total } = progress;
+  const pct = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-medium text-blue-600 dark:text-blue-400">
+          {completed.toLocaleString()} / {total.toLocaleString()} {label}
+        </span>
+        {batches_total != null && batches_total > 1 && (
+          <span className="text-gray-400 dark:text-gray-500">
+            batch {batches_done}/{batches_total}
+          </span>
+        )}
+        <span className="font-semibold text-blue-600 dark:text-blue-400">{pct}%</span>
+      </div>
+      <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
+        <div
+          className="bg-blue-500 dark:bg-blue-400 h-1.5 rounded-full transition-all duration-500"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+};
+
 /** Spinner SVG */
 const Spinner = ({ cls = 'w-4 h-4' }) => (
   <svg className={`animate-spin ${cls}`} viewBox="0 0 24 24" fill="none">
@@ -200,6 +228,24 @@ const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs, l
           />
         )}
 
+        {/* Live series progress while forecast or backtest is active */}
+        {isRunning && (job?.progress?.FORECAST_PROGRESS || job?.progress?.BACKTEST_PROGRESS) && (
+          <div className="mt-2 space-y-1.5">
+            {job.progress?.FORECAST_PROGRESS && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-16 flex-shrink-0">📊 Forecast</span>
+                <div className="flex-1"><ForecastProgressBar progress={job.progress.FORECAST_PROGRESS} label="series" /></div>
+              </div>
+            )}
+            {job.progress?.BACKTEST_PROGRESS && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-16 flex-shrink-0">🔁 Backtest</span>
+                <div className="flex-1"><ForecastProgressBar progress={job.progress.BACKTEST_PROGRESS} label="series" /></div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Timing */}
         {job?.started_at && (
           <div className="mt-2 flex items-center gap-3 text-xs text-gray-400 dark:text-gray-500">
@@ -295,6 +341,14 @@ const StepCard = ({ step, onRun, onKill, activeJob, onToggleLogs, showLogs, isFu
           </div>
         )}
 
+        {/* Live series progress for forecast and backtest steps */}
+        {step.id === 'forecast' && activeJob?.progress?.FORECAST_PROGRESS && (
+          <ForecastProgressBar progress={activeJob.progress.FORECAST_PROGRESS} label="series" />
+        )}
+        {step.id === 'backtest' && activeJob?.progress?.BACKTEST_PROGRESS && (
+          <ForecastProgressBar progress={activeJob.progress.BACKTEST_PROGRESS} label="series" />
+        )}
+
         {/* Log toggle */}
         {hasJob && (
           <button
@@ -324,35 +378,7 @@ export const PipelineRunner = () => {
   const [error, setError]           = useState(null);
   const eventSources = useRef({});                         // key -> EventSource
 
-  // Load step definitions once
-  useEffect(() => {
-    axios.get(`${API_BASE_URL}/pipeline/steps`)
-      .then(r => setSteps(r.data))
-      .catch(e => setError(e.message));
-  }, []);
-
-  // Poll all running jobs
-  useEffect(() => {
-    const interval = setInterval(async () => {
-      // Individual step jobs
-      const runningEntries = Object.entries(jobs).filter(([, j]) => j.status === 'running' || j.status === 'pending');
-      for (const [stepId, job] of runningEntries) {
-        try {
-          const r = await axios.get(`${API_BASE_URL}/pipeline/jobs/${job.job_id}`);
-          setJobs(prev => ({ ...prev, [stepId]: r.data }));
-        } catch { /* ignore */ }
-      }
-      // Full-pipeline job
-      if (fullJob && (fullJob.status === 'running' || fullJob.status === 'pending')) {
-        try {
-          const r = await axios.get(`${API_BASE_URL}/pipeline/jobs/${fullJob.job_id}`);
-          setFullJob(r.data);
-        } catch { /* ignore */ }
-      }
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [jobs, fullJob]);
-
+  // ── SSE helper (defined early so restore effects can use it) ────────
   const openSSE = useCallback((key, jobId, setter) => {
     if (eventSources.current[key]) {
       eventSources.current[key].close();
@@ -364,6 +390,35 @@ export const PipelineRunner = () => {
     es.onmessage = (e) => {
       try {
         const { line } = JSON.parse(e.data);
+
+        // Parse structured progress markers — update job.progress, don't add to log
+        const progMatch = line.match(/\[(FORECAST_PROGRESS|BACKTEST_PROGRESS)\]\s+(.*)/);
+        if (progMatch) {
+          const progKey = progMatch[1]; // 'FORECAST_PROGRESS' or 'BACKTEST_PROGRESS'
+          const progData = {};
+          progMatch[2].trim().split(/\s+/).forEach(pair => {
+            const eq = pair.indexOf('=');
+            if (eq > 0) {
+              const k = pair.slice(0, eq);
+              const v = pair.slice(eq + 1);
+              progData[k] = isNaN(v) ? v : Number(v);
+            }
+          });
+          setter(prev => {
+            if (prev && typeof prev === 'object' && !prev.job_id) {
+              const job = prev[key];
+              if (!job || job.job_id !== jobId) return prev;
+              const updatedProg = { ...(job.progress || {}), [progKey]: progData };
+              return { ...prev, [key]: { ...job, progress: updatedProg } };
+            } else {
+              if (!prev || prev.job_id !== jobId) return prev;
+              const updatedProg = { ...(prev.progress || {}), [progKey]: progData };
+              return { ...prev, progress: updatedProg };
+            }
+          });
+          return; // Don't add progress markers to log_lines
+        }
+
         setter(prev => {
           // prev may be an object (jobs map) or a single job object
           if (prev && typeof prev === 'object' && !prev.job_id) {
@@ -401,6 +456,99 @@ export const PipelineRunner = () => {
     es.onerror = () => { es.close(); delete eventSources.current[key]; };
     eventSources.current[key] = es;
   }, []);
+
+  // Load step definitions once
+  useEffect(() => {
+    axios.get(`${API_BASE_URL}/pipeline/steps`)
+      .then(r => setSteps(r.data))
+      .catch(e => setError(e.message));
+  }, []);
+
+  // ── Restore jobs from server on mount ──────────────────────────────
+  // This makes sure that if the user navigates away and comes back,
+  // they still see running / completed jobs, and SSE streams reconnect.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+
+    (async () => {
+      try {
+        const r = await axios.get(`${API_BASE_URL}/pipeline/jobs`);
+        const allJobs = r.data; // sorted newest-first
+
+        const restoredStepJobs = {};
+        let restoredFullJob = null;
+
+        // For each step, keep only the most recent job (list is newest-first)
+        const seenSteps = new Set();
+        for (const job of allJobs) {
+          if (job.step === 'full-pipeline') {
+            if (!restoredFullJob) restoredFullJob = job;
+          } else if (job.step && !seenSteps.has(job.step)) {
+            seenSteps.add(job.step);
+            restoredStepJobs[job.step] = job;
+          }
+        }
+
+        if (restoredFullJob) {
+          setFullJob(restoredFullJob);
+          if (restoredFullJob.status === 'running' || restoredFullJob.status === 'pending') {
+            setShowFullLogs(true);
+          }
+        }
+        if (Object.keys(restoredStepJobs).length > 0) {
+          setJobs(restoredStepJobs);
+          // Auto-show logs for any running step
+          const logsToShow = {};
+          for (const [stepId, job] of Object.entries(restoredStepJobs)) {
+            if (job.status === 'running' || job.status === 'pending') {
+              logsToShow[stepId] = true;
+            }
+          }
+          if (Object.keys(logsToShow).length > 0) setShowLogs(logsToShow);
+        }
+      } catch { /* ignore – server might not be up yet */ }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Reconnect SSE streams for any running jobs after restore ──────
+  useEffect(() => {
+    // Reconnect full-pipeline SSE
+    if (fullJob && (fullJob.status === 'running' || fullJob.status === 'pending')
+        && !eventSources.current['full-pipeline']) {
+      openSSE('full-pipeline', fullJob.job_id, setFullJob);
+    }
+    // Reconnect individual step SSEs
+    for (const [stepId, job] of Object.entries(jobs)) {
+      if ((job.status === 'running' || job.status === 'pending')
+          && !eventSources.current[stepId]) {
+        openSSE(stepId, job.job_id, setJobs);
+      }
+    }
+  }, [fullJob, jobs, openSSE]);
+
+  // Poll all running jobs
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      // Individual step jobs
+      const runningEntries = Object.entries(jobs).filter(([, j]) => j.status === 'running' || j.status === 'pending');
+      for (const [stepId, job] of runningEntries) {
+        try {
+          const r = await axios.get(`${API_BASE_URL}/pipeline/jobs/${job.job_id}`);
+          setJobs(prev => ({ ...prev, [stepId]: r.data }));
+        } catch { /* ignore */ }
+      }
+      // Full-pipeline job
+      if (fullJob && (fullJob.status === 'running' || fullJob.status === 'pending')) {
+        try {
+          const r = await axios.get(`${API_BASE_URL}/pipeline/jobs/${fullJob.job_id}`);
+          setFullJob(r.data);
+        } catch { /* ignore */ }
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [jobs, fullJob]);
 
   // Cleanup SSE on unmount
   useEffect(() => () => {

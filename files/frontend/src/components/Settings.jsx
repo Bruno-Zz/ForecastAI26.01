@@ -34,11 +34,11 @@ export default function Settings() {
   const [activeTab, setActiveTab] = useState('appearance');
 
   return (
-    <div className="p-4 sm:p-6 max-w-4xl mx-auto">
+    <div id="settings-page" className="p-4 sm:p-6 max-w-4xl mx-auto">
       <h1 className="text-2xl sm:text-3xl font-bold mb-6 text-gray-900 dark:text-white">Settings</h1>
 
       {/* Tab bar - responsive: icons on mobile, full labels on sm+ */}
-      <div className="flex gap-1 mb-6 border-b border-gray-200 dark:border-gray-700 overflow-x-auto">
+      <div id="settings-tabs" className="flex gap-1 mb-6 border-b border-gray-200 dark:border-gray-700 overflow-x-auto">
         {TABS.map(tab => (
           <button
             key={tab.id}
@@ -55,9 +55,11 @@ export default function Settings() {
         ))}
       </div>
 
-      {activeTab === 'appearance' && <AppearanceTab />}
-      {activeTab === 'locale' && <LocaleTab />}
-      {activeTab === 'config' && <ConfigTab />}
+      <div id="settings-content">
+        {activeTab === 'appearance' && <AppearanceTab />}
+        {activeTab === 'locale' && <LocaleTab />}
+        {activeTab === 'config' && <ConfigTab />}
+      </div>
     </div>
   );
 }
@@ -545,18 +547,51 @@ function ParamField({ label, path, value, onChange, saving }) {
 }
 
 /* ─── Flatten nested config into dot-path entries for a section ─── */
-function flattenConfig(obj, prefix = '') {
+/* Each entry gets a `group` string when nested >1 level deep,           */
+/* so we can render sub-headers like "Method Selection", "Backtesting".  */
+function flattenConfig(obj, prefix = '', depth = 0) {
   const entries = [];
   if (!obj || typeof obj !== 'object') return entries;
   for (const [k, v] of Object.entries(obj)) {
     const path = prefix ? `${prefix}.${k}` : k;
     if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
-      entries.push(...flattenConfig(v, path));
+      // Tag child entries with the group name when we recurse past depth 0
+      const children = flattenConfig(v, path, depth + 1);
+      children.forEach(c => { if (depth >= 0 && !c.group) c.group = k; });
+      entries.push(...children);
     } else {
-      entries.push({ key: k, path, value: v });
+      entries.push({ key: k, path, value: v, group: null });
     }
   }
   return entries;
+}
+
+/* Group flat entries by their `group` field (preserving order). */
+/* Returns: [{ group: string|null, label: string|null, entries: [...] }] */
+function groupEntries(entries) {
+  const groups = [];
+  let currentGroup = null;
+  let currentBucket = [];
+
+  for (const entry of entries) {
+    const g = entry.group || null;
+    if (g !== currentGroup) {
+      if (currentBucket.length > 0) {
+        groups.push({ group: currentGroup, label: currentGroup ? fmtGroupLabel(currentGroup) : null, entries: currentBucket });
+      }
+      currentGroup = g;
+      currentBucket = [];
+    }
+    currentBucket.push(entry);
+  }
+  if (currentBucket.length > 0) {
+    groups.push({ group: currentGroup, label: currentGroup ? fmtGroupLabel(currentGroup) : null, entries: currentBucket });
+  }
+  return groups;
+}
+
+function fmtGroupLabel(raw) {
+  return raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
 /* ─── Config Tab ─── */
@@ -599,7 +634,7 @@ function ConfigTab() {
     setSaving(path);
     setSaveMsg(null);
     try {
-      await axios.put(`${API_BASE_URL}/config`, { path, value });
+      await axios.post(`${API_BASE_URL}/config/update`, { path, value });
       const parts = path.split('.');
       setConfigObj(prev => {
         const updated = JSON.parse(JSON.stringify(prev));
@@ -700,8 +735,18 @@ function ConfigTab() {
                 </button>
                 {isExpanded && (
                   <div className="px-5 pb-4 border-t border-gray-100 dark:border-gray-700">
-                    {filteredEntries.map(({ key, path, value }) => (
-                      <ParamField key={path} label={key} path={path} value={value} onChange={handleParamChange} saving={saving} />
+                    {groupEntries(filteredEntries).map((grp, gi) => (
+                      <div key={grp.group || gi}>
+                        {grp.label && (
+                          <div className="mt-3 mb-1 flex items-center gap-2">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-blue-500 dark:text-blue-400">{grp.label}</span>
+                            <div className="flex-1 h-px bg-blue-100 dark:bg-blue-900/40" />
+                          </div>
+                        )}
+                        {grp.entries.map(({ key, path, value }) => (
+                          <ParamField key={path} label={key} path={path} value={value} onChange={handleParamChange} saving={saving} />
+                        ))}
+                      </div>
                     ))}
                   </div>
                 )}

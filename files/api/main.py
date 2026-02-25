@@ -401,8 +401,8 @@ async def get_config():
     return {"config": safe, "config_yaml": raw_yaml}
 
 
-@app.put("/api/config")
-async def update_config(body: dict):
+@app.post("/api/config/update")
+async def update_config(body: dict = Body(...)):
     """
     Update specific config keys and persist to config.yaml.
 

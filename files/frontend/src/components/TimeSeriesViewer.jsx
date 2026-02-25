@@ -34,6 +34,69 @@ const getMethodColor = (method) => METHOD_COLORS[method] || '#6b7280';
 
 const fmtDate = (d) => d.toISOString().split('T')[0];
 
+// ---- Time aggregation helpers ----
+const AGG_OPTS = [
+  { value: 'native', label: 'Native' },
+  { value: 'D',      label: 'Daily'  },
+  { value: 'W',      label: 'Weekly' },
+  { value: 'M',      label: 'Monthly'},
+  { value: 'Q',      label: 'Quarterly' },
+  { value: 'Y',      label: 'Yearly' },
+];
+
+/** Canonical period-start ISO date for any aggregation level. */
+const getPeriodKey = (dateStr, agg) => {
+  const d = new Date(dateStr);
+  if (!agg || agg === 'native' || agg === 'D') return dateStr.slice(0, 10);
+  if (agg === 'W') {
+    const dow = d.getUTCDay();
+    const mon = new Date(d);
+    mon.setUTCDate(d.getUTCDate() - (dow === 0 ? 6 : dow - 1));
+    return mon.toISOString().slice(0, 10);
+  }
+  if (agg === 'M') return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-01`;
+  if (agg === 'Q') {
+    const q = Math.floor(d.getUTCMonth() / 3);
+    return `${d.getUTCFullYear()}-${String(q * 3 + 1).padStart(2,'0')}-01`;
+  }
+  if (agg === 'Y') return `${d.getUTCFullYear()}-01-01`;
+  return dateStr.slice(0, 10);
+};
+
+/** Aggregate {date:string[], value:number[]} to a coarser period (sum). */
+const aggHistData = (data, agg) => {
+  if (!data?.date?.length || !agg || agg === 'native') return data;
+  const map = new Map();
+  data.date.forEach((d, i) => {
+    const key = getPeriodKey(d, agg);
+    map.set(key, (map.get(key) ?? 0) + (data.value[i] ?? 0));
+  });
+  const sorted = [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  return { date: sorted.map(([k]) => k), value: sorted.map(([, v]) => v) };
+};
+
+/**
+ * Aggregate forecast step arrays (native dates + values) to a coarser period.
+ * Returns { dates, pf, qs } all aggregated.
+ */
+const aggForecastSeries = (nativeDates, pointForecast, quantiles, agg) => {
+  if (!agg || agg === 'native') return { dates: nativeDates, pf: pointForecast, qs: quantiles };
+  const pfMap = new Map();
+  const qsMap = {};
+  Object.keys(quantiles).forEach(q => { qsMap[q] = new Map(); });
+  nativeDates.forEach((d, i) => {
+    const key = getPeriodKey(d, agg);
+    pfMap.set(key, (pfMap.get(key) ?? 0) + (pointForecast[i] ?? 0));
+    Object.keys(quantiles).forEach(q => {
+      qsMap[q].set(key, (qsMap[q].get(key) ?? 0) + (quantiles[q]?.[i] ?? 0));
+    });
+  });
+  const sorted = [...pfMap.keys()].sort();
+  const aggQs = {};
+  Object.keys(qsMap).forEach(q => { aggQs[q] = sorted.map(k => qsMap[q].get(k) ?? 0); });
+  return { dates: sorted, pf: sorted.map(k => pfMap.get(k) ?? 0), qs: aggQs };
+};
+
 // ---- localStorage helpers ----
 const getRecent = (key) => {
   try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch { return []; }
@@ -701,6 +764,93 @@ function ForecastTableWithAdjustments({
 }
 
 
+/* ---------- Dual-range zoom slider (module-level so React never remounts it mid-drag) ---------- */
+const ZoomSlider = ({ dates, start, end, onStartChange, onEndChange }) => {
+  const clampedEnd = Math.min(end, dates.length - 1);
+  const clampedStart = Math.min(start, clampedEnd);
+
+  if (dates.length <= 1) return null;
+
+  const findDateIdx = (dateStr) => {
+    if (!dateStr) return -1;
+    const idx = dates.findIndex(d => d >= dateStr);
+    return idx >= 0 ? idx : dates.length - 1;
+  };
+
+  // When start is near the end, raise its z-index so its thumb stays clickable
+  const startZ = clampedStart >= clampedEnd - 1 ? 5 : 3;
+
+  return (
+    <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
+      <style>{`
+        .dual-range-container{position:relative;height:32px;user-select:none}
+        .dual-range-track{position:absolute;top:50%;left:0;right:0;height:6px;transform:translateY(-50%);background:#e5e7eb;border-radius:3px}
+        .dark .dual-range-track{background:#374151}
+        .dual-range-highlight{position:absolute;top:50%;height:6px;transform:translateY(-50%);background:#3b82f6;border-radius:3px;pointer-events:none}
+        .dual-range-input{position:absolute;top:0;left:0;width:100%;height:100%;-webkit-appearance:none;appearance:none;background:transparent;pointer-events:none;margin:0;padding:0;cursor:pointer}
+        .dual-range-input::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:20px;height:20px;border-radius:50%;background:#3b82f6;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);cursor:grab;pointer-events:all}
+        .dual-range-input:active::-webkit-slider-thumb{cursor:grabbing;background:#2563eb}
+        .dual-range-input::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#3b82f6;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);cursor:grab;pointer-events:all}
+        .dual-range-input::-webkit-slider-runnable-track{height:0;background:transparent}
+        .dual-range-input::-moz-range-track{height:0;background:transparent}
+      `}</style>
+      <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+        <span className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Zoom</span>
+        <input
+          type="date"
+          value={dates[clampedStart]?.slice(0, 10) || ''}
+          min={dates[0]?.slice(0, 10)}
+          max={dates[clampedEnd]?.slice(0, 10)}
+          onChange={e => { const idx = findDateIdx(e.target.value); if (idx >= 0 && idx < clampedEnd) onStartChange(idx); }}
+          className="text-xs font-mono bg-gray-100 dark:bg-gray-700 dark:text-gray-300 px-2 py-0.5 rounded border border-gray-200 dark:border-gray-600 w-[8.5rem]"
+        />
+        <div className="flex-1 min-w-32 dual-range-container">
+          <div className="dual-range-track" />
+          <div
+            className="dual-range-highlight"
+            style={{
+              left: `${(clampedStart / (dates.length - 1)) * 100}%`,
+              right: `${100 - (clampedEnd / (dates.length - 1)) * 100}%`,
+            }}
+          />
+          <input
+            type="range"
+            min={0}
+            max={dates.length - 1}
+            value={clampedStart}
+            onChange={e => { const v = parseInt(e.target.value, 10); if (v < clampedEnd) onStartChange(v); }}
+            className="dual-range-input"
+            style={{ zIndex: startZ }}
+          />
+          <input
+            type="range"
+            min={0}
+            max={dates.length - 1}
+            value={clampedEnd}
+            onChange={e => { const v = parseInt(e.target.value, 10); if (v > clampedStart) onEndChange(v); }}
+            className="dual-range-input"
+            style={{ zIndex: 4 }}
+          />
+        </div>
+        <input
+          type="date"
+          value={dates[clampedEnd]?.slice(0, 10) || ''}
+          min={dates[clampedStart]?.slice(0, 10)}
+          max={dates[dates.length - 1]?.slice(0, 10)}
+          onChange={e => { const idx = findDateIdx(e.target.value); if (idx >= 0 && idx > clampedStart) onEndChange(idx); }}
+          className="text-xs font-mono bg-gray-100 dark:bg-gray-700 dark:text-gray-300 px-2 py-0.5 rounded border border-gray-200 dark:border-gray-600 w-[8.5rem]"
+        />
+        <button
+          onClick={() => { onStartChange(0); onEndChange(dates.length - 1); }}
+          className="text-xs bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 dark:text-gray-200 px-2 py-1 rounded transition-colors"
+        >
+          Reset
+        </button>
+      </div>
+    </div>
+  );
+};
+
 export const TimeSeriesViewer = () => {
   const { uniqueId } = useParams();
   const decodedId = decodeURIComponent(uniqueId);
@@ -757,9 +907,9 @@ export const TimeSeriesViewer = () => {
 
   // ---- Date-range zoom ----
   const [zoomStart, setZoomStart] = useState(0);
-  const [zoomEnd, setZoomEnd] = useState(100);
+  const [zoomEnd, setZoomEnd] = useState(99999);   // large sentinel → clamped to last date by slider max
   const [outlierZoomStart, setOutlierZoomStart] = useState(0);
-  const [outlierZoomEnd, setOutlierZoomEnd] = useState(100);
+  const [outlierZoomEnd, setOutlierZoomEnd] = useState(99999);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -784,6 +934,9 @@ export const TimeSeriesViewer = () => {
   const { order: sectionOrder, reorder: reorderSections } = useSectionOrder();
   const [draggingId, setDraggingId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
+
+  // ---- Display aggregation granularity ----
+  const [displayAgg, setDisplayAgg] = useState('native');
 
   const handleDragStart = useCallback((id) => setDraggingId(id), []);
   const handleDragOver  = useCallback((id) => setDragOverId(id), []);
@@ -964,9 +1117,12 @@ export const TimeSeriesViewer = () => {
 
   /* ---------- data loading ---------- */
   useEffect(() => {
+    // Reset zoom to full range whenever the active series changes
+    setZoomStart(0);
+    setZoomEnd(99999);
     loadData();
     return () => { if (playTimerRef.current) clearInterval(playTimerRef.current); };
-  }, [decodedId]);
+  }, [decodedId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadData = async () => {
     setLoading(true);
@@ -1228,9 +1384,38 @@ export const TimeSeriesViewer = () => {
     return activeForecasts[0].point_forecast.length;
   }, [activeForecasts]);
 
+  // Infer step size in days from median gap of first 20 historical date pairs.
+  // Used to compute correct forecast future dates (e.g. 7 days/step for weekly).
+  const daysPerPeriod = useMemo(() => {
+    const dates = activeHistoricalData?.date;
+    if (!dates || dates.length < 2) return 30;
+    const diffs = [];
+    for (let i = 1; i < Math.min(dates.length, 20); i++) {
+      diffs.push((new Date(dates[i]) - new Date(dates[i-1])) / 86400000);
+    }
+    diffs.sort((a, b) => a - b);
+    return Math.max(1, diffs[Math.floor(diffs.length / 2)]);
+  }, [activeHistoricalData]);
+
+  // Human-readable period label for the current step size
+  const periodLabel = useMemo(() => {
+    if (displayAgg !== 'native') return AGG_OPTS.find(o => o.value === displayAgg)?.label || '';
+    if (daysPerPeriod <= 1.5) return 'day';
+    if (daysPerPeriod <= 10)  return 'week';
+    if (daysPerPeriod <= 40)  return 'month';
+    if (daysPerPeriod <= 100) return 'quarter';
+    return 'year';
+  }, [daysPerPeriod, displayAgg]);
+
+  // Display-aggregated historical data
+  const dispHistData = useMemo(
+    () => aggHistData(activeHistoricalData, displayAgg),
+    [activeHistoricalData, displayAgg]
+  );
+
   /* ---------- build combined data for main chart ---------- */
   const { allData, allDates } = useMemo(() => {
-    const hasHistorical = activeHistoricalData?.date?.length > 0;
+    const hasHistorical = dispHistData?.date?.length > 0;
 
     // We need either historical data or forecast data with a date reference to build the chart
     if (!hasHistorical && activeForecasts.length === 0) return { allData: [], allDates: [] };
@@ -1240,9 +1425,9 @@ export const TimeSeriesViewer = () => {
 
     // Historical demand → stacked bars (layer: 'bar', barSeries: 'Demand')
     if (hasHistorical) {
-      activeHistoricalData.date.forEach((date, i) => {
+      dispHistData.date.forEach((date, i) => {
         dateSet.add(date);
-        const val = activeHistoricalData.value[i];
+        const val = dispHistData.value[i];
         data.push({ date, value: val, type: 'Actual', method: 'Historical',
           lo90: null, hi90: null, lo50: null, hi50: null,
           layer: 'bar', barSeries: 'Demand', barValue: val });
@@ -1251,35 +1436,51 @@ export const TimeSeriesViewer = () => {
 
     // Forecast data + bars for best method + adjustment/override stacking
     if (activeForecasts.length > 0) {
-      // Use the last historical date, or fallback to dateRangeEnd from characteristics
-      const lastDate = hasHistorical
-        ? new Date(activeHistoricalData.date[activeHistoricalData.date.length - 1])
+      // Use the last historical date (from RAW data so step size is correct)
+      const rawLastDate = activeHistoricalData?.date?.length
+        ? activeHistoricalData.date[activeHistoricalData.date.length - 1]
+        : null;
+      const lastDate = rawLastDate
+        ? new Date(rawLastDate)
         : (dateRangeEnd ? new Date(dateRangeEnd) : null);
 
       if (lastDate) {
         // Use only the best method's forecast to compute base values for adjustments
         const bestFc = activeForecasts.find(f => f.method === bestMethod?.best_method) || activeForecasts[0];
 
-        // All forecast methods → lines + bands (unchanged)
+        // Compute native forecast dates for each horizon step (use daysPerPeriod, not months)
+        const nativeFcDates = (bestFc?.point_forecast || []).map((_, i) => {
+          const d = new Date(lastDate);
+          d.setDate(d.getDate() + Math.round(daysPerPeriod * (i + 1)));
+          return fmtDate(d);
+        });
+
+        // All forecast methods → lines + bands, optionally aggregated
         activeForecasts.forEach(forecast => {
-          const quantiles = forecast.quantiles || {};
-          forecast.point_forecast.forEach((value, i) => {
-            const d = new Date(lastDate); d.setUTCMonth(d.getUTCMonth() + i + 1);
-            const dateStr = fmtDate(d);
+          const rawQs = forecast.quantiles || {};
+          const fcNativeDates = forecast.point_forecast.map((_, i) => {
+            const d = new Date(lastDate);
+            d.setDate(d.getDate() + Math.round(daysPerPeriod * (i + 1)));
+            return fmtDate(d);
+          });
+          const { dates: fcDates, pf: fcPF, qs: fcQS } =
+            aggForecastSeries(fcNativeDates, forecast.point_forecast, rawQs, displayAgg);
+
+          fcDates.forEach((dateStr, i) => {
             dateSet.add(dateStr);
-            const lo90 = quantiles['0.05']?.[i] ?? null;
-            const hi90 = quantiles['0.95']?.[i] ?? null;
-            data.push({ date: dateStr, value, type: 'Forecast', method: forecast.method, lo90, hi90, lo50: quantiles['0.25']?.[i] ?? lo90, hi50: quantiles['0.75']?.[i] ?? hi90, layer: 'line' });
+            const value = fcPF[i];
+            const lo90 = fcQS['0.05']?.[i] ?? null;
+            const hi90 = fcQS['0.95']?.[i] ?? null;
+            data.push({ date: dateStr, value, type: 'Forecast', method: forecast.method, lo90, hi90, lo50: fcQS['0.25']?.[i] ?? lo90, hi50: fcQS['0.75']?.[i] ?? hi90, layer: 'line' });
             if (lo90 != null && hi90 != null)
-              data.push({ date: dateStr, value: null, type: 'Band', method: forecast.method, lo90, hi90, lo50: quantiles['0.25']?.[i] ?? lo90, hi50: quantiles['0.75']?.[i] ?? hi90, layer: 'band' });
+              data.push({ date: dateStr, value: null, type: 'Band', method: forecast.method, lo90, hi90, lo50: fcQS['0.25']?.[i] ?? lo90, hi50: fcQS['0.75']?.[i] ?? hi90, layer: 'band' });
           });
         });
 
-        // Add adjustment / override marker data points (plotted over forecast lines)
-        if (bestFc) {
-          bestFc.point_forecast.forEach((baseValue, i) => {
-            const d = new Date(lastDate); d.setUTCMonth(d.getUTCMonth() + i + 1);
-            const dateStr = fmtDate(d);
+        // Adjustment / override markers — only when at native granularity
+        if (bestFc && displayAgg === 'native') {
+          nativeFcDates.forEach((dateStr, i) => {
+            const baseValue = bestFc.point_forecast[i];
             const adjKey = `${dateStr}|adjustment`;
             const ovKey  = `${dateStr}|override`;
             const adj = adjustments[adjKey];
@@ -1301,7 +1502,7 @@ export const TimeSeriesViewer = () => {
     }
     const sortedDates = [...dateSet].sort();
     return { allData: data, allDates: sortedDates };
-  }, [activeHistoricalData, activeForecasts, adjustments, bestMethod, dateRangeEnd]);
+  }, [dispHistData, activeHistoricalData, activeForecasts, adjustments, bestMethod, dateRangeEnd, daysPerPeriod, displayAgg]);
 
   useEffect(() => {
     if (allDates.length > 0) { setZoomStart(0); setZoomEnd(allDates.length - 1); }
@@ -1401,18 +1602,25 @@ export const TimeSeriesViewer = () => {
     const hasBars  = filtered.some(d => d.layer === 'bar');
     const layers = [];
 
+    // Axis date format: fine for weekly/daily, coarse for monthly+
+    const axisDateFmt = daysPerPeriod <= 10 ? '%b %d %Y' : (daysPerPeriod <= 95 ? '%b %Y' : '%Y');
+    const ttipDateFmt = daysPerPeriod <= 10 ? '%Y-%m-%d' : '%Y-%m';
+
     // ---- Demand bars (historical only) ----
+    // NOTE: no timeUnit — Vega-Lite's timeUnit:'yearmonth' would collapse weekly
+    //       bars into monthly buckets, which is exactly what we want to avoid.
+    //       Data is already at the correct granularity (weekly, monthly, etc.)
+    //       via dispHistData / displayAgg aggregation done in JavaScript.
     if (hasBars) {
       layers.push({
         transform: [{ filter: "datum.layer === 'bar'" }],
         mark: { type: 'bar', tooltip: true, color: '#374151', opacity: 0.55 },
         encoding: {
           x: { field: 'date', type: 'temporal', title: 'Date',
-               axis: { format: '%Y-%m' },
-               timeUnit: 'yearmonth' },
+               axis: { format: axisDateFmt, labelAngle: -30 } },
           y: { field: 'value', type: 'quantitative', title: 'Demand' },
           tooltip: [
-            { field: 'date', type: 'temporal', title: 'Date', format: '%Y-%m' },
+            { field: 'date', type: 'temporal', title: 'Date', format: ttipDateFmt },
             { field: 'value', type: 'quantitative', title: 'Demand', format: ',.0f' },
           ]
         }
@@ -1430,7 +1638,7 @@ export const TimeSeriesViewer = () => {
       transform: [{ filter: "datum.layer === 'line'" }],
       mark: { type: 'line', point: false, strokeWidth: 2 },
       encoding: {
-        x: { field: 'date', type: 'temporal', title: 'Date', axis: { format: '%Y-%m' } },
+        x: { field: 'date', type: 'temporal', title: 'Date', axis: { format: axisDateFmt, labelAngle: -30 } },
         y: { field: 'value', type: 'quantitative', title: 'Demand', scale: { zero: false } },
         color: colorScale,
         strokeDash: { field: 'type', type: 'nominal',
@@ -1510,7 +1718,7 @@ export const TimeSeriesViewer = () => {
     }
 
     return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: 380, autosize: { type: 'fit', contains: 'padding' }, data: { values: filtered }, layer: layers, config: vegaThemeConfig };
-  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, bandVisibleMethods, activeMethodDomain]);
+  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, bandVisibleMethods, activeMethodDomain, daysPerPeriod, vegaThemeConfig]);
 
   const racingBarsSpec = useMemo(() => {
     const src = originForecasts?.forecasts?.length > 0 ? originForecasts.forecasts : activeForecasts;
@@ -1650,27 +1858,31 @@ export const TimeSeriesViewer = () => {
     const data = activeMetrics.map(m => ({ method: m.method, accuracy: Math.abs(m.bias || 0), precision: m.rmse || 0, isBest: bestMethod?.best_method === m.method, composite: compositeRanking?.[m.method] ?? null }));
     const maxAccuracy = Math.max(...data.map(d => d.accuracy), 1);
     const maxPrecision = Math.max(...data.map(d => d.precision), 1);
+    const bestStroke = isDark ? '#34d399' : '#059669';
+    const ruleColor = isDark ? '#4b5563' : '#d1d5db';
+    const pointStroke = isDark ? '#1f2937' : '#ffffff';
     return {
       $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: 380,
       autosize: { type: 'fit', contains: 'padding' },
       layer: [
-        { data: { values: [{ x: 0, y: 0, x2: maxAccuracy * 0.5, y2: maxPrecision * 0.5 }] }, mark: { type: 'rect', opacity: 0.06, color: '#16a34a' }, encoding: { x: { field: 'x', type: 'quantitative', scale: { domain: [0, maxAccuracy * 1.15] }, title: '|Bias| (Accuracy)' }, x2: { field: 'x2' }, y: { field: 'y', type: 'quantitative', scale: { domain: [0, maxPrecision * 1.15] }, title: 'RMSE (Precision)' }, y2: { field: 'y2' } } },
-        { data: { values: [{ x: maxAccuracy * 0.5, y: maxPrecision * 0.5 }] }, mark: { type: 'rule', strokeDash: [4, 4], color: '#d1d5db', strokeWidth: 1 }, encoding: { x: { field: 'x', type: 'quantitative' } } },
-        { data: { values: [{ x: maxAccuracy * 0.5, y: maxPrecision * 0.5 }] }, mark: { type: 'rule', strokeDash: [4, 4], color: '#d1d5db', strokeWidth: 1 }, encoding: { y: { field: 'y', type: 'quantitative' } } },
-        { data: { values: [{ x: maxAccuracy * 0.02, y: maxPrecision * 0.02, label: 'Best' }, { x: maxAccuracy * 1.05, y: maxPrecision * 0.02, label: 'Biased' }, { x: maxAccuracy * 0.02, y: maxPrecision * 1.05, label: 'Noisy' }, { x: maxAccuracy * 1.05, y: maxPrecision * 1.05, label: 'Worst' }] }, mark: { type: 'text', fontSize: 10, fontWeight: 'bold', opacity: 0.25, align: 'left', baseline: 'top' }, encoding: { x: { field: 'x', type: 'quantitative' }, y: { field: 'y', type: 'quantitative' }, text: { field: 'label', type: 'nominal' } } },
-        { data: { values: data }, mark: { type: 'point', filled: true, size: 200, opacity: 0.9 }, encoding: { x: { field: 'accuracy', type: 'quantitative' }, y: { field: 'precision', type: 'quantitative' }, color: { field: 'method', type: 'nominal', scale: activeMethodDomain, legend: null }, stroke: { condition: { test: 'datum.isBest', value: '#059669' }, value: '#ffffff' }, strokeWidth: { condition: { test: 'datum.isBest', value: 3 }, value: 1.5 }, tooltip: [{ field: 'method', type: 'nominal', title: 'Method' }, { field: 'accuracy', type: 'quantitative', title: '|Bias|', format: ',.1f' }, { field: 'precision', type: 'quantitative', title: 'RMSE', format: ',.1f' }, { field: 'composite', type: 'quantitative', title: 'Score', format: '.3f' }] } },
+        { data: { values: [{ x: 0, y: 0, x2: maxAccuracy * 0.5, y2: maxPrecision * 0.5 }] }, mark: { type: 'rect', opacity: isDark ? 0.10 : 0.06, color: isDark ? '#22c55e' : '#16a34a' }, encoding: { x: { field: 'x', type: 'quantitative', scale: { domain: [0, maxAccuracy * 1.15] }, title: '|Bias| (Accuracy)' }, x2: { field: 'x2' }, y: { field: 'y', type: 'quantitative', scale: { domain: [0, maxPrecision * 1.15] }, title: 'RMSE (Precision)' }, y2: { field: 'y2' } } },
+        { data: { values: [{ x: maxAccuracy * 0.5, y: maxPrecision * 0.5 }] }, mark: { type: 'rule', strokeDash: [4, 4], color: ruleColor, strokeWidth: 1 }, encoding: { x: { field: 'x', type: 'quantitative' } } },
+        { data: { values: [{ x: maxAccuracy * 0.5, y: maxPrecision * 0.5 }] }, mark: { type: 'rule', strokeDash: [4, 4], color: ruleColor, strokeWidth: 1 }, encoding: { y: { field: 'y', type: 'quantitative' } } },
+        { data: { values: [{ x: maxAccuracy * 0.02, y: maxPrecision * 0.02, label: 'Best' }, { x: maxAccuracy * 1.05, y: maxPrecision * 0.02, label: 'Biased' }, { x: maxAccuracy * 0.02, y: maxPrecision * 1.05, label: 'Noisy' }, { x: maxAccuracy * 1.05, y: maxPrecision * 1.05, label: 'Worst' }] }, mark: { type: 'text', fontSize: 10, fontWeight: 'bold', opacity: isDark ? 0.35 : 0.25, align: 'left', baseline: 'top' }, encoding: { x: { field: 'x', type: 'quantitative' }, y: { field: 'y', type: 'quantitative' }, text: { field: 'label', type: 'nominal' } } },
+        { data: { values: data }, mark: { type: 'point', filled: true, size: 200, opacity: 0.9 }, encoding: { x: { field: 'accuracy', type: 'quantitative' }, y: { field: 'precision', type: 'quantitative' }, color: { field: 'method', type: 'nominal', scale: activeMethodDomain, legend: null }, stroke: { condition: { test: 'datum.isBest', value: bestStroke }, value: pointStroke }, strokeWidth: { condition: { test: 'datum.isBest', value: 3 }, value: 1.5 }, tooltip: [{ field: 'method', type: 'nominal', title: 'Method' }, { field: 'accuracy', type: 'quantitative', title: '|Bias|', format: ',.1f' }, { field: 'precision', type: 'quantitative', title: 'RMSE', format: ',.1f' }, { field: 'composite', type: 'quantitative', title: 'Score', format: '.3f' }] } },
         { data: { values: data }, mark: { type: 'text', fontSize: 10, dy: -14, fontWeight: 500 }, encoding: { x: { field: 'accuracy', type: 'quantitative' }, y: { field: 'precision', type: 'quantitative' }, text: { field: 'method', type: 'nominal' }, color: { field: 'method', type: 'nominal', scale: activeMethodDomain, legend: null } } },
-        { data: { values: data.filter(d => d.isBest) }, mark: { type: 'text', fontSize: 16, dy: 1, dx: 18 }, encoding: { x: { field: 'accuracy', type: 'quantitative' }, y: { field: 'precision', type: 'quantitative' }, text: { value: '★' }, color: { value: '#059669' } } }
+        { data: { values: data.filter(d => d.isBest) }, mark: { type: 'text', fontSize: 16, dy: 1, dx: 18 }, encoding: { x: { field: 'accuracy', type: 'quantitative' }, y: { field: 'precision', type: 'quantitative' }, text: { value: '★' }, color: { value: bestStroke } } }
       ],
       config: vegaThemeConfig
     };
-  }, [activeMetrics, bestMethod, compositeRanking, activeMethodDomain]);
+  }, [activeMetrics, bestMethod, compositeRanking, activeMethodDomain, isDark, vegaThemeConfig]);
 
   const compositeScoreSpec = useMemo(() => {
     if (!compositeRanking || Object.keys(compositeRanking).length === 0) return null;
     const data = Object.entries(compositeRanking).map(([method, score]) => ({ method, score: score ?? 999, isBest: bestMethod?.best_method === method })).sort((a, b) => a.score - b.score);
-    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: Math.max(120, data.length * 36), autosize: { type: 'fit', contains: 'padding' }, data: { values: data }, mark: { type: 'bar', cornerRadiusEnd: 4 }, encoding: { y: { field: 'method', type: 'nominal', sort: { field: 'score', order: 'ascending' }, title: 'Method' }, x: { field: 'score', type: 'quantitative', title: 'Composite Score (lower is better)' }, color: { field: 'method', type: 'nominal', legend: null, scale: activeMethodDomain }, stroke: { condition: { test: 'datum.isBest', value: '#059669' }, value: null }, strokeWidth: { condition: { test: 'datum.isBest', value: 3 }, value: 0 }, tooltip: [{ field: 'method', type: 'nominal', title: 'Method' }, { field: 'score', type: 'quantitative', title: 'Composite Score', format: '.4f' }] } };
-  }, [compositeRanking, bestMethod, activeMethodDomain]);
+    const bestStroke = isDark ? '#34d399' : '#059669';
+    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: Math.max(120, data.length * 36), autosize: { type: 'fit', contains: 'padding' }, data: { values: data }, mark: { type: 'bar', cornerRadiusEnd: 4 }, encoding: { y: { field: 'method', type: 'nominal', sort: { field: 'score', order: 'ascending' }, title: 'Method' }, x: { field: 'score', type: 'quantitative', title: 'Composite Score (lower is better)' }, color: { field: 'method', type: 'nominal', legend: null, scale: activeMethodDomain }, stroke: { condition: { test: 'datum.isBest', value: bestStroke }, value: null }, strokeWidth: { condition: { test: 'datum.isBest', value: 3 }, value: 0 }, tooltip: [{ field: 'method', type: 'nominal', title: 'Method' }, { field: 'score', type: 'quantitative', title: 'Composite Score', format: '.4f' }] }, config: vegaThemeConfig };
+  }, [compositeRanking, bestMethod, activeMethodDomain, vegaThemeConfig, isDark]);
 
   const ridgePlotData = useMemo(() => {
     if (!distributions || !distributions.horizons || distributions.horizons.length === 0) return null;
@@ -1794,62 +2006,16 @@ export const TimeSeriesViewer = () => {
   const forecastDates = useMemo(() => {
     if (!activeHistoricalData || !activeHistoricalData.date || activeHistoricalData.date.length === 0 || horizonLength === 0) return [];
     const lastDate = new Date(activeHistoricalData.date[activeHistoricalData.date.length - 1]);
-    return Array.from({ length: horizonLength }, (_, i) => { const d = new Date(lastDate); d.setUTCMonth(d.getUTCMonth() + i + 1); return d.toISOString().slice(0, 7); });
-  }, [activeHistoricalData, horizonLength]);
+    // Use inferred daysPerPeriod so weekly data shows weekly dates, not monthly
+    return Array.from({ length: horizonLength }, (_, i) => {
+      const d = new Date(lastDate);
+      d.setDate(d.getDate() + Math.round(daysPerPeriod * (i + 1)));
+      // For weekly/daily show full date; for monthly+ show YYYY-MM
+      return daysPerPeriod < 20 ? d.toISOString().slice(0, 10) : d.toISOString().slice(0, 7);
+    });
+  }, [activeHistoricalData, horizonLength, daysPerPeriod]);
 
-  /* ---------- Dual-range zoom slider component ---------- */
-  const ZoomSlider = ({ dates, start, end, onStartChange, onEndChange }) => {
-    if (dates.length <= 1) return null;
-
-    // Find index of the closest date on or after the typed value
-    const findDateIdx = (dateStr) => {
-      if (!dateStr) return -1;
-      const idx = dates.findIndex(d => d >= dateStr);
-      return idx >= 0 ? idx : dates.length - 1;
-    };
-
-    return (
-      <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
-        <style>{`
-          .dual-range-container{position:relative;height:32px}
-          .dual-range-track{position:absolute;top:50%;left:0;right:0;height:6px;transform:translateY(-50%);background:#e5e7eb;border-radius:3px}
-          .dark .dual-range-track{background:#374151}
-          .dual-range-highlight{position:absolute;top:50%;height:6px;transform:translateY(-50%);background:#3b82f6;border-radius:3px}
-          .dual-range-input{position:absolute;top:0;left:0;width:100%;height:100%;-webkit-appearance:none;appearance:none;background:transparent;pointer-events:none;margin:0}
-          .dual-range-input::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;background:#3b82f6;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.3);cursor:pointer;pointer-events:auto}
-          .dual-range-input::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#3b82f6;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.3);cursor:pointer;pointer-events:auto}
-          .dual-range-input::-webkit-slider-runnable-track{height:0}
-          .dual-range-input::-moz-range-track{height:0;background:transparent}
-        `}</style>
-        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-          <span className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Zoom</span>
-          <input
-            type="date"
-            value={dates[start]?.slice(0, 10) || ''}
-            min={dates[0]?.slice(0, 10)}
-            max={dates[end]?.slice(0, 10)}
-            onChange={e => { const idx = findDateIdx(e.target.value); if (idx >= 0 && idx < end) onStartChange(idx); }}
-            className="text-xs font-mono bg-gray-100 dark:bg-gray-700 dark:text-gray-300 px-2 py-0.5 rounded border border-gray-200 dark:border-gray-600 w-[8.5rem]"
-          />
-          <div className="flex-1 min-w-32 dual-range-container">
-            <div className="dual-range-track" />
-            <div className="dual-range-highlight" style={{ left: `${(start / (dates.length - 1)) * 100}%`, right: `${100 - (end / (dates.length - 1)) * 100}%` }} />
-            <input type="range" min={0} max={dates.length - 1} value={start} onChange={e => { const v = parseInt(e.target.value); if (v < end) onStartChange(v); }} className="dual-range-input" style={{ zIndex: start > dates.length * 0.9 ? 5 : 3 }} />
-            <input type="range" min={0} max={dates.length - 1} value={end} onChange={e => { const v = parseInt(e.target.value); if (v > start) onEndChange(v); }} className="dual-range-input" style={{ zIndex: 4 }} />
-          </div>
-          <input
-            type="date"
-            value={dates[end]?.slice(0, 10) || ''}
-            min={dates[start]?.slice(0, 10)}
-            max={dates[dates.length - 1]?.slice(0, 10)}
-            onChange={e => { const idx = findDateIdx(e.target.value); if (idx >= 0 && idx > start) onEndChange(idx); }}
-            className="text-xs font-mono bg-gray-100 dark:bg-gray-700 dark:text-gray-300 px-2 py-0.5 rounded border border-gray-200 dark:border-gray-600 w-[8.5rem]"
-          />
-          <button onClick={() => { onStartChange(0); onEndChange(dates.length - 1); }} className="text-xs bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 dark:text-gray-200 px-2 py-1 rounded transition-colors">Reset</button>
-        </div>
-      </div>
-    );
-  };
+  /* ZoomSlider is defined at module level — see below TimeSeriesViewer */
 
   /* ---------- render ---------- */
   if (loading) return <div className="flex items-center justify-center h-64"><div className="animate-pulse text-xl text-gray-500 dark:text-gray-400">Loading time series...</div></div>;
@@ -1858,43 +2024,144 @@ export const TimeSeriesViewer = () => {
   return (
     <div className="p-4 sm:p-6">
 
-      {/* Item / Site Selector — sticky at top */}
-      <div id="tsv-selector" className="mb-6 bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900/50 p-4 sticky top-0 z-30">
-        <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 items-end">
-          <SearchableDropdown
-            label="Item"
-            values={selectedItems}
-            onChange={handleItemsChange}
-            options={allItems}
-            recentOptions={recentItems}
-            placeholder="Search item..."
-          />
-          <SearchableDropdown
-            label="Site"
-            values={selectedSites}
-            onChange={handleSitesChange}
-            options={availableSites}
-            recentOptions={recentSites.filter(s => availableSites.includes(s))}
-            disabled={selectedItems.length === 0 || availableSites.length === 0}
-            placeholder="Search site..."
-          />
+      {/* Item / Site Selector — sticky on desktop, static on mobile */}
+      <div id="tsv-selector" className="mb-6 bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900/50 sm:sticky sm:top-0 z-30">
+        {/* ── Desktop layout: single row ── */}
+        <div className="hidden sm:block p-4">
+          <div className="flex flex-row gap-4 items-end">
+            <SearchableDropdown
+              label="Item"
+              values={selectedItems}
+              onChange={handleItemsChange}
+              options={allItems}
+              recentOptions={recentItems}
+              placeholder="Search item..."
+            />
+            <SearchableDropdown
+              label="Site"
+              values={selectedSites}
+              onChange={handleSitesChange}
+              options={availableSites}
+              recentOptions={recentSites.filter(s => availableSites.includes(s))}
+              disabled={selectedItems.length === 0 || availableSites.length === 0}
+              placeholder="Search site..."
+            />
+            {/* Time aggregation granularity */}
+            <div className="flex flex-col gap-1 flex-shrink-0">
+              <label className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Aggregation</label>
+              <select
+                value={displayAgg}
+                onChange={e => setDisplayAgg(e.target.value)}
+                className="px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {AGG_OPTS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0 pb-0.5">
+              <button
+                onClick={handleRunForecast}
+                disabled={forecastUids.length === 0 || forecastJobStatus === 'running' || forecastJobStatus === 'pending'}
+                className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all whitespace-nowrap ${
+                  forecastUids.length === 0 || forecastJobStatus === 'running' || forecastJobStatus === 'pending'
+                    ? 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'
+                    : 'bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 shadow-sm'
+                }`}
+                title={forecastUids.length === 0
+                  ? 'Select at least one item and site'
+                  : `Run all forecast methods for ${forecastUids.length} series`}
+              >
+                {forecastJobStatus === 'running' || forecastJobStatus === 'pending' ? (
+                  <span className="flex items-center gap-1.5">
+                    <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                    </svg>
+                    Running...
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1.5">
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 3l14 9-14 9V3z"/>
+                    </svg>
+                    Run Forecast
+                  </span>
+                )}
+              </button>
+              {forecastJobStatus === 'success' && (
+                <span className="text-emerald-600 text-xs font-medium flex items-center gap-1 animate-fade-in">
+                  {'\u2713'} Done
+                </span>
+              )}
+              {forecastJobStatus === 'error' && (
+                <span className="text-red-600 text-xs font-medium flex items-center gap-1">
+                  {'\u2717'} Failed
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="mt-3 text-xs text-gray-400 dark:text-gray-500 flex flex-wrap gap-2 items-center">
+            {isMultiMode ? (
+              <>
+                <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded font-medium">
+                  Multi-series: {multiSeriesData?.uids?.length} series
+                </span>
+                <span className="text-gray-400 dark:text-gray-500">Demand &amp; Forecast = sum · Metrics = weighted average</span>
+                {multiLoading && <span className="text-blue-500 animate-pulse">Loading...</span>}
+              </>
+            ) : (selectedItem && selectedSite && (
+              <span>Current series: <span className="font-mono font-medium text-gray-600 dark:text-gray-300">{selectedItem}_{selectedSite}</span></span>
+            ))}
+          </div>
+        </div>
 
-          {/* Run Forecast button */}
-          <div className="flex items-center gap-2 flex-shrink-0 pb-0.5">
+        {/* ── Mobile layout: compact stacked ── */}
+        <div className="sm:hidden p-3">
+          <div className="space-y-2">
+            <SearchableDropdown
+              label="Item"
+              values={selectedItems}
+              onChange={handleItemsChange}
+              options={allItems}
+              recentOptions={recentItems}
+              placeholder="Search item..."
+            />
+            <SearchableDropdown
+              label="Site"
+              values={selectedSites}
+              onChange={handleSitesChange}
+              options={availableSites}
+              recentOptions={recentSites.filter(s => availableSites.includes(s))}
+              disabled={selectedItems.length === 0 || availableSites.length === 0}
+              placeholder="Search site..."
+            />
+            {/* Mobile time aggregation */}
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide whitespace-nowrap">Agg</label>
+              <select
+                value={displayAgg}
+                onChange={e => setDisplayAgg(e.target.value)}
+                className="flex-1 px-2 py-1.5 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {AGG_OPTS.map(o => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 mt-3">
             <button
               onClick={handleRunForecast}
               disabled={forecastUids.length === 0 || forecastJobStatus === 'running' || forecastJobStatus === 'pending'}
-              className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all whitespace-nowrap ${
+              className={`flex-1 px-3 py-2 rounded-lg text-sm font-semibold transition-all ${
                 forecastUids.length === 0 || forecastJobStatus === 'running' || forecastJobStatus === 'pending'
                   ? 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500 cursor-not-allowed'
                   : 'bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95 shadow-sm'
               }`}
-              title={forecastUids.length === 0
-                ? 'Select at least one item and site'
-                : `Run all forecast methods for ${forecastUids.length} series`}
             >
               {forecastJobStatus === 'running' || forecastJobStatus === 'pending' ? (
-                <span className="flex items-center gap-1.5">
+                <span className="flex items-center justify-center gap-1.5">
                   <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
@@ -1902,7 +2169,7 @@ export const TimeSeriesViewer = () => {
                   Running...
                 </span>
               ) : (
-                <span className="flex items-center gap-1.5">
+                <span className="flex items-center justify-center gap-1.5">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M5 3l14 9-14 9V3z"/>
                   </svg>
@@ -1910,32 +2177,26 @@ export const TimeSeriesViewer = () => {
                 </span>
               )}
             </button>
-
-            {/* Status badge */}
             {forecastJobStatus === 'success' && (
-              <span className="text-emerald-600 text-xs font-medium flex items-center gap-1 animate-fade-in">
-                &#10003; Done
-              </span>
+              <span className="text-emerald-600 text-xs font-medium">{'\u2713'} Done</span>
             )}
             {forecastJobStatus === 'error' && (
-              <span className="text-red-600 text-xs font-medium flex items-center gap-1">
-                &#10005; Failed
-              </span>
+              <span className="text-red-600 text-xs font-medium">{'\u2717'} Failed</span>
             )}
           </div>
-        </div>
-        <div className="mt-3 text-xs text-gray-400 dark:text-gray-500 flex flex-wrap gap-2 items-center">
-          {isMultiMode ? (
-            <>
+          {isMultiMode && (
+            <div className="mt-2 text-xs text-gray-400 dark:text-gray-500">
               <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded font-medium">
                 Multi-series: {multiSeriesData?.uids?.length} series
               </span>
-              <span className="text-gray-400 dark:text-gray-500">Demand &amp; Forecast = sum · Metrics = weighted average</span>
-              {multiLoading && <span className="text-blue-500 animate-pulse">Loading...</span>}
-            </>
-          ) : (selectedItem && selectedSite && (
-            <span>Current series: <span className="font-mono font-medium text-gray-600 dark:text-gray-300">{selectedItem}_{selectedSite}</span></span>
-          ))}
+              {multiLoading && <span className="ml-2 text-blue-500 animate-pulse">Loading...</span>}
+            </div>
+          )}
+          {!isMultiMode && selectedItem && selectedSite && (
+            <div className="mt-2 text-xs text-gray-400 dark:text-gray-500">
+              <span className="font-mono font-medium text-gray-600 dark:text-gray-300">{selectedItem}_{selectedSite}</span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -2024,7 +2285,7 @@ export const TimeSeriesViewer = () => {
 
         /* main_chart */
         sectionNodes['main_chart'] = (
-          <Section key="main_chart" id="tsv-main-chart" title={`Historical Data & Forecasts${horizonLength ? ` (${horizonLength}-month horizon)` : ''}`} storageKey="tsv_main_chart_open" {...dp('main_chart')}>
+          <Section key="main_chart" id="tsv-main-chart" title={`Historical Data & Forecasts${horizonLength ? ` (${horizonLength}-${periodLabel} horizon)` : ''}`} storageKey="tsv_main_chart_open" {...dp('main_chart')}>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">Shaded bands: 50% (dark) and 90% (light) prediction intervals.</p>
             {mainChartSpec ? (
               <div className="w-full overflow-x-auto"><VegaLite spec={mainChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
@@ -2088,13 +2349,21 @@ export const TimeSeriesViewer = () => {
             );
           };
 
-          const GaugeBar = ({ value, max = 1, color, bgColor = '#e5e7eb', height = 8 }) => {
+          const GaugeBar = ({ value, max = 1, color, bgColor, height = 8 }) => {
             const pct = Math.min(1, Math.max(0, value / max)) * 100;
+            const bg = bgColor || (isDark ? '#374151' : '#e5e7eb');
             return (
-              <div style={{ background: bgColor, borderRadius: 4, height, overflow: 'hidden', width: '100%' }}>
+              <div style={{ background: bg, borderRadius: 4, height, overflow: 'hidden', width: '100%' }}>
                 <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 4, transition: 'width 0.4s' }} />
               </div>
             );
+          };
+
+          // Map dark-hostile hex colors to lighter variants for dark mode
+          const darkSafe = (c) => {
+            if (!isDark || !c) return c;
+            const map = { '#111827': '#f3f4f6', '#374151': '#d1d5db', '#1e293b': '#e2e8f0', '#6b7280': '#9ca3af' };
+            return map[c.toLowerCase()] || c;
           };
 
           const StatCard = ({ label, value, sub, color, badge, badgeColor, gauge, gaugeMax, gaugeColor }) => (
@@ -2106,7 +2375,7 @@ export const TimeSeriesViewer = () => {
                 )}
               </div>
               <div className="flex items-baseline gap-1.5">
-                <span className="text-lg font-bold" style={{ color: color || (isDark ? '#f3f4f6' : '#111827') }}>{value}</span>
+                <span className="text-lg font-bold" style={{ color: darkSafe(color) || (isDark ? '#f3f4f6' : '#111827') }}>{value}</span>
                 {sub && <span className="text-xs text-gray-400 dark:text-gray-500">{sub}</span>}
               </div>
               {gauge !== undefined && (
