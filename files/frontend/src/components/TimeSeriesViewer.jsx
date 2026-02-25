@@ -173,16 +173,18 @@ const Section = ({
     <div
       id={id}
       className={`mb-6 bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900/50 transition-all ${isDragTarget ? 'ring-2 ring-blue-400 ring-offset-1' : ''}`}
-      draggable={!!dragId}
-      onDragStart={dragId ? (e) => { e.dataTransfer.effectAllowed = 'move'; onDragStart(dragId); } : undefined}
       onDragOver={dragId ? (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; onDragOver(dragId); } : undefined}
       onDrop={dragId ? (e) => { e.preventDefault(); onDrop(dragId); } : undefined}
-      onDragEnd={dragId ? onDragEnd : undefined}
     >
       <div className="flex items-center rounded-t-lg hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
-        {/* Drag handle */}
+        {/* Drag handle — draggable only on this icon, not the whole section,
+            so chart interactions (Plotly 3D rotate, zoom slider) aren't stolen
+            by the browser's HTML5 DnD system. */}
         {dragId && (
           <span
+            draggable
+            onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; onDragStart(dragId); }}
+            onDragEnd={onDragEnd}
             className="pl-3 pr-1 py-4 text-gray-300 dark:text-gray-600 hover:text-gray-500 dark:hover:text-gray-400 cursor-grab active:cursor-grabbing select-none text-lg flex-shrink-0"
             title="Drag to reorder"
           >
@@ -764,38 +766,80 @@ function ForecastTableWithAdjustments({
 }
 
 
-/* ---------- Dual-range zoom slider (module-level so React never remounts it mid-drag) ---------- */
+/* ---------- Dual-range zoom slider (fully custom — no overlapping native inputs) ----------
+ * Uses mouse/touch pointer-tracking on a single track div so Chrome can never
+ * confuse the two handles.  Each thumb fires its own independent mousedown/touchstart
+ * that attaches temporary document-level move+up listeners for the duration of the drag.
+ * ---------- */
 const ZoomSlider = ({ dates, start, end, onStartChange, onEndChange }) => {
-  const clampedEnd = Math.min(end, dates.length - 1);
+  const clampedEnd   = Math.min(end,   dates.length - 1);
   const clampedStart = Math.min(start, clampedEnd);
+
+  // Keep current boundary values available inside closure-captured event handlers
+  // without causing stale reads.
+  const startRef = useRef(clampedStart);
+  const endRef   = useRef(clampedEnd);
+  startRef.current = clampedStart;
+  endRef.current   = clampedEnd;
+
+  const trackRef = useRef(null);
 
   if (dates.length <= 1) return null;
 
-  const findDateIdx = (dateStr) => {
+  // ── Helpers ──────────────────────────────────────────────────────────
+  const pct = idx => (idx / (dates.length - 1)) * 100;
+
+  const idxFromClient = clientX => {
+    if (!trackRef.current) return 0;
+    const rect  = trackRef.current.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return Math.round(ratio * (dates.length - 1));
+  };
+
+  const findDateIdx = dateStr => {
     if (!dateStr) return -1;
     const idx = dates.findIndex(d => d >= dateStr);
     return idx >= 0 ? idx : dates.length - 1;
   };
 
-  // When start is near the end, raise its z-index so its thumb stays clickable
-  const startZ = clampedStart >= clampedEnd - 1 ? 5 : 3;
+  // ── Drag factory — one function per handle ────────────────────────────
+  const makeDragHandlers = handle => {
+    const onMove = ev => {
+      const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX;
+      const newIdx  = idxFromClient(clientX);
+      if (handle === 'start') {
+        if (newIdx < endRef.current) onStartChange(newIdx);
+      } else {
+        if (newIdx > startRef.current) onEndChange(newIdx);
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup',   onUp);
+      document.removeEventListener('touchmove', onMove);
+      document.removeEventListener('touchend',  onUp);
+    };
+    return ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup',   onUp);
+      document.addEventListener('touchmove', onMove, { passive: false });
+      document.addEventListener('touchend',  onUp);
+    };
+  };
+
+  const THUMB = 'absolute top-1/2 -translate-y-1/2 w-5 h-5 rounded-full ' +
+    'bg-blue-500 border-2 border-white shadow-md cursor-grab active:cursor-grabbing ' +
+    'touch-none select-none -translate-x-1/2 hover:bg-blue-600 active:bg-blue-700 ' +
+    'transition-colors z-10';
 
   return (
     <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700">
-      <style>{`
-        .dual-range-container{position:relative;height:32px;user-select:none}
-        .dual-range-track{position:absolute;top:50%;left:0;right:0;height:6px;transform:translateY(-50%);background:#e5e7eb;border-radius:3px}
-        .dark .dual-range-track{background:#374151}
-        .dual-range-highlight{position:absolute;top:50%;height:6px;transform:translateY(-50%);background:#3b82f6;border-radius:3px;pointer-events:none}
-        .dual-range-input{position:absolute;top:0;left:0;width:100%;height:100%;-webkit-appearance:none;appearance:none;background:transparent;pointer-events:none;margin:0;padding:0;cursor:pointer}
-        .dual-range-input::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:20px;height:20px;border-radius:50%;background:#3b82f6;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);cursor:grab;pointer-events:all}
-        .dual-range-input:active::-webkit-slider-thumb{cursor:grabbing;background:#2563eb}
-        .dual-range-input::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#3b82f6;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.35);cursor:grab;pointer-events:all}
-        .dual-range-input::-webkit-slider-runnable-track{height:0;background:transparent}
-        .dual-range-input::-moz-range-track{height:0;background:transparent}
-      `}</style>
       <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
         <span className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Zoom</span>
+
+        {/* Left date text input */}
         <input
           type="date"
           value={dates[clampedStart]?.slice(0, 10) || ''}
@@ -804,34 +848,29 @@ const ZoomSlider = ({ dates, start, end, onStartChange, onEndChange }) => {
           onChange={e => { const idx = findDateIdx(e.target.value); if (idx >= 0 && idx < clampedEnd) onStartChange(idx); }}
           className="text-xs font-mono bg-gray-100 dark:bg-gray-700 dark:text-gray-300 px-2 py-0.5 rounded border border-gray-200 dark:border-gray-600 w-[8.5rem]"
         />
-        <div className="flex-1 min-w-32 dual-range-container">
-          <div className="dual-range-track" />
-          <div
-            className="dual-range-highlight"
-            style={{
-              left: `${(clampedStart / (dates.length - 1)) * 100}%`,
-              right: `${100 - (clampedEnd / (dates.length - 1)) * 100}%`,
-            }}
-          />
-          <input
-            type="range"
-            min={0}
-            max={dates.length - 1}
-            value={clampedStart}
-            onChange={e => { const v = parseInt(e.target.value, 10); if (v < clampedEnd) onStartChange(v); }}
-            className="dual-range-input"
-            style={{ zIndex: startZ }}
-          />
-          <input
-            type="range"
-            min={0}
-            max={dates.length - 1}
-            value={clampedEnd}
-            onChange={e => { const v = parseInt(e.target.value, 10); if (v > clampedStart) onEndChange(v); }}
-            className="dual-range-input"
-            style={{ zIndex: 4 }}
-          />
+
+        {/* Track + thumbs */}
+        <div ref={trackRef}
+             className="relative flex-1 min-w-32 h-8 select-none">
+          {/* Background rail */}
+          <div className="absolute top-1/2 left-0 right-0 h-1.5 -translate-y-1/2
+                          bg-gray-200 dark:bg-gray-600 rounded-full" />
+          {/* Active range highlight */}
+          <div className="absolute top-1/2 h-1.5 -translate-y-1/2 bg-blue-500 rounded-full pointer-events-none"
+               style={{ left: `${pct(clampedStart)}%`, right: `${100 - pct(clampedEnd)}%` }} />
+          {/* Start thumb */}
+          <div className={THUMB}
+               style={{ left: `${pct(clampedStart)}%` }}
+               onMouseDown={makeDragHandlers('start')}
+               onTouchStart={makeDragHandlers('start')} />
+          {/* End thumb */}
+          <div className={THUMB}
+               style={{ left: `${pct(clampedEnd)}%` }}
+               onMouseDown={makeDragHandlers('end')}
+               onTouchStart={makeDragHandlers('end')} />
         </div>
+
+        {/* Right date text input */}
         <input
           type="date"
           value={dates[clampedEnd]?.slice(0, 10) || ''}
@@ -867,6 +906,12 @@ export const TimeSeriesViewer = () => {
   // Multi-series aggregated data (when more than 1 series selected)
   const [multiSeriesData, setMultiSeriesData] = useState(null); // null = use single-series mode
   const [multiLoading, setMultiLoading] = useState(false);
+
+  // ---- Segment filter ----
+  const [segments, setSegments] = useState([]);
+  const [selectedSegmentId, setSelectedSegmentId] = useState(null);
+  const [segmentMemberSet, setSegmentMemberSet] = useState(null); // null = no filter (All)
+  const [segmentLoading, setSegmentLoading] = useState(false);
 
   // ---- Time series data ----
   const [historicalData, setHistoricalData] = useState(null);
@@ -954,6 +999,38 @@ export const TimeSeriesViewer = () => {
       .catch(() => {});
   }, []);
 
+  // ---- Load segments (once) + auto-select the default ----
+  useEffect(() => {
+    axios.get(`${API_BASE_URL}/segments`)
+      .then(res => {
+        const segs = res.data || [];
+        setSegments(segs);
+        const def = segs.find(s => s.is_default) || segs[0];
+        if (def) setSelectedSegmentId(def.id);
+      })
+      .catch(() => {});
+  }, []);
+
+  // ---- Load segment members whenever selection changes ----
+  useEffect(() => {
+    if (!selectedSegmentId || segments.length === 0) return;
+    const seg = segments.find(s => s.id === selectedSegmentId);
+    if (!seg) return;
+    if (seg.is_default) {
+      // "All" segment — no filtering needed
+      setSegmentMemberSet(null);
+      return;
+    }
+    setSegmentLoading(true);
+    axios.get(`${API_BASE_URL}/segments/${selectedSegmentId}/members`, { params: { limit: 200000 } })
+      .then(res => {
+        const members = res.data.members || [];
+        setSegmentMemberSet(new Set(members));
+      })
+      .catch(() => setSegmentMemberSet(null))
+      .finally(() => setSegmentLoading(false));
+  }, [selectedSegmentId, segments]);
+
   // ---- Parse current uniqueId into item/site on mount ----
   useEffect(() => {
     const { item, site } = parseUniqueId(decodedId);
@@ -985,6 +1062,13 @@ export const TimeSeriesViewer = () => {
       const newId = `${selectedItems[0]}_${sites[0]}`;
       if (newId !== decodedId) navigate(`/series/${encodeURIComponent(newId)}`);
     }
+  };
+
+  const handleSegmentChange = (segId) => {
+    setSelectedSegmentId(segId);
+    setSelectedItems([]);
+    setSelectedSites([]);
+    setMultiSeriesData(null);
   };
 
   // ---- Trigger multi-series load when selection changes ----
@@ -1086,19 +1170,25 @@ export const TimeSeriesViewer = () => {
   }, [selectedItems, selectedSites]);
 
   // ---- Derived dropdown options ----
+  // filteredSeriesList: scoped to the active segment (null segmentMemberSet = All)
+  const filteredSeriesList = useMemo(() => {
+    if (!segmentMemberSet) return allSeriesList;
+    return allSeriesList.filter(s => segmentMemberSet.has(s.unique_id));
+  }, [allSeriesList, segmentMemberSet]);
+
   const allItems = useMemo(() => {
-    const items = [...new Set(allSeriesList.map(s => parseUniqueId(s.unique_id).item))];
+    const items = [...new Set(filteredSeriesList.map(s => parseUniqueId(s.unique_id).item))];
     return items.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  }, [allSeriesList]);
+  }, [filteredSeriesList]);
 
   const availableSites = useMemo(() => {
     if (selectedItems.length === 0) return [];
-    // Sites available for any of the selected items
-    const sites = allSeriesList
+    // Sites available for any of the selected items (within segment)
+    const sites = filteredSeriesList
       .filter(s => selectedItems.includes(parseUniqueId(s.unique_id).item))
       .map(s => parseUniqueId(s.unique_id).site);
     return [...new Set(sites)].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  }, [allSeriesList, selectedItems]);
+  }, [filteredSeriesList, selectedItems]);
 
   // Derive single item/site for single-series mode (backward compat)
   const selectedItem = selectedItems[0] || '';
@@ -2029,6 +2119,30 @@ export const TimeSeriesViewer = () => {
         {/* ── Desktop layout: single row ── */}
         <div className="hidden sm:block p-4">
           <div className="flex flex-row gap-4 items-end">
+            {/* Segment selector */}
+            <div className="flex flex-col gap-1 flex-shrink-0">
+              <label className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Segment</label>
+              <div className="relative">
+                <select
+                  value={selectedSegmentId || ''}
+                  onChange={e => handleSegmentChange(Number(e.target.value))}
+                  disabled={segments.length === 0}
+                  className="pl-3 pr-8 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500 disabled:opacity-50 appearance-none min-w-[9rem]"
+                >
+                  {segments.map(s => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+                {segmentLoading && (
+                  <span className="absolute right-2 top-1/2 -translate-y-1/2">
+                    <svg className="animate-spin w-3.5 h-3.5 text-violet-500" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                    </svg>
+                  </span>
+                )}
+              </div>
+            </div>
             <SearchableDropdown
               label="Item"
               values={selectedItems}
@@ -2102,6 +2216,15 @@ export const TimeSeriesViewer = () => {
             </div>
           </div>
           <div className="mt-3 text-xs text-gray-400 dark:text-gray-500 flex flex-wrap gap-2 items-center">
+            {/* Segment scope badge — only shown when non-default segment active */}
+            {segmentMemberSet && (() => {
+              const seg = segments.find(s => s.id === selectedSegmentId);
+              return seg ? (
+                <span className="bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 px-2 py-0.5 rounded font-medium">
+                  🗂️ {seg.name}: {filteredSeriesList.length} series
+                </span>
+              ) : null;
+            })()}
             {isMultiMode ? (
               <>
                 <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded font-medium">
@@ -2119,6 +2242,26 @@ export const TimeSeriesViewer = () => {
         {/* ── Mobile layout: compact stacked ── */}
         <div className="sm:hidden p-3">
           <div className="space-y-2">
+            {/* Segment selector (mobile) */}
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide whitespace-nowrap">Segment</label>
+              <select
+                value={selectedSegmentId || ''}
+                onChange={e => handleSegmentChange(Number(e.target.value))}
+                disabled={segments.length === 0}
+                className="flex-1 px-2 py-1.5 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500 disabled:opacity-50"
+              >
+                {segments.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+              {segmentLoading && (
+                <svg className="animate-spin w-4 h-4 text-violet-500 flex-shrink-0" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                </svg>
+              )}
+            </div>
             <SearchableDropdown
               label="Item"
               values={selectedItems}

@@ -142,11 +142,38 @@ def _load_forecasts_from_db(config_path: str):
     return df
 
 
-def run_single_step(step: str, config_path: str, data_path: str = None, output_dir: str = None):
+def _load_segment_series(segment_id: int, config_path: str):
+    """Query segment_membership for the given segment_id → return list of unique_ids."""
+    from db.db import get_conn, get_schema
+    conn = get_conn(config_path)
+    schema = get_schema(config_path)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT unique_id FROM {schema}.segment_membership WHERE segment_id = %s",
+                (segment_id,)
+            )
+            ids = [row[0] for row in cur.fetchall()]
+        return ids
+    finally:
+        conn.close()
+
+
+def run_single_step(step: str, config_path: str, data_path: str = None,
+                    output_dir: str = None, segment_id: int = None):
     """Run a single pipeline step, loading inputs from PostgreSQL (or optional file override)."""
     orchestrator = ForecastOrchestrator(config_path)
 
     import pandas as pd
+
+    if step == 'segmentation':
+        from segmentation.segmentation import SegmentationEngine
+        engine = SegmentationEngine(config_path)
+        results = engine.run_all()
+        for seg_name, count in results.items():
+            print(f"  '{seg_name}': {count} series assigned")
+        print(f"Segmentation complete: {len(results)} segments processed")
+        return
 
     if step == 'etl':
         df = orchestrator.step_etl()
@@ -158,6 +185,10 @@ def run_single_step(step: str, config_path: str, data_path: str = None, output_d
         else:
             print("Loading demand data from PostgreSQL (original qty)...")
             df = _load_demand_from_db(config_path, use_corrected=False)
+        if segment_id is not None:
+            series_filter = _load_segment_series(segment_id, config_path)
+            df = df[df['unique_id'].isin(series_filter)]
+            print(f"  Segment filter applied: {len(series_filter)} series")
         corrected_df, outliers_df = orchestrator.step_outlier_detection(df)
         n_adjusted = outliers_df['unique_id'].nunique() if not outliers_df.empty else 0
         print(f"Outlier detection complete: {len(outliers_df)} outliers in {n_adjusted} series")
@@ -168,6 +199,10 @@ def run_single_step(step: str, config_path: str, data_path: str = None, output_d
         else:
             print("Loading demand data from PostgreSQL (corrected)...")
             df = _load_demand_from_db(config_path, use_corrected=True)
+        if segment_id is not None:
+            series_filter = _load_segment_series(segment_id, config_path)
+            df = df[df['unique_id'].isin(series_filter)]
+            print(f"  Segment filter applied: {len(series_filter)} series")
         chars_df = orchestrator.step_characterize(df)
         print(f"Characterization complete: {len(chars_df)} series analyzed")
 
@@ -179,6 +214,11 @@ def run_single_step(step: str, config_path: str, data_path: str = None, output_d
             df = _load_demand_from_db(config_path, use_corrected=True)
         print("Loading characteristics from PostgreSQL...")
         chars_df = _load_characteristics_from_db(config_path)
+        if segment_id is not None:
+            series_filter = _load_segment_series(segment_id, config_path)
+            df = df[df['unique_id'].isin(series_filter)]
+            chars_df = chars_df[chars_df['unique_id'].isin(series_filter)]
+            print(f"  Segment filter applied: {len(series_filter)} series")
         # Start Dask for parallel batch processing (mirrors run_complete_pipeline behaviour)
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
@@ -198,6 +238,11 @@ def run_single_step(step: str, config_path: str, data_path: str = None, output_d
             df = _load_demand_from_db(config_path, use_corrected=True)
         print("Loading characteristics from PostgreSQL...")
         chars_df = _load_characteristics_from_db(config_path)
+        if segment_id is not None:
+            series_filter = _load_segment_series(segment_id, config_path)
+            df = df[df['unique_id'].isin(series_filter)]
+            chars_df = chars_df[chars_df['unique_id'].isin(series_filter)]
+            print(f"  Segment filter applied: {len(series_filter)} series")
         # Start Dask for parallel backtesting (mirrors forecast step behaviour)
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
@@ -270,6 +315,7 @@ Examples:
     # Step control
     parser.add_argument('--skip-etl', action='store_true', help='Skip ETL step')
     parser.add_argument('--skip-outlier-detection', action='store_true', help='Skip outlier detection step')
+    parser.add_argument('--skip-segmentation', action='store_true', help='Skip segmentation step')
     parser.add_argument('--skip-characterization', action='store_true', help='Skip characterization step')
     parser.add_argument('--skip-forecasting', action='store_true', help='Skip forecasting step')
     parser.add_argument('--skip-backtest', action='store_true', help='Skip backtesting step')
@@ -279,8 +325,15 @@ Examples:
     # Single step mode
     parser.add_argument(
         '--only', type=str, default=None,
-        choices=['etl', 'outlier-detection', 'characterize', 'forecast', 'backtest', 'best-method', 'distributions'],
+        choices=['etl', 'outlier-detection', 'segmentation', 'characterize',
+                 'forecast', 'backtest', 'best-method', 'distributions'],
         help='Run only a single step'
+    )
+
+    # Segment scoping
+    parser.add_argument(
+        '--segment-id', type=int, default=None,
+        help='Scope step to only series belonging to this segment (by segment.id)'
     )
 
     # Schema discovery
@@ -325,7 +378,8 @@ Examples:
     # Single step mode
     if args.only:
         logger.info(f"Running single step: {args.only}")
-        run_single_step(args.only, args.config, args.data, args.output)
+        run_single_step(args.only, args.config, args.data, args.output,
+                        segment_id=args.segment_id)
         return
 
     # Full pipeline
@@ -339,6 +393,7 @@ Examples:
         output_dir=args.output,
         skip_etl=args.skip_etl,
         skip_outlier_detection=args.skip_outlier_detection,
+        skip_segmentation=args.skip_segmentation,
         skip_characterization=args.skip_characterization,
         skip_forecasting=args.skip_forecasting,
         skip_backtest=args.skip_backtest,

@@ -2098,6 +2098,8 @@ def _cleanup_stale_jobs():
 PIPELINE_STEPS = {
     "etl":               {"label": "ETL",               "arg": "etl",               "desc": "Extract data from the source database into demand_actuals"},
     "outlier-detection": {"label": "Outlier Detection",  "arg": "outlier-detection", "desc": "Detect and correct outliers in the time series"},
+    "segmentation":      {"label": "Segmentation",       "arg": "segmentation",      "desc": "Compute ABC classification and assign series to segments"},
+    "characterization":  {"label": "Characterization",   "arg": "characterize",      "desc": "Analyze time series characteristics (seasonality, trend, complexity)"},
     "forecast":          {"label": "Forecast",           "arg": "forecast",          "desc": "Run all forecasting models (statistical, ML, neural, foundation)"},
     "backtest":          {"label": "Backtest",           "arg": "backtest",          "desc": "Rolling-window backtesting and metric computation"},
     "best-method":       {"label": "Best Method",        "arg": "best-method",       "desc": "Select the best method per series using composite scoring"},
@@ -2105,7 +2107,10 @@ PIPELINE_STEPS = {
 }
 
 
-PIPELINE_STEP_ORDER = ["etl", "outlier-detection", "forecast", "backtest", "best-method", "distributions"]
+PIPELINE_STEP_ORDER = [
+    "etl", "outlier-detection", "segmentation",
+    "characterization", "forecast", "backtest", "best-method", "distributions"
+]
 
 
 def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = None):
@@ -2283,9 +2288,17 @@ async def get_pipeline_steps():
     return [{"id": k, **v} for k, v in PIPELINE_STEPS.items()]
 
 
+class RunStepRequest(BaseModel):
+    segment_id: Optional[int] = None
+
+
 @app.post("/api/pipeline/run/{step}")
-async def run_pipeline_step(step: str):
-    """Launch a pipeline step as a background subprocess. Returns a job_id."""
+async def run_pipeline_step(step: str, body: RunStepRequest = Body(default=RunStepRequest())):
+    """Launch a pipeline step as a background subprocess. Returns a job_id.
+
+    Optional body: { "segment_id": <int> } to scope forecast/backtest/characterization
+    to a specific segment.
+    """
     if step not in PIPELINE_STEPS:
         raise HTTPException(status_code=400, detail=f"Unknown step '{step}'. Valid: {list(PIPELINE_STEPS)}")
 
@@ -2296,21 +2309,34 @@ async def run_pipeline_step(step: str):
             if job.get("step") == step and job.get("status") == "running":
                 raise HTTPException(status_code=409, detail=f"Step '{step}' is already running (job {job['job_id']})")
 
+    extra_args = []
+    if body.segment_id is not None:
+        extra_args = ["--segment-id", str(body.segment_id)]
+
     job_id = str(uuid.uuid4())[:8]
+    step_label = PIPELINE_STEPS[step]["label"]
+    if body.segment_id is not None:
+        step_label = f"{step_label} (segment {body.segment_id})"
+
     with _pipeline_lock:
         _pipeline_jobs[job_id] = {
             "job_id": job_id,
             "step": step,
-            "step_label": PIPELINE_STEPS[step]["label"],
+            "step_label": step_label,
             "status": "pending",
             "log_lines": [],
             "started_at": None,
             "ended_at": None,
             "pid": None,
             "exit_code": None,
+            "segment_id": body.segment_id,
         }
 
-    t = threading.Thread(target=_run_pipeline_step_thread, args=(job_id, PIPELINE_STEPS[step]["arg"]), daemon=True)
+    t = threading.Thread(
+        target=_run_pipeline_step_thread,
+        args=(job_id, PIPELINE_STEPS[step]["arg"], extra_args),
+        daemon=True,
+    )
     t.start()
 
     return {"job_id": job_id, "step": step, "status": "pending"}
@@ -2775,6 +2801,284 @@ async def get_step_log_tail(step_id: int):
             "status": row[2],
             "log_tail": row[3] or "",
         }
+    finally:
+        conn.close()
+
+
+# ===========================================================================
+# SEGMENTS endpoints
+# ===========================================================================
+
+class SegmentIn(BaseModel):
+    name: str
+    description: Optional[str] = None
+    criteria: Optional[Dict[str, Any]] = None  # {} = match all
+
+
+def _segment_row_to_dict(row: tuple, cols: list) -> dict:
+    entry = dict(zip(cols, row))
+    for k in ("created_at", "updated_at"):
+        if entry.get(k) is not None:
+            entry[k] = entry[k].isoformat()
+    # criteria may be a dict (psycopg2 with extras) or a JSON string
+    if isinstance(entry.get("criteria"), str):
+        try:
+            entry["criteria"] = json.loads(entry["criteria"])
+        except Exception:
+            entry["criteria"] = {}
+    if entry.get("criteria") is None:
+        entry["criteria"] = {}
+    return entry
+
+
+@app.get("/api/segments")
+async def list_segments():
+    """Return all segments with member counts."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT s.id, s.name, s.description, s.criteria, s.is_default,
+                       s.created_at, s.updated_at,
+                       COUNT(sm.id) AS member_count
+                FROM {schema}.segment s
+                LEFT JOIN {schema}.segment_membership sm ON sm.segment_id = s.id
+                GROUP BY s.id
+                ORDER BY s.id
+                """
+            )
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        return [_segment_row_to_dict(r, cols) for r in rows]
+    except Exception as exc:
+        logger.error(f"list_segments failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/segments")
+async def create_segment(body: SegmentIn):
+    """Create a new segment."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        criteria_json = json.dumps(body.criteria or {})
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {schema}.segment (name, description, criteria)
+                VALUES (%s, %s, %s::jsonb)
+                RETURNING id, name, description, criteria, is_default, created_at, updated_at
+                """,
+                (body.name, body.description, criteria_json),
+            )
+            cols = [d[0] for d in cur.description]
+            row = cur.fetchone()
+        conn.commit()
+        return _segment_row_to_dict(row, cols)
+    except Exception as exc:
+        conn.rollback()
+        logger.error(f"create_segment failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.put("/api/segments/{segment_id}")
+async def update_segment(segment_id: int, body: SegmentIn):
+    """Update an existing segment (cannot update the default 'All' segment)."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        # Check if default
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT is_default FROM {schema}.segment WHERE id = %s", (segment_id,))
+            row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+        if row[0]:
+            raise HTTPException(status_code=400, detail="Cannot modify the default 'All' segment")
+
+        criteria_json = json.dumps(body.criteria or {})
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE {schema}.segment
+                   SET name = %s, description = %s, criteria = %s::jsonb, updated_at = NOW()
+                 WHERE id = %s
+                RETURNING id, name, description, criteria, is_default, created_at, updated_at
+                """,
+                (body.name, body.description, criteria_json, segment_id),
+            )
+            cols = [d[0] for d in cur.description]
+            updated = cur.fetchone()
+        conn.commit()
+        return _segment_row_to_dict(updated, cols)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        logger.error(f"update_segment failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/segments/{segment_id}")
+async def delete_segment(segment_id: int):
+    """Delete a segment (cannot delete the default 'All' segment)."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT is_default FROM {schema}.segment WHERE id = %s", (segment_id,))
+            row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+        if row[0]:
+            raise HTTPException(status_code=400, detail="Cannot delete the default 'All' segment")
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {schema}.segment WHERE id = %s", (segment_id,))
+        conn.commit()
+        return {"status": "ok", "deleted": segment_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        logger.error(f"delete_segment failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/segments/{segment_id}/members")
+async def get_segment_members(segment_id: int):
+    """Return all unique_ids in this segment."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT unique_id FROM {schema}.segment_membership WHERE segment_id = %s ORDER BY unique_id",
+                (segment_id,),
+            )
+            members = [r[0] for r in cur.fetchall()]
+        return {"segment_id": segment_id, "members": members, "total": len(members)}
+    except Exception as exc:
+        logger.error(f"get_segment_members failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/segments/{segment_id}/preview")
+async def preview_segment(segment_id: int):
+    """Dry-run: evaluate segment criteria and return match count + sample."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT criteria FROM {schema}.segment WHERE id = %s", (segment_id,)
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+        criteria = row[0] or {}
+        if isinstance(criteria, str):
+            criteria = json.loads(criteria)
+    finally:
+        conn.close()
+
+    try:
+        from segmentation.segmentation import SegmentationEngine
+        engine = SegmentationEngine(_api_config_path())
+        matched = engine.evaluate_criteria(criteria)
+        return {"count": len(matched), "sample": matched[:20]}
+    except Exception as exc:
+        logger.error(f"preview_segment failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/segments/{segment_id}/assign")
+async def assign_segment(segment_id: int):
+    """Re-evaluate criteria and repopulate membership for this segment."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT criteria, is_default FROM {schema}.segment WHERE id = %s", (segment_id,)
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+        criteria, is_default = row
+        if isinstance(criteria, str):
+            criteria = json.loads(criteria)
+    finally:
+        conn.close()
+
+    try:
+        from segmentation.segmentation import SegmentationEngine
+        engine = SegmentationEngine(_api_config_path())
+        if is_default:
+            # Fast path: assign all series
+            seg_schema = get_schema(_api_config_path())
+            count = engine._assign_all_series(segment_id, seg_schema)
+        else:
+            count = engine.assign_segment(segment_id, criteria or {})
+        return {"segment_id": segment_id, "assigned": count}
+    except Exception as exc:
+        logger.error(f"assign_segment failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/segments/fields")
+async def get_segment_fields():
+    """
+    Return dynamic attribute key lists for item and site tables.
+    Used by the criteria builder to populate the field selector.
+    """
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT DISTINCT jsonb_object_keys(attributes)
+                FROM {schema}.item
+                WHERE attributes IS NOT NULL
+                ORDER BY 1
+                """
+            )
+            item_attrs = [r[0] for r in cur.fetchall()]
+
+            cur.execute(
+                f"""
+                SELECT DISTINCT jsonb_object_keys(attributes)
+                FROM {schema}.site
+                WHERE attributes IS NOT NULL
+                ORDER BY 1
+                """
+            )
+            site_attrs = [r[0] for r in cur.fetchall()]
+
+        return {"item": item_attrs, "site": site_attrs}
+    except Exception as exc:
+        logger.error(f"get_segment_fields failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
     finally:
         conn.close()
 

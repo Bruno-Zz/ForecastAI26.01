@@ -99,7 +99,8 @@
       "Bash(Copy-Item -Path \"C:\\\\allDev\\\\ForecastAI2026.01\\\\.claude\\\\.claude\\\\worktrees\\\\beautiful-mcnulty\\\\files\\\\etl\\\\etl.py\" -Destination \"C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\etl\\\\etl.py\" -Force)",
       "Bash(Write-Host \"etl.py copied\")",
       "Bash(npx --no-install vite build)",
-      "Bash(Copy-Item -Path \"C:\\\\allDev\\\\ForecastAI2026.01\\\\.claude\\\\.claude\\\\worktrees\\\\beautiful-mcnulty\\\\files\\\\utils\\\\orchestrator.py\" -Destination \"C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\utils\\\\orchestrator.py\" -Force)"
+      "Bash(Copy-Item -Path \"C:\\\\allDev\\\\ForecastAI2026.01\\\\.claude\\\\.claude\\\\worktrees\\\\beautiful-mcnulty\\\\files\\\\utils\\\\orchestrator.py\" -Destination \"C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\utils\\\\orchestrator.py\" -Force)",
+      "Bash(test:*)"
     ]
   }
 }

@@ -484,6 +484,24 @@ class ForecastOrchestrator:
 
         return corrected_df, outliers_df
 
+    def step_segmentation(self) -> Dict[str, int]:
+        """
+        Step 1c: Compute ABC classification and assign series to all segments.
+
+        Returns:
+            Dict mapping segment_name → count of assigned series
+        """
+        self.logger.info("=" * 80)
+        self.logger.info("STEP 1c: Segmentation — ABC Classification + Segment Assignment")
+        self.logger.info("=" * 80)
+
+        from segmentation.segmentation import SegmentationEngine
+        engine = SegmentationEngine(self.config_path)
+        results = engine.run_all()
+        for seg_name, count in results.items():
+            self.logger.info(f"  '{seg_name}': {count} series")
+        return results
+
     def step_characterize(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Step 2: Analyze time series characteristics.
@@ -925,6 +943,7 @@ class ForecastOrchestrator:
                               output_dir: Optional[str] = None,
                               skip_etl: bool = False,
                               skip_outlier_detection: bool = False,
+                              skip_segmentation: bool = False,
                               skip_characterization: bool = False,
                               skip_forecasting: bool = False,
                               skip_backtest: bool = False,
@@ -1006,6 +1025,13 @@ class ForecastOrchestrator:
                 output_paths['time_series_corrected'] = 'PostgreSQL: demand_actuals.corrected_qty'
             else:
                 self.logger.info("Skipping outlier detection")
+
+            # Step 1c: Segmentation
+            if not skip_segmentation:
+                self._run_step(pl, "segmentation", self.step_segmentation)
+                output_paths['segmentation'] = 'PostgreSQL: segment_membership'
+            else:
+                self.logger.info("Skipping segmentation step")
 
             # Step 2: Characterization
             if skip_characterization and characteristics_path:

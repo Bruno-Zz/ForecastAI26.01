@@ -5,6 +5,7 @@ import TimeSeriesViewer from './components/TimeSeriesViewer';
 import PipelineRunner from './components/PipelineRunner';
 import ProcessLog from './components/ProcessLog';
 import Settings from './components/Settings';
+import Segments from './components/Segments';
 import ThemeToggle from './components/ThemeToggle';
 import { useTour } from './tour/useTour';
 
@@ -74,6 +75,7 @@ function Sidebar({ open, onToggle, onStartTour }) {
           ? navLink(`/series/${encodeURIComponent(lastSeries)}`, '📈', `Series: ${lastSeries}`)
           : navLink('/', '📈', 'Time Series', true)
         }
+        {navLink('/segments', '🗂️', 'Segments')}
         {navLink('/pipeline', '⚙️', 'Pipeline')}
         {navLink('/logs', '📋', 'Process Log')}
         {navLink('/settings', '🔧', 'Settings')}
@@ -166,6 +168,7 @@ function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/series/:uniqueId" element={<TimeSeriesViewer />} />
+            <Route path="/segments" element={<Segments />} />
             <Route path="/pipeline" element={<PipelineRunner />} />
             <Route path="/logs" element={<ProcessLog />} />
             <Route path="/settings" element={<Settings />} />

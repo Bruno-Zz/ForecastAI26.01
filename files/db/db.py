@@ -340,6 +340,32 @@ def init_schema(config_path: Union[str, Path]) -> None:
     CREATE INDEX IF NOT EXISTS idx_hypoverrides_uid
         ON {schema}.hyperparameter_overrides (unique_id);
 
+    -- ─── Segments ────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS {schema}.segment (
+        id          SERIAL PRIMARY KEY,
+        name        TEXT NOT NULL UNIQUE,
+        description TEXT,
+        criteria    JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+        is_default  BOOLEAN DEFAULT FALSE,
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS {schema}.segment_membership (
+        id          SERIAL PRIMARY KEY,
+        segment_id  INTEGER NOT NULL REFERENCES {schema}.segment(id) ON DELETE CASCADE,
+        unique_id   TEXT NOT NULL,
+        item_id     BIGINT,
+        site_id     BIGINT,
+        assigned_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (segment_id, unique_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_seg_membership_seg
+        ON {schema}.segment_membership (segment_id);
+    CREATE INDEX IF NOT EXISTS idx_seg_membership_uid
+        ON {schema}.segment_membership (unique_id);
+
     -- ─── Process log (pipeline run tracking) ─────────────────────────
 
     CREATE TABLE IF NOT EXISTS {schema}.process_log (
@@ -488,6 +514,21 @@ def init_schema(config_path: Union[str, Path]) -> None:
             END IF;
         END $$;
         """,
+        # time_series_characteristics — abc_class
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'time_series_characteristics'
+                  AND column_name = 'abc_class'
+            ) THEN
+                ALTER TABLE {schema}.time_series_characteristics
+                    ADD COLUMN abc_class TEXT;
+            END IF;
+        END $$;
+        """,
     ]
 
     conn = get_conn(config_path)
@@ -496,6 +537,12 @@ def init_schema(config_path: Union[str, Path]) -> None:
             cur.execute(ddl)
             for stmt in alter_stmts:
                 cur.execute(stmt)
+            # Seed the default "All" segment (matches every series)
+            cur.execute(f"""
+                INSERT INTO {schema}.segment (name, description, criteria, is_default)
+                VALUES ('All', 'All item/site combinations', '{{}}'::jsonb, TRUE)
+                ON CONFLICT (name) DO NOTHING
+            """)
         conn.commit()
         logger.info(f"Schema '{schema}' and tables initialised")
     except Exception:
