@@ -20,6 +20,7 @@ import yaml
 from pathlib import Path
 import time
 from datetime import datetime
+from tqdm import tqdm
 
 try:
     from dask.distributed import Client, as_completed
@@ -682,6 +683,7 @@ class ForecastOrchestrator:
             results = []
             completed_series = 0
             completed_batches = 0
+            pbar = tqdm(total=n_batches, desc="  Forecasting (parallel)", unit="batch")
             for future in as_completed(futures):
                 completed_batches += 1
                 try:
@@ -697,10 +699,13 @@ class ForecastOrchestrator:
                 except Exception as e:
                     self.logger.error(f"Batch failed: {e}")
                     completed_series = min(completed_batches * batch_size, n_series)
+                pbar.update(1)
+                pbar.set_postfix_str(f"{completed_series}/{n_series} series", refresh=False)
                 self.logger.info(
                     f"[FORECAST_PROGRESS] completed={completed_series} total={n_series} "
                     f"batches_done={completed_batches} batches_total={n_batches}"
                 )
+            pbar.close()
 
             forecasts_df = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
             self.logger.info(f"Generated {len(forecasts_df)} forecasts across {n_batches} batches")
@@ -793,6 +798,7 @@ class ForecastOrchestrator:
 
             completed_series = 0
             completed_batches = 0
+            pbar = tqdm(total=n_batches, desc="  Backtesting (parallel)", unit="batch")
             for future in as_completed(futures):
                 completed_batches += 1
                 try:
@@ -804,10 +810,13 @@ class ForecastOrchestrator:
                         all_origin_forecasts.append(origin_forecasts)
                 except Exception as e:
                     self.logger.warning(f"Backtest batch failed: {e}")
+                pbar.update(1)
+                pbar.set_postfix_str(f"{completed_series}/{n_series} series", refresh=False)
                 self.logger.info(
                     f"[BACKTEST_PROGRESS] completed={completed_series} total={n_series} "
                     f"batches_done={completed_batches} batches_total={n_batches}"
                 )
+            pbar.close()
 
             self.logger.info(f"Backtest complete: {completed_series}/{n_series} series processed")
 
@@ -815,8 +824,9 @@ class ForecastOrchestrator:
             # ---- Serial fallback ----
             self.logger.info(f"Running serial backtesting ({n_series} series)...")
             self.logger.info(f"[BACKTEST_PROGRESS] completed=0 total={n_series}")
-            for idx, (unique_id, series_slice, methods, chars_dict) in enumerate(work_items):
-                self.logger.info(f"Backtesting [{idx+1}/{n_series}]: {unique_id} with {methods}")
+            pbar = tqdm(enumerate(work_items), total=n_series, desc="  Backtesting", unit="series")
+            for idx, (unique_id, series_slice, methods, chars_dict) in pbar:
+                pbar.set_postfix_str(unique_id, refresh=False)
                 try:
                     if hasattr(self.evaluator, 'backtest_series_with_forecasts'):
                         metrics, origin_forecasts = self.evaluator.backtest_series_with_forecasts(
@@ -865,8 +875,7 @@ class ForecastOrchestrator:
                 raise
 
             summary = metrics_df.groupby('method')[['mae', 'rmse']].mean()
-            self.logger.info(f"Backtest summary by method:
-{summary}")
+            self.logger.info(f"Backtest summary by method:\n{summary}")
 
         if not origin_df.empty:
             try:

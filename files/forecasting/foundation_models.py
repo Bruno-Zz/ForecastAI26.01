@@ -10,6 +10,7 @@ import logging
 import yaml
 from pathlib import Path
 import time
+from tqdm import tqdm
 
 # TimesFM imports
 try:
@@ -198,9 +199,12 @@ class FoundationForecaster:
         
         self.logger.info(f"Generating TimesFM forecasts for {len(characteristics_df)} series")
         
-        for _, char_row in characteristics_df.iterrows():
+        for _, char_row in tqdm(characteristics_df.iterrows(),
+                                total=len(characteristics_df),
+                                desc="  Foundation forecasting",
+                                unit="series"):
             unique_id = char_row['unique_id']
-            
+
             # Get series data
             series_data = df[df['unique_id'] == unique_id].sort_values('date')
             series = series_data['y'].values

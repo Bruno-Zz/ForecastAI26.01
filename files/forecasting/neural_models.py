@@ -10,6 +10,7 @@ import logging
 import yaml
 from pathlib import Path
 import time
+from tqdm import tqdm
 
 # Nixtla NeuralForecast imports
 try:
@@ -341,9 +342,12 @@ class NeuralForecaster:
         
         self.logger.info(f"Generating neural forecasts for {len(valid_chars)} series")
         
-        for _, char_row in valid_chars.iterrows():
+        for _, char_row in tqdm(valid_chars.iterrows(),
+                                total=len(valid_chars),
+                                desc="  Neural forecasting",
+                                unit="series"):
             unique_id = char_row['unique_id']
-            
+
             # Get neural methods from recommended
             all_methods = char_row['recommended_methods']
             neural_methods = [m for m in all_methods if m in ['NHITS', 'NBEATS', 'PatchTST', 'TFT', 'DeepAR']]

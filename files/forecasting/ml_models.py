@@ -12,6 +12,7 @@ import yaml
 from pathlib import Path
 import time
 import warnings
+from tqdm import tqdm
 
 # LightGBM import
 try:
@@ -617,7 +618,10 @@ class MLForecaster:
             f"< {self.MIN_OBSERVATIONS} observations)"
         )
 
-        for _, char_row in valid_chars.iterrows():
+        for _, char_row in tqdm(valid_chars.iterrows(),
+                                total=len(valid_chars),
+                                desc="  ML forecasting",
+                                unit="series"):
             unique_id = char_row['unique_id']
 
             # Extract ML methods from recommended methods

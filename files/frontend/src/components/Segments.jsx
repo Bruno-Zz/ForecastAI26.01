@@ -428,7 +428,7 @@ function EditModal({ segment, onSave, onClose, allFields }) {
           <h2 className="text-lg font-semibold dark:text-white">
             {isNew ? 'New Segment' : `Edit Segment: ${segment.name}`}
           </h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
+          <button onClick={onClose} className="text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 text-xl">✕</button>
         </div>
 
         <div className="p-5 space-y-4 flex-1">

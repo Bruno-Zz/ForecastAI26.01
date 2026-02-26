@@ -260,7 +260,7 @@ const SearchableDropdown = ({ label, values = [], onChange, options, recentOptio
         />
         {values.length > 0 && !open && (
           <button onClick={e => { e.stopPropagation(); onChange([]); setSearch(''); }}
-            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 flex-shrink-0 text-xs">✕</button>
+            className="text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 flex-shrink-0 text-xs">✕</button>
         )}
         {values.length > 1 && (
           <span className="text-xs bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-1.5 py-0.5 rounded-full font-semibold flex-shrink-0">{values.length}</span>
@@ -686,7 +686,7 @@ function ForecastTableWithAdjustments({
 
       {/* Legend */}
       {!isMultiMode && (
-        <div className="flex items-center gap-4 mt-2 text-xs text-gray-400 flex-wrap">
+        <div className="flex items-center gap-4 mt-2 text-xs text-gray-400 dark:text-gray-500 flex-wrap">
           <span className="flex items-center gap-1">
             <span className="inline-block w-2.5 h-2.5 rounded-full bg-indigo-500" />
             Consensus: final value (model + adjustments/overrides)
@@ -1704,7 +1704,7 @@ export const TimeSeriesViewer = () => {
     if (hasBars) {
       layers.push({
         transform: [{ filter: "datum.layer === 'bar'" }],
-        mark: { type: 'bar', tooltip: true, color: '#374151', opacity: 0.55 },
+        mark: { type: 'bar', tooltip: true, color: isDark ? '#9ca3af' : '#374151', opacity: 0.55 },
         encoding: {
           x: { field: 'date', type: 'temporal', title: 'Date',
                axis: { format: axisDateFmt, labelAngle: -30 } },
@@ -1808,7 +1808,7 @@ export const TimeSeriesViewer = () => {
     }
 
     return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: 380, autosize: { type: 'fit', contains: 'padding' }, data: { values: filtered }, layer: layers, config: vegaThemeConfig };
-  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, bandVisibleMethods, activeMethodDomain, daysPerPeriod, vegaThemeConfig]);
+  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, bandVisibleMethods, activeMethodDomain, daysPerPeriod, vegaThemeConfig, isDark]);
 
   const racingBarsSpec = useMemo(() => {
     const src = originForecasts?.forecasts?.length > 0 ? originForecasts.forecasts : activeForecasts;
@@ -1821,8 +1821,8 @@ export const TimeSeriesViewer = () => {
       layers.push({ mark: { type: 'rule', color: '#e11d48', strokeWidth: 2, strokeDash: [6, 4] }, encoding: { x: { datum: actualVal } } });
       layers.push({ mark: { type: 'text', align: 'left', dx: 4, dy: -8, color: '#e11d48', fontSize: 11, fontWeight: 'bold' }, encoding: { x: { datum: actualVal }, text: { value: `Actual: ${formatNumber(actualVal, locale, 0)}` } } });
     }
-    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: Math.max(150, barData.length * 40), autosize: { type: 'fit', contains: 'padding' }, data: { values: barData }, layer: layers };
-  }, [originForecasts, activeForecasts, selectedPeriod, visibleMethods, activeMethodDomain]);
+    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: Math.max(150, barData.length * 40), autosize: { type: 'fit', contains: 'padding' }, data: { values: barData }, layer: layers, config: vegaThemeConfig };
+  }, [originForecasts, activeForecasts, selectedPeriod, visibleMethods, activeMethodDomain, vegaThemeConfig]);
 
   // ---- Forecast Convergence chart (Plotly grouped bars) ----
   const convergenceChart = useMemo(() => {
@@ -1880,7 +1880,7 @@ export const TimeSeriesViewer = () => {
         name: fmtShort(origin),
         x: xLabels,
         y: yValues,
-        marker: { color, line: { color: '#fff', width: 0.5 } },
+        marker: { color, line: { color: isDark ? '#1f2937' : '#fff', width: 0.5 } },
         hovertemplate: xLabels.map((x, i) =>
           `<b>${x}</b><br>Origin: ${fmtShort(origin)}<br>${monthsText[i]}<br>Forecast: %{y:,.0f}<extra></extra>`
         ),
@@ -2407,9 +2407,9 @@ export const TimeSeriesViewer = () => {
             </div>
             <div className="flex gap-3 mt-2">
               <button onClick={() => { const bv = {}; activeForecasts.forEach(f => { bv[f.method] = true; }); setBandVisibleMethods(bv); }}
-                className="text-xs text-blue-500 hover:text-blue-700 hover:underline">Show all bands</button>
+                className="text-xs text-blue-500 hover:text-blue-700 dark:hover:text-blue-300 hover:underline">Show all bands</button>
               <button onClick={() => { const bv = {}; activeForecasts.forEach(f => { bv[f.method] = false; }); setBandVisibleMethods(bv); }}
-                className="text-xs text-gray-400 hover:text-gray-600 hover:underline">Hide all bands</button>
+                className="text-xs text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:underline">Hide all bands</button>
             </div>
           </Section>
         ) : null;
@@ -2462,10 +2462,10 @@ export const TimeSeriesViewer = () => {
             const ySigNeg = toY(-sigBand);
             return (
               <svg width={W} height={H} className="overflow-visible">
-                <rect x={padL} y={ySigPos} width={innerW} height={ySigNeg - ySigPos} fill="#dbeafe" fillOpacity={0.5} />
-                <line x1={padL} x2={padL + innerW} y1={ySigPos} y2={ySigPos} stroke="#93c5fd" strokeWidth={1} strokeDasharray="3,2"/>
-                <line x1={padL} x2={padL + innerW} y1={ySigNeg} y2={ySigNeg} stroke="#93c5fd" strokeWidth={1} strokeDasharray="3,2"/>
-                <line x1={padL} x2={padL + innerW} y1={y0} y2={y0} stroke="#94a3b8" strokeWidth={1}/>
+                <rect x={padL} y={ySigPos} width={innerW} height={ySigNeg - ySigPos} fill={isDark ? '#1e3a5f' : '#dbeafe'} fillOpacity={0.5} />
+                <line x1={padL} x2={padL + innerW} y1={ySigPos} y2={ySigPos} stroke={isDark ? '#3b82f6' : '#93c5fd'} strokeWidth={1} strokeDasharray="3,2"/>
+                <line x1={padL} x2={padL + innerW} y1={ySigNeg} y2={ySigNeg} stroke={isDark ? '#3b82f6' : '#93c5fd'} strokeWidth={1} strokeDasharray="3,2"/>
+                <line x1={padL} x2={padL + innerW} y1={y0} y2={y0} stroke={isDark ? '#6b7280' : '#94a3b8'} strokeWidth={1}/>
                 {values.map((v, i) => {
                   const x  = toX(i) - barW / 2;
                   const yv = toY(v);
@@ -2473,21 +2473,21 @@ export const TimeSeriesViewer = () => {
                   return (
                     <g key={i}>
                       <rect x={x} y={Math.min(yv, y0)} width={barW} height={Math.abs(yv - y0)}
-                            fill={significant ? color : '#cbd5e1'} fillOpacity={0.85} rx={1}/>
+                            fill={significant ? color : (isDark ? '#6b7280' : '#cbd5e1')} fillOpacity={0.85} rx={1}/>
                       <title>Lag {lags[i]}: {v.toFixed(3)}</title>
                     </g>
                   );
                 })}
                 {[-0.5, 0, 0.5, 1].filter(v => v >= yMin && v <= yMax).map(v => (
                   <g key={v}>
-                    <line x1={padL - 3} x2={padL} y1={toY(v)} y2={toY(v)} stroke="#94a3b8" strokeWidth={1}/>
-                    <text x={padL - 5} y={toY(v) + 3.5} textAnchor="end" fontSize={8} fill="#64748b">{v}</text>
+                    <line x1={padL - 3} x2={padL} y1={toY(v)} y2={toY(v)} stroke={isDark ? '#6b7280' : '#94a3b8'} strokeWidth={1}/>
+                    <text x={padL - 5} y={toY(v) + 3.5} textAnchor="end" fontSize={8} fill={isDark ? '#9ca3af' : '#64748b'}>{v}</text>
                   </g>
                 ))}
                 {lags.map((lg, i) => i % 2 === 0 && (
-                  <text key={i} x={toX(i)} y={H - 4} textAnchor="middle" fontSize={8} fill="#64748b">{lg}</text>
+                  <text key={i} x={toX(i)} y={H - 4} textAnchor="middle" fontSize={8} fill={isDark ? '#9ca3af' : '#64748b'}>{lg}</text>
                 ))}
-                <text x={padL} y={padT - 2} fontSize={9} fontWeight="600" fill="#475569">{label}</text>
+                <text x={padL} y={padT - 2} fontSize={9} fontWeight="600" fill={isDark ? '#d1d5db' : '#475569'}>{label}</text>
               </svg>
             );
           };

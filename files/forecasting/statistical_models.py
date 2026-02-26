@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass
 import yaml
 from pathlib import Path
+from tqdm import tqdm
 
 # Nixtla imports
 try:
@@ -610,7 +611,10 @@ class StatisticalForecaster:
             'SeasonalNaive', 'HistoricAverage', 'Naive', 'SeasonalWindowAverage'
         }
 
-        for _, char_row in characteristics_df.iterrows():
+        for _, char_row in tqdm(characteristics_df.iterrows(),
+                                total=len(characteristics_df),
+                                desc="  Statistical forecasting",
+                                unit="series"):
             unique_id = char_row['unique_id']
             all_methods = char_row['recommended_methods']
 
