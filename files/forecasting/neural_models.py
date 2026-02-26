@@ -62,16 +62,18 @@ class NeuralForecaster:
         self.quantiles.extend([0.5])  # Median
         self.quantiles = sorted(list(set(self.quantiles)))
     
-    def get_model_hyperparameters(self, 
+    def get_model_hyperparameters(self,
                                   method_name: str,
-                                  characteristics: Dict) -> Dict[str, Any]:
+                                  characteristics: Dict,
+                                  overrides: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Get optimized hyperparameters based on data characteristics.
-        
+
         Args:
             method_name: Name of the neural model
             characteristics: Time series characteristics
-            
+            overrides: Optional user overrides to merge on top of defaults.
+
         Returns:
             Dictionary of hyperparameters
         """
@@ -161,9 +163,22 @@ class NeuralForecaster:
                 'learning_rate': 1e-3,
                 'batch_size': 32,
             }
-        
+        # Apply user overrides — merge numeric/int/float params
+        if overrides:
+            _overridable = ('input_size', 'max_steps', 'learning_rate', 'batch_size',
+                            'dropout', 'dropout_prob_theta', 'hidden_size',
+                            'encoder_hidden_size', 'encoder_n_layers',
+                            'decoder_hidden_size', 'decoder_n_layers',
+                            'n_layers', 'd_model', 'n_heads', 'patch_len', 'stride',
+                            'num_attention_heads', 'val_check_steps', 'early_stop_patience_steps')
+            for k in _overridable:
+                if k in overrides:
+                    params[k] = type(params.get(k, overrides[k]))(overrides[k]) if k in params else overrides[k]
+            params['has_overrides'] = True
+            params['overrides_applied'] = overrides
+
         return params
-    
+
     def get_model_instance(self,
                           method_name: str,
                           characteristics: Dict) -> Any:
@@ -208,16 +223,18 @@ class NeuralForecaster:
                               df: pd.DataFrame,
                               unique_id: str,
                               methods: List[str],
-                              characteristics: Dict) -> List[ForecastResult]:
+                              characteristics: Dict,
+                              overrides_map: Dict[str, Dict] = None) -> List[ForecastResult]:
         """
         Generate neural forecasts for a single time series.
-        
+
         Args:
             df: DataFrame with columns [unique_id, ds, y]
             unique_id: Series identifier
             methods: List of neural methods to use
             characteristics: Time series characteristics
-            
+            overrides_map: Optional {method: {param: value}} overrides.
+
         Returns:
             List of ForecastResult objects
         """
@@ -275,8 +292,9 @@ class NeuralForecaster:
                         if col in forecast_df.columns:
                             quantiles[q] = forecast_df[col].values
                 
-                # Get hyperparameters
-                hyperparams = self.get_model_hyperparameters(method, characteristics)
+                # Get hyperparameters (with overrides merged)
+                method_ovr = (overrides_map or {}).get(method, None)
+                hyperparams = self.get_model_hyperparameters(method, characteristics, overrides=method_ovr)
                 
                 # Create result
                 result = ForecastResult(
@@ -301,14 +319,16 @@ class NeuralForecaster:
     
     def forecast_multiple_series(self,
                                 df: pd.DataFrame,
-                                characteristics_df: pd.DataFrame) -> pd.DataFrame:
+                                characteristics_df: pd.DataFrame,
+                                overrides_map: dict = None) -> pd.DataFrame:
         """
         Generate neural forecasts for multiple time series.
-        
+
         Args:
             df: DataFrame with time series data
             characteristics_df: DataFrame with characteristics and recommended methods
-            
+            overrides_map: Optional {unique_id: {method: {param: value}}} overrides.
+
         Returns:
             DataFrame with all forecast results
         """
@@ -334,11 +354,13 @@ class NeuralForecaster:
             characteristics = char_row.to_dict()
             
             # Generate forecasts
+            series_overrides = (overrides_map or {}).get(unique_id, None)
             results = self.forecast_single_series(
                 df=df,
                 unique_id=unique_id,
                 methods=neural_methods,
-                characteristics=characteristics
+                characteristics=characteristics,
+                overrides_map=series_overrides,
             )
             
             all_results.extend(results)

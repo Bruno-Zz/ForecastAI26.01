@@ -47,7 +47,7 @@ except ImportError:
 app = FastAPI(
     title="Time Series Forecasting API",
     description="API for accessing forecasts, demand analytics, and MEIO data",
-    version="1.0.0"
+    version="1.1.0"  # bump when routes change — used to verify the right server is running
 )
 
 # Configure CORS for React frontend
@@ -182,6 +182,84 @@ def load_data():
             data_cache['time_series_original'] = _to_dask(pdf, "time_series_original")
             logger.info(f"Loaded time_series_original from DB: {len(pdf)} rows")
 
+        # ── Backfill missing series from source DB ──
+        # When demand_actuals has fewer series than forecast_results (e.g. after
+        # a partial ETL re-run), load the missing actuals from the source DB.
+        try:
+            ts_df = _compute(data_cache['time_series'])
+            local_uids = set(ts_df['unique_id'].unique())
+            fc_df = None
+            if data_cache.get('forecasts') is not None:
+                fc_df = _compute(data_cache['forecasts'])
+            elif True:
+                fc_df = pd.read_sql(f"SELECT DISTINCT unique_id FROM {schema}.forecast_results", conn)
+            if fc_df is not None:
+                forecast_uids = set(fc_df['unique_id'].unique())
+                missing = forecast_uids - local_uids
+                if missing:
+                    logger.info(f"Backfill: {len(missing)} series in forecasts but not in demand_actuals — querying source DB…")
+                    # Read config directly from file (data_cache['config'] isn't loaded yet)
+                    _bf_cfg_path = Path(cfg_path) if not isinstance(cfg_path, Path) else cfg_path
+                    with open(_bf_cfg_path, 'r') as _bf_fh:
+                        cfg = yaml.safe_load(_bf_fh)
+                    src = cfg.get('data_source', {}).get('source_db', {})
+                    if src.get('host'):
+                        import psycopg2
+                        src_conn = psycopg2.connect(
+                            host=src['host'], port=src.get('port', 5432),
+                            dbname=src.get('database', 'postgres'),
+                            user=src.get('user'), password=src.get('password'),
+                            sslmode=src.get('sslmode', 'require'),
+                        )
+                        cols = src.get('columns', {})
+                        item_col = cols.get('item_id', 'item_id')
+                        site_col = cols.get('site_id', 'site_id')
+                        date_col = cols.get('date', 'date')
+                        qty_col  = cols.get('qty', 'qty')
+                        table    = src.get('demand_table', 'dp_plan.calc_dp_actual')
+                        agg_freq = cfg.get('etl', {}).get('aggregation', {}).get('frequency', 'W')
+                        # Build a list of (item, site) pairs to query
+                        pairs = [(uid.split('_', 1)[0], uid.split('_', 1)[1]) for uid in missing if '_' in uid]
+                        if pairs:
+                            # Query source in batches
+                            batch_size = 200
+                            src_frames = []
+                            for i in range(0, len(pairs), batch_size):
+                                batch = pairs[i:i+batch_size]
+                                where_clauses = " OR ".join(
+                                    [f"({item_col}='{it}' AND {site_col}='{si}')" for it, si in batch]
+                                )
+                                q = (f"SELECT {item_col} || '_' || {site_col} AS unique_id, "
+                                     f"{date_col} AS date, {qty_col} AS y "
+                                     f"FROM {table} WHERE {where_clauses} "
+                                     f"ORDER BY unique_id, date")
+                                batch_df = pd.read_sql(q, src_conn)
+                                if not batch_df.empty:
+                                    src_frames.append(batch_df)
+                            src_conn.close()
+                            if src_frames:
+                                src_pdf = pd.concat(src_frames, ignore_index=True)
+                                src_pdf['date'] = pd.to_datetime(src_pdf['date'])
+                                # Aggregate to the same frequency as ETL config
+                                if agg_freq:
+                                    src_pdf = (src_pdf.groupby('unique_id')
+                                               .apply(lambda g: g.set_index('date').resample(agg_freq)['y'].sum().reset_index(), include_groups=False)
+                                               .reset_index(level=0))
+                                # Merge with existing time_series
+                                ts_merged = pd.concat([ts_df, src_pdf], ignore_index=True)
+                                data_cache['time_series'] = _to_dask(ts_merged, "time_series")
+                                # Also update time_series_original
+                                orig_df = _compute(data_cache['time_series_original'])
+                                orig_merged = pd.concat([orig_df, src_pdf], ignore_index=True)
+                                data_cache['time_series_original'] = _to_dask(orig_merged, "time_series_original")
+                                logger.info(f"Backfill: added {len(src_pdf)} rows for {src_pdf['unique_id'].nunique()} series from source DB")
+                            else:
+                                logger.warning("Backfill: source DB returned no data for missing series")
+                    else:
+                        logger.warning("Backfill: no source_db config — cannot load missing series")
+        except Exception as backfill_err:
+            logger.warning(f"Backfill from source DB failed (non-fatal): {backfill_err}")
+
         # ── characteristics ──
         if data_cache['characteristics'] is None:
             pdf = pd.read_sql(f"SELECT * FROM {schema}.time_series_characteristics", conn)
@@ -246,11 +324,12 @@ def load_data():
 
         # ── config (YAML, not DB) ──
         if data_cache['config'] is None:
-            config_path = Path('./config/config.yaml')
+            # Use absolute path derived from __file__ so it works regardless of cwd
+            config_path = Path(_api_config_path())
             if config_path.exists():
                 with open(config_path, 'r') as fh:
                     data_cache['config'] = yaml.safe_load(fh)
-                logger.info("Loaded config.yaml")
+                logger.info(f"Loaded config.yaml from {config_path}")
 
     except Exception as e:
         logger.error(f"Error loading data from DB: {e}", exc_info=True)
@@ -291,6 +370,106 @@ async def reload_data():
     sizes = {k: (len(_compute(v)) if v is not None and hasattr(v, '__len__') else 0)
              for k, v in data_cache.items() if k != 'config'}
     return {"status": "reloaded", "cache_sizes": sizes}
+
+
+@app.get("/api/config")
+async def get_config():
+    """Return the global YAML config (read-only, with sensitive fields redacted)."""
+    config = _get_config()
+    if not config:
+        raise HTTPException(status_code=404, detail="Config not loaded")
+
+    import copy
+    safe = copy.deepcopy(config)
+
+    # Redact sensitive fields
+    def _redact(d, keys=('password', 'account_key', 'secret', 'token', 'connection_string')):
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if any(s in k.lower() for s in keys) and isinstance(v, str):
+                    d[k] = '********'
+                else:
+                    _redact(v, keys)
+        elif isinstance(d, list):
+            for item in d:
+                _redact(item, keys)
+
+    _redact(safe)
+
+    # Also return as raw YAML string for display
+    raw_yaml = yaml.dump(safe, default_flow_style=False, sort_keys=False)
+
+    return {"config": safe, "config_yaml": raw_yaml}
+
+
+@app.post("/api/config/update")
+async def update_config(body: dict = Body(...)):
+    """
+    Update specific config keys and persist to config.yaml.
+
+    Expects JSON body like:
+      { "path": "forecasting.horizon", "value": 52 }
+    or batch:
+      { "updates": [ {"path": "forecasting.horizon", "value": 52}, ... ] }
+    """
+    config_path = Path(_api_config_path())
+    if not config_path.exists():
+        raise HTTPException(status_code=404, detail="config.yaml not found")
+
+    # Load current config
+    with open(config_path, 'r') as fh:
+        config = yaml.safe_load(fh)
+
+    # Build list of updates
+    updates = body.get('updates', [])
+    if 'path' in body and 'value' in body:
+        updates = [{'path': body['path'], 'value': body['value']}]
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+
+    # Sensitive keys that cannot be written via API
+    BLOCKED_KEYS = {'password', 'secret', 'token', 'account_key', 'connection_string', 'sslmode'}
+
+    applied = []
+    for upd in updates:
+        key_path = upd.get('path', '')
+        value = upd.get('value')
+        parts = key_path.split('.')
+
+        if not parts or not key_path:
+            continue
+
+        # Block sensitive keys
+        if any(bk in parts[-1].lower() for bk in BLOCKED_KEYS):
+            continue
+
+        # Navigate to parent
+        node = config
+        for p in parts[:-1]:
+            if isinstance(node, dict) and p in node:
+                node = node[p]
+            else:
+                node = None
+                break
+
+        if node is not None and isinstance(node, dict):
+            old_val = node.get(parts[-1])
+            node[parts[-1]] = value
+            applied.append({'path': key_path, 'old': old_val, 'new': value})
+
+    if not applied:
+        raise HTTPException(status_code=400, detail="No valid updates applied")
+
+    # Write back
+    with open(config_path, 'w') as fh:
+        yaml.dump(config, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    # Refresh in-memory cache
+    data_cache['config'] = config
+
+    logger.info(f"Config updated: {[a['path'] for a in applied]}")
+    return {"status": "ok", "applied": applied}
 
 
 # API Endpoints
@@ -512,9 +691,39 @@ async def get_forecasts(
             'training_time': float(row['training_time']) if pd.notna(row.get('training_time')) else None
         })
 
+    # Include date_range_end from characteristics so the frontend can compute
+    # forecast dates even when historical demand_actuals data is unavailable.
+    date_range_end = None
+    frequency = None
+    if data_cache.get('characteristics') is not None:
+        chars_df = _compute(data_cache['characteristics'])
+        char_row = chars_df[chars_df['unique_id'] == unique_id]
+        if not char_row.empty:
+            dre = char_row.iloc[0].get('date_range_end')
+            if pd.notna(dre):
+                date_range_end = pd.Timestamp(dre).strftime('%Y-%m-%d')
+            freq = char_row.iloc[0].get('frequency') or char_row.iloc[0].get('obs_per_year')
+            if freq is not None:
+                frequency = str(freq)
+
+    # Also include lightweight historical data inline when available so
+    # the frontend doesn't need a separate /series/{uid}/data call.
+    historical = None
+    if data_cache.get('time_series') is not None:
+        ts_df = _compute(data_cache['time_series'])
+        series_ts = ts_df[ts_df['unique_id'] == unique_id].sort_values('date')
+        if not series_ts.empty:
+            historical = {
+                'date': series_ts['date'].dt.strftime('%Y-%m-%d').tolist(),
+                'value': series_ts['y'].tolist(),
+            }
+
     return {
         'unique_id': unique_id,
-        'forecasts': forecasts
+        'forecasts': forecasts,
+        'date_range_end': date_range_end,
+        'frequency': frequency,
+        'historical': historical,
     }
 
 
@@ -1117,6 +1326,148 @@ async def get_forecast_evolution(unique_id: str):
     }
 
 
+@app.get("/api/series/{unique_id}/forecast-convergence")
+async def get_forecast_convergence(unique_id: str, method: Optional[str] = None):
+    """
+    Forecast convergence view: how predictions for each target month evolved
+    across origin dates.
+
+    For every (origin, horizon_step) pair, we compute:
+        target_date = origin + horizon_step months
+    Then we group by target_date and return, for each target month, the
+    list of (origin, forecast_value) pairs so the frontend can draw bars
+    showing how the forecast converged as the target date approached.
+
+    Optional query param ``method`` restricts to a single forecast method
+    (defaults to all methods, returning the best/first available).
+
+    Returns::
+
+        {
+          "unique_id": "63530_517",
+          "methods": ["AutoARIMA", "AutoETS", ...],
+          "targets": [
+            {
+              "target_date": "2025-06-01",
+              "actual": 1234.0,
+              "origins": [
+                {"origin": "2025-01-01", "months_ahead": 5, "forecasts": {"AutoARIMA": 1100, "AutoETS": 1200}},
+                {"origin": "2025-02-01", "months_ahead": 4, "forecasts": {"AutoARIMA": 1150, "AutoETS": 1210}},
+                ...
+              ]
+            },
+            ...
+          ]
+        }
+    """
+    if data_cache['forecasts_by_origin'] is None:
+        raise HTTPException(status_code=503, detail="Forecasts by origin data not loaded")
+
+    df = _compute(data_cache['forecasts_by_origin'])
+
+    # Determine column names
+    if 'forecast_origin' in df.columns:
+        origin_col = 'forecast_origin'
+    elif 'origin' in df.columns:
+        origin_col = 'origin'
+    elif 'origin_date' in df.columns:
+        origin_col = 'origin_date'
+    else:
+        raise HTTPException(status_code=500, detail="Origin column not found in data")
+
+    actual_col = 'actual_value' if 'actual_value' in df.columns else 'actual'
+    has_horizon = 'horizon_step' in df.columns
+
+    series_df = df[df['unique_id'] == unique_id].copy()
+    if series_df.empty:
+        raise HTTPException(status_code=404, detail=f"No forecast convergence data for {unique_id}")
+
+    # Filter by method if requested
+    if method:
+        series_df = series_df[series_df['method'] == method]
+        if series_df.empty:
+            raise HTTPException(status_code=404, detail=f"No data for method {method}")
+
+    # Ensure origin is datetime
+    if not pd.api.types.is_datetime64_any_dtype(series_df[origin_col]):
+        series_df[origin_col] = pd.to_datetime(series_df[origin_col])
+
+    # Compute target_date = origin + horizon_step months
+    if has_horizon:
+        def _add_months(origin_ts, steps):
+            try:
+                return (origin_ts + pd.DateOffset(months=int(steps))).strftime('%Y-%m-%d')
+            except Exception:
+                return None
+        series_df['target_date'] = series_df.apply(
+            lambda r: _add_months(r[origin_col], r['horizon_step']), axis=1
+        )
+        series_df = series_df.dropna(subset=['target_date'])
+    else:
+        # Without horizon_step, we can't compute target dates
+        raise HTTPException(status_code=500, detail="horizon_step column required for convergence view")
+
+    if series_df.empty:
+        raise HTTPException(status_code=404, detail=f"No convergence data after target_date computation for {unique_id}")
+
+    # Get unique methods present
+    methods_list = sorted(series_df['method'].unique().tolist())
+
+    # Group by target_date (string, so groupby is reliable)
+    targets = []
+    for target_str, tgroup in series_df.groupby('target_date'):
+
+        # Get actual value (should be same across all rows for same target)
+        actual_val = None
+        if actual_col in tgroup.columns:
+            act_vals = tgroup[actual_col].dropna()
+            if len(act_vals) > 0:
+                actual_val = float(act_vals.iloc[0])
+
+        # Group by origin within this target_date
+        origin_entries = []
+        for origin_val, ogroup in tgroup.groupby(origin_col):
+            origin_str = origin_val.strftime('%Y-%m-%d') if hasattr(origin_val, 'strftime') else str(origin_val)
+
+            # Calculate months ahead
+            months_ahead = int(ogroup['horizon_step'].iloc[0]) if has_horizon else None
+
+            # Collect forecast values per method
+            method_forecasts = {}
+            for _, row in ogroup.iterrows():
+                m = str(row['method'])
+                pf = row.get('point_forecast', None)
+                if pf is not None:
+                    if isinstance(pf, (list, np.ndarray)):
+                        method_forecasts[m] = float(pf[0])
+                    else:
+                        method_forecasts[m] = float(pf)
+
+            origin_entries.append({
+                'origin': origin_str,
+                'months_ahead': months_ahead,
+                'forecasts': method_forecasts
+            })
+
+        # Sort origins chronologically
+        origin_entries.sort(key=lambda e: e['origin'])
+
+        targets.append({
+            'target_date': target_str,
+            'actual': actual_val,
+            'origins': origin_entries
+        })
+
+    # Sort targets chronologically
+    targets.sort(key=lambda t: t['target_date'])
+
+    return {
+        'unique_id': unique_id,
+        'methods': methods_list,
+        'targets': targets
+    }
+
+
 @app.get("/api/series/{unique_id}/vega-spec")
 async def get_vega_spec(unique_id: str):
     """
@@ -1337,11 +1688,13 @@ async def get_method_explanation(unique_id: str):
     is_intermittent = bool(char.get('is_intermittent', False))
     has_seasonality = bool(char.get('has_seasonality', False))
     complexity_level = str(char.get('complexity_level', 'low'))
-    sufficient_ml = bool(char.get('sufficient_for_ml', False))
-    sufficient_dl = bool(char.get('sufficient_for_deep_learning', False))
     sparse_obs_per_year = sufficiency.get('sparse_obs_per_year', 5)
     min_for_ml = sufficiency.get('min_for_ml', 100)
     min_for_dl = sufficiency.get('min_for_deep_learning', 200)
+    # Compute dynamically from current config so UI stays correct even before
+    # the user re-runs characterisation (which updates the stored DB booleans).
+    sufficient_ml = n_obs >= min_for_ml
+    sufficient_dl = n_obs >= min_for_dl
 
     # Sparse: fewer than sparse_obs_per_year observations per year on average
     try:
@@ -1498,9 +1851,11 @@ async def get_method_explanation(unique_id: str):
             # Complexity
             'complexity_level': complexity_level,
             'complexity_score': float(char.get('complexity_score', 0) or 0),
-            # Data sufficiency
+            # Data sufficiency (booleans + thresholds from current config)
             'sufficient_for_ml': sufficient_ml,
             'sufficient_for_deep_learning': sufficient_dl,
+            'min_for_ml': min_for_ml,
+            'min_for_dl': min_for_dl,
             # Sparse check
             'obs_per_year': round(obs_per_year, 2),
             'sparse_obs_per_year_threshold': sparse_obs_per_year,
@@ -1686,9 +2041,70 @@ async def get_series_distributions(unique_id: str):
 _pipeline_jobs: Dict[str, Dict] = {}
 _pipeline_lock = threading.Lock()
 
+_STALE_JOB_TIMEOUT_SEC = 7200  # 2 hours — mark "running" jobs as stale after this
+
+
+def _cleanup_stale_jobs():
+    """Mark any job that has been 'running' for longer than the timeout as 'error'.
+
+    Also checks whether the process is actually alive (via PID).
+    Must be called **inside** _pipeline_lock.
+    """
+    now = datetime.utcnow()
+    for job in _pipeline_jobs.values():
+        if job.get("status") != "running":
+            continue
+
+        # Check if the process is still alive
+        pid = job.get("pid")
+        process_alive = False
+        if pid:
+            try:
+                if sys.platform == "win32":
+                    result = subprocess.run(
+                        ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    process_alive = str(pid) in result.stdout
+                else:
+                    os.kill(pid, 0)
+                    process_alive = True
+            except (ProcessLookupError, PermissionError, OSError):
+                process_alive = False
+            except Exception:
+                process_alive = False
+
+        if not process_alive:
+            job["status"] = "error"
+            job["ended_at"] = now.isoformat()
+            job["log_lines"].append("[STALE] Process no longer running — marked as failed")
+            job["exit_code"] = -2
+            logger.warning(f"Stale job {job['job_id']} (pid={pid}) marked as error — process not alive")
+            continue
+
+        # Check timeout
+        started = job.get("started_at")
+        if started:
+            try:
+                started_dt = datetime.fromisoformat(started)
+                elapsed = (now - started_dt).total_seconds()
+                if elapsed > _STALE_JOB_TIMEOUT_SEC:
+                    job["status"] = "error"
+                    job["ended_at"] = now.isoformat()
+                    job["log_lines"].append(
+                        f"[TIMEOUT] Job exceeded {_STALE_JOB_TIMEOUT_SEC}s — marked as stale"
+                    )
+                    job["exit_code"] = -3
+                    logger.warning(f"Stale job {job['job_id']} timed out after {elapsed:.0f}s")
+            except Exception:
+                pass
+
+
 PIPELINE_STEPS = {
     "etl":               {"label": "ETL",               "arg": "etl",               "desc": "Extract data from the source database into demand_actuals"},
     "outlier-detection": {"label": "Outlier Detection",  "arg": "outlier-detection", "desc": "Detect and correct outliers in the time series"},
+    "segmentation":      {"label": "Segmentation",       "arg": "segmentation",      "desc": "Compute ABC classification and assign series to segments"},
+    "characterization":  {"label": "Characterization",   "arg": "characterize",      "desc": "Analyze time series characteristics (seasonality, trend, complexity)"},
     "forecast":          {"label": "Forecast",           "arg": "forecast",          "desc": "Run all forecasting models (statistical, ML, neural, foundation)"},
     "backtest":          {"label": "Backtest",           "arg": "backtest",          "desc": "Rolling-window backtesting and metric computation"},
     "best-method":       {"label": "Best Method",        "arg": "best-method",       "desc": "Select the best method per series using composite scoring"},
@@ -1696,7 +2112,10 @@ PIPELINE_STEPS = {
 }
 
 
-PIPELINE_STEP_ORDER = ["etl", "outlier-detection", "forecast", "backtest", "best-method", "distributions"]
+PIPELINE_STEP_ORDER = [
+    "etl", "outlier-detection", "segmentation",
+    "characterization", "forecast", "backtest", "best-method", "distributions"
+]
 
 
 def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = None):
@@ -1837,8 +2256,9 @@ def _run_full_pipeline_thread(job_id: str):
 @app.post("/api/pipeline/run-all")
 async def run_full_pipeline():
     """Launch all pipeline steps in order as a single background job."""
-    # Reject if any step or full-pipeline job is already running
+    # Clean up stale jobs first, then reject if any job is genuinely running
     with _pipeline_lock:
+        _cleanup_stale_jobs()
         for job in _pipeline_jobs.values():
             if job.get("status") == "running":
                 raise HTTPException(
@@ -1873,33 +2293,55 @@ async def get_pipeline_steps():
     return [{"id": k, **v} for k, v in PIPELINE_STEPS.items()]
 
 
+class RunStepRequest(BaseModel):
+    segment_id: Optional[int] = None
+
+
 @app.post("/api/pipeline/run/{step}")
-async def run_pipeline_step(step: str):
-    """Launch a pipeline step as a background subprocess. Returns a job_id."""
+async def run_pipeline_step(step: str, body: RunStepRequest = Body(default=RunStepRequest())):
+    """Launch a pipeline step as a background subprocess. Returns a job_id.
+
+    Optional body: { "segment_id": <int> } to scope forecast/backtest/characterization
+    to a specific segment.
+    """
     if step not in PIPELINE_STEPS:
         raise HTTPException(status_code=400, detail=f"Unknown step '{step}'. Valid: {list(PIPELINE_STEPS)}")
 
-    # Reject if same step is already running
+    # Clean up stale jobs first, then reject if same step is genuinely running
     with _pipeline_lock:
+        _cleanup_stale_jobs()
         for job in _pipeline_jobs.values():
             if job.get("step") == step and job.get("status") == "running":
                 raise HTTPException(status_code=409, detail=f"Step '{step}' is already running (job {job['job_id']})")
 
+    extra_args = []
+    if body.segment_id is not None:
+        extra_args = ["--segment-id", str(body.segment_id)]
+
     job_id = str(uuid.uuid4())[:8]
+    step_label = PIPELINE_STEPS[step]["label"]
+    if body.segment_id is not None:
+        step_label = f"{step_label} (segment {body.segment_id})"
+
     with _pipeline_lock:
         _pipeline_jobs[job_id] = {
             "job_id": job_id,
             "step": step,
-            "step_label": PIPELINE_STEPS[step]["label"],
+            "step_label": step_label,
             "status": "pending",
             "log_lines": [],
             "started_at": None,
             "ended_at": None,
             "pid": None,
             "exit_code": None,
+            "segment_id": body.segment_id,
         }
 
-    t = threading.Thread(target=_run_pipeline_step_thread, args=(job_id, PIPELINE_STEPS[step]["arg"]), daemon=True)
+    t = threading.Thread(
+        target=_run_pipeline_step_thread,
+        args=(job_id, PIPELINE_STEPS[step]["arg"], extra_args),
+        daemon=True,
+    )
     t.start()
 
     return {"job_id": job_id, "step": step, "status": "pending"}
@@ -1915,8 +2357,9 @@ async def run_forecast_for_series(req: RunForecastRequest):
     if not req.series:
         raise HTTPException(status_code=400, detail="No series provided")
 
-    # Reject if a series-forecast job is already running
+    # Clean up stale jobs first, then reject if a series-forecast is genuinely running
     with _pipeline_lock:
+        _cleanup_stale_jobs()
         for job in _pipeline_jobs.values():
             if job.get("step") == "forecast-series" and job.get("status") == "running":
                 raise HTTPException(
@@ -1942,6 +2385,30 @@ async def run_forecast_for_series(req: RunForecastRequest):
     if req.all_methods:
         extra_args.append("--all-methods")
 
+    # Load any hyperparameter overrides from DB for the requested series
+    if _DB_AVAILABLE:
+        try:
+            conn = get_conn(_api_config_path())
+            schema = get_schema(_api_config_path())
+            placeholders = ",".join(["%s"] * len(req.series))
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT unique_id, method, overrides FROM {schema}.hyperparameter_overrides "
+                    f"WHERE unique_id IN ({placeholders})",
+                    tuple(req.series),
+                )
+                rows = cur.fetchall()
+            conn.close()
+            if rows:
+                overrides_map = {}
+                for uid, method, ovr in rows:
+                    if isinstance(ovr, str):
+                        ovr = json.loads(ovr)
+                    overrides_map.setdefault(uid, {})[method] = ovr
+                extra_args.extend(["--overrides-json", json.dumps(overrides_map)])
+        except Exception as exc:
+            logger.warning(f"Could not load hyperparameter overrides: {exc}")
+
     t = threading.Thread(
         target=_run_pipeline_step_thread,
         args=(job_id, "forecast", extra_args),
@@ -1950,6 +2417,93 @@ async def run_forecast_for_series(req: RunForecastRequest):
     t.start()
 
     return {"job_id": job_id, "step": "forecast-series", "status": "pending"}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Hyperparameter overrides CRUD
+# ══════════════════════════════════════════════════════════════════════
+
+class HyperparamOverridesRequest(BaseModel):
+    overrides: Dict[str, Dict[str, Any]]  # {method: {param: value, ...}, ...}
+
+
+@app.get("/api/hyperparams/{unique_id}")
+async def get_hyperparams(unique_id: str):
+    """Return all saved hyperparameter overrides for a series."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        conn = get_conn(_api_config_path())
+        schema = get_schema(_api_config_path())
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT method, overrides FROM {schema}.hyperparameter_overrides WHERE unique_id = %s",
+                (unique_id,),
+            )
+            rows = cur.fetchall()
+        conn.close()
+        result = {}
+        for method, overrides in rows:
+            if isinstance(overrides, str):
+                overrides = json.loads(overrides)
+            result[method] = overrides
+        return {"unique_id": unique_id, "overrides": result}
+    except Exception as exc:
+        logger.error(f"Failed to load hyperparameter overrides: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.put("/api/hyperparams/{unique_id}")
+async def put_hyperparams(unique_id: str, req: HyperparamOverridesRequest):
+    """Upsert hyperparameter overrides for one or more methods."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        conn = get_conn(_api_config_path())
+        schema = get_schema(_api_config_path())
+        with conn.cursor() as cur:
+            for method, overrides in req.overrides.items():
+                cur.execute(
+                    f"""INSERT INTO {schema}.hyperparameter_overrides (unique_id, method, overrides, updated_at)
+                        VALUES (%s, %s, %s, NOW())
+                        ON CONFLICT (unique_id, method)
+                        DO UPDATE SET overrides = EXCLUDED.overrides, updated_at = NOW()""",
+                    (unique_id, method, json.dumps(overrides)),
+                )
+        conn.commit()
+        conn.close()
+        return {"status": "ok", "unique_id": unique_id, "methods_updated": list(req.overrides.keys())}
+    except Exception as exc:
+        logger.error(f"Failed to save hyperparameter overrides: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.delete("/api/hyperparams/{unique_id}")
+async def delete_hyperparams(unique_id: str, method: Optional[str] = None):
+    """Delete hyperparameter overrides. If ?method=X is provided, delete only that method."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        conn = get_conn(_api_config_path())
+        schema = get_schema(_api_config_path())
+        with conn.cursor() as cur:
+            if method:
+                cur.execute(
+                    f"DELETE FROM {schema}.hyperparameter_overrides WHERE unique_id = %s AND method = %s",
+                    (unique_id, method),
+                )
+            else:
+                cur.execute(
+                    f"DELETE FROM {schema}.hyperparameter_overrides WHERE unique_id = %s",
+                    (unique_id,),
+                )
+            deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        return {"status": "ok", "unique_id": unique_id, "deleted": deleted}
+    except Exception as exc:
+        logger.error(f"Failed to delete hyperparameter overrides: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/pipeline/jobs")
@@ -2001,6 +2555,38 @@ async def kill_pipeline_job(job_id: str):
         _pipeline_jobs[job_id]["exit_code"] = -1
 
     return {"job_id": job_id, "status": "error", "message": "Job interrupted"}
+
+
+@app.post("/api/pipeline/jobs/reset")
+async def reset_pipeline_jobs():
+    """Force-clear all stale/completed jobs from the in-memory store.
+
+    Running jobs whose process is still alive are left untouched.
+    Dead-process "running" jobs are marked as error.
+    Completed/errored jobs older than 10 minutes are removed.
+    """
+    with _pipeline_lock:
+        _cleanup_stale_jobs()
+        now = datetime.utcnow()
+        to_remove = []
+        for job_id, job in _pipeline_jobs.items():
+            if job.get("status") in ("success", "error"):
+                ended = job.get("ended_at")
+                if ended:
+                    try:
+                        ended_dt = datetime.fromisoformat(ended)
+                        if (now - ended_dt).total_seconds() > 600:  # 10 min
+                            to_remove.append(job_id)
+                    except Exception:
+                        to_remove.append(job_id)
+                else:
+                    to_remove.append(job_id)
+            elif job.get("status") == "pending":
+                to_remove.append(job_id)
+        for jid in to_remove:
+            del _pipeline_jobs[jid]
+        remaining = {jid: j.get("status") for jid, j in _pipeline_jobs.items()}
+    return {"status": "ok", "removed": len(to_remove), "remaining": remaining}
 
 
 @app.get("/api/pipeline/jobs/{job_id}/stream")
@@ -2222,6 +2808,286 @@ async def get_step_log_tail(step_id: int):
         }
     finally:
         conn.close()
+
+
+# ===========================================================================
+# SEGMENTS endpoints
+# ===========================================================================
+
+class SegmentIn(BaseModel):
+    name: str
+    description: Optional[str] = None
+    criteria: Optional[Dict[str, Any]] = None  # {} = match all
+
+
+def _segment_row_to_dict(row: tuple, cols: list) -> dict:
+    entry = dict(zip(cols, row))
+    for k in ("created_at", "updated_at"):
+        if entry.get(k) is not None:
+            entry[k] = entry[k].isoformat()
+    # criteria may be a dict (psycopg2 with extras) or a JSON string
+    if isinstance(entry.get("criteria"), str):
+        try:
+            entry["criteria"] = json.loads(entry["criteria"])
+        except Exception:
+            entry["criteria"] = {}
+    if entry.get("criteria") is None:
+        entry["criteria"] = {}
+    return entry
+
+
+@app.get("/api/segments")
+async def list_segments():
+    """Return all segments with member counts."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT s.id, s.name, s.description, s.criteria, s.is_default,
+                       s.created_at, s.updated_at,
+                       COUNT(sm.id) AS member_count
+                FROM {schema}.segment s
+                LEFT JOIN {schema}.segment_membership sm ON sm.segment_id = s.id
+                GROUP BY s.id
+                ORDER BY s.id
+                """
+            )
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        return [_segment_row_to_dict(r, cols) for r in rows]
+    except Exception as exc:
+        logger.error(f"list_segments failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/segments")
+async def create_segment(body: SegmentIn):
+    """Create a new segment."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        criteria_json = json.dumps(body.criteria or {})
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {schema}.segment (name, description, criteria)
+                VALUES (%s, %s, %s::jsonb)
+                RETURNING id, name, description, criteria, is_default, created_at, updated_at
+                """,
+                (body.name, body.description, criteria_json),
+            )
+            cols = [d[0] for d in cur.description]
+            row = cur.fetchone()
+        conn.commit()
+        return _segment_row_to_dict(row, cols)
+    except Exception as exc:
+        conn.rollback()
+        logger.error(f"create_segment failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+# NOTE: /fields must be declared BEFORE /{segment_id} routes so FastAPI
+# matches the literal path segment "fields" before the int path parameter.
+@app.get("/api/segments/fields")
+async def get_segment_fields():
+    """
+    Return dynamic attribute key lists for item and site tables.
+    Used by the criteria builder to populate the field selector.
+    """
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT DISTINCT jsonb_object_keys(attributes)
+                FROM {schema}.item
+                WHERE attributes IS NOT NULL
+                ORDER BY 1
+                """
+            )
+            item_attrs = [r[0] for r in cur.fetchall()]
+
+            cur.execute(
+                f"""
+                SELECT DISTINCT jsonb_object_keys(attributes)
+                FROM {schema}.site
+                WHERE attributes IS NOT NULL
+                ORDER BY 1
+                """
+            )
+            site_attrs = [r[0] for r in cur.fetchall()]
+
+        return {"item": item_attrs, "site": site_attrs}
+    except Exception as exc:
+        logger.error(f"get_segment_fields failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.put("/api/segments/{segment_id}")
+async def update_segment(segment_id: int, body: SegmentIn):
+    """Update an existing segment (cannot update the default 'All' segment)."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        # Check if default
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT is_default FROM {schema}.segment WHERE id = %s", (segment_id,))
+            row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+        if row[0]:
+            raise HTTPException(status_code=400, detail="Cannot modify the default 'All' segment")
+
+        criteria_json = json.dumps(body.criteria or {})
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE {schema}.segment
+                   SET name = %s, description = %s, criteria = %s::jsonb, updated_at = NOW()
+                 WHERE id = %s
+                RETURNING id, name, description, criteria, is_default, created_at, updated_at
+                """,
+                (body.name, body.description, criteria_json, segment_id),
+            )
+            cols = [d[0] for d in cur.description]
+            updated = cur.fetchone()
+        conn.commit()
+        return _segment_row_to_dict(updated, cols)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        logger.error(f"update_segment failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/segments/{segment_id}")
+async def delete_segment(segment_id: int):
+    """Delete a segment (cannot delete the default 'All' segment)."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT is_default FROM {schema}.segment WHERE id = %s", (segment_id,))
+            row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+        if row[0]:
+            raise HTTPException(status_code=400, detail="Cannot delete the default 'All' segment")
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {schema}.segment WHERE id = %s", (segment_id,))
+        conn.commit()
+        return {"status": "ok", "deleted": segment_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        logger.error(f"delete_segment failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/segments/{segment_id}/members")
+async def get_segment_members(segment_id: int):
+    """Return all unique_ids in this segment."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT unique_id FROM {schema}.segment_membership WHERE segment_id = %s ORDER BY unique_id",
+                (segment_id,),
+            )
+            members = [r[0] for r in cur.fetchall()]
+        return {"segment_id": segment_id, "members": members, "total": len(members)}
+    except Exception as exc:
+        logger.error(f"get_segment_members failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/segments/{segment_id}/preview")
+async def preview_segment(segment_id: int):
+    """Dry-run: evaluate segment criteria and return match count + sample."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT criteria FROM {schema}.segment WHERE id = %s", (segment_id,)
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+        criteria = row[0] or {}
+        if isinstance(criteria, str):
+            criteria = json.loads(criteria)
+    finally:
+        conn.close()
+
+    try:
+        from segmentation.segmentation import SegmentationEngine
+        engine = SegmentationEngine(_api_config_path())
+        matched = engine.evaluate_criteria(criteria)
+        return {"count": len(matched), "sample": matched[:20]}
+    except Exception as exc:
+        logger.error(f"preview_segment failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/segments/{segment_id}/assign")
+async def assign_segment(segment_id: int):
+    """Re-evaluate criteria and repopulate membership for this segment."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT criteria, is_default FROM {schema}.segment WHERE id = %s", (segment_id,)
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+        criteria, is_default = row
+        if isinstance(criteria, str):
+            criteria = json.loads(criteria)
+    finally:
+        conn.close()
+
+    try:
+        from segmentation.segmentation import SegmentationEngine
+        engine = SegmentationEngine(_api_config_path())
+        if is_default:
+            # Fast path: assign all series
+            seg_schema = get_schema(_api_config_path())
+            count = engine._assign_all_series(segment_id, seg_schema)
+        else:
+            count = engine.assign_segment(segment_id, criteria or {})
+        return {"segment_id": segment_id, "assigned": count}
+    except Exception as exc:
+        logger.error(f"assign_segment failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ===========================================================================

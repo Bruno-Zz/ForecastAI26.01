@@ -3,16 +3,19 @@ ForecastAI Pipeline Runner
 CLI entry point for running the full or partial forecasting pipeline.
 
 Usage:
-    # Full pipeline (ETL -> Characterize -> Forecast -> Backtest -> Best Method -> Distributions)
+    # Full pipeline (ETL → Characterize → Forecast → Backtest → Best Method → Distributions)
     python run_pipeline.py
 
     # Skip ETL (use existing data in PostgreSQL)
     python run_pipeline.py --skip-etl
 
+    # Skip ETL and characterization
+    python run_pipeline.py --skip-etl --skip-characterization
+
     # Only run ETL
     python run_pipeline.py --only etl
 
-    # Only run characterization (requires data in demand_actuals)
+    # Only run characterization (requires demand_actuals in DB)
     python run_pipeline.py --only characterize
 
     # Custom config and output
@@ -33,7 +36,6 @@ sys.path.insert(0, str(project_root))
 
 from utils.orchestrator import ForecastOrchestrator
 from etl.etl import ETLPipeline
-from db.db import load_table, get_schema
 
 
 def setup_logging(level: str = "INFO", log_file: str = None):
@@ -70,84 +72,144 @@ def discover_schema(config_path: str):
         print("  Could not discover schema. Check database connection.")
 
 
-def _load_demand_actuals(config_path: str):
-    """Load demand_actuals from DB in the standard (unique_id, date, y) format.
+def _load_demand_from_db(config_path: str, use_corrected: bool = True):
+    """
+    Load demand time series from PostgreSQL demand_actuals table.
 
-    Only the three canonical columns are returned — extra metadata columns
-    (item_id, site_id, channel, …) are intentionally excluded so that
-    StatsForecast does not interpret them as exogenous features.
+    Args:
+        config_path: Path to config.yaml
+        use_corrected: If True, use corrected_qty (fallback to qty); if False, use qty
+
+    Returns:
+        DataFrame with columns [unique_id, date, y]
     """
     import pandas as pd
+    from db.db import get_conn, get_schema
+
     schema = get_schema(config_path)
-    df = load_table(
-        config_path,
-        f"{schema}.demand_actuals",
-        columns="unique_id, date, COALESCE(corrected_qty, qty) AS y",
-    )
-    df["date"] = pd.to_datetime(df["date"])
+    table = f"{schema}.demand_actuals" if schema != "public" else "demand_actuals"
+
+    if use_corrected:
+        value_col = "COALESCE(corrected_qty, qty) AS y"
+    else:
+        value_col = "qty AS y"
+
+    query = f"SELECT unique_id, date, {value_col} FROM {table} ORDER BY unique_id, date"
+
+    conn = get_conn(config_path)
+    try:
+        df = pd.read_sql(query, conn)
+    finally:
+        conn.close()
+
+    print(f"  Loaded {len(df):,} rows, {df['unique_id'].nunique():,} series from {table}")
     return df
 
 
-def run_single_step(step: str, config_path: str, output_dir: str = None,
-                    series_filter: list = None, all_methods: bool = False):
-    """Run a single pipeline step.  All data is read from / written to PostgreSQL.
+def _load_characteristics_from_db(config_path: str):
+    """Load time series characteristics from PostgreSQL."""
+    import pandas as pd
+    from db.db import load_table, get_schema
 
-    Args:
-        step: Pipeline step name.
-        config_path: Path to config.yaml.
-        output_dir: Unused (kept for API compat).
-        series_filter: Optional list of unique_ids to restrict processing to.
-        all_methods: If True, override recommended_methods with ALL methods
-                     from the config (statistical + ML + neural + foundation).
-    """
-    orchestrator = ForecastOrchestrator(config_path)
     schema = get_schema(config_path)
+    table = f"{schema}.time_series_characteristics" if schema != "public" else "time_series_characteristics"
+    df = load_table(config_path, table)
+    print(f"  Loaded {len(df):,} characteristics from {table}")
+    return df
+
+
+def _load_metrics_from_db(config_path: str):
+    """Load backtest metrics from PostgreSQL."""
+    import pandas as pd
+    from db.db import load_table, get_schema
+
+    schema = get_schema(config_path)
+    table = f"{schema}.backtest_metrics" if schema != "public" else "backtest_metrics"
+    df = load_table(config_path, table)
+    print(f"  Loaded {len(df):,} metric rows from {table}")
+    return df
+
+
+def _load_forecasts_from_db(config_path: str):
+    """Load forecast results from PostgreSQL."""
+    import pandas as pd
+    from db.db import load_table, get_schema
+
+    schema = get_schema(config_path)
+    table = f"{schema}.forecast_results" if schema != "public" else "forecast_results"
+    df = load_table(config_path, table)
+    print(f"  Loaded {len(df):,} forecast rows from {table}")
+    return df
+
+
+def _load_segment_series(segment_id: int, config_path: str):
+    """Query segment_membership for the given segment_id → return list of unique_ids."""
+    from db.db import get_conn, get_schema
+    conn = get_conn(config_path)
+    schema = get_schema(config_path)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT unique_id FROM {schema}.segment_membership WHERE segment_id = %s",
+                (segment_id,)
+            )
+            ids = [row[0] for row in cur.fetchall()]
+        return ids
+    finally:
+        conn.close()
+
+
+def run_single_step(step: str, config_path: str, segment_id: int = None):
+    """Run a single pipeline step, loading inputs from PostgreSQL."""
+    orchestrator = ForecastOrchestrator(config_path)
 
     import pandas as pd
+
+    if step == 'segmentation':
+        from segmentation.segmentation import SegmentationEngine
+        engine = SegmentationEngine(config_path)
+        results = engine.run_all()
+        for seg_name, count in results.items():
+            print(f"  '{seg_name}': {count} series assigned")
+        print(f"Segmentation complete: {len(results)} segments processed")
+        return
 
     if step == 'etl':
         df = orchestrator.step_etl()
         print(f"ETL complete: {len(df)} rows, {df['unique_id'].nunique()} series")
 
     elif step == 'outlier-detection':
-        df = _load_demand_actuals(config_path)
+        print("Loading demand data from PostgreSQL (original qty)...")
+        df = _load_demand_from_db(config_path, use_corrected=False)
+        if segment_id is not None:
+            series_filter = _load_segment_series(segment_id, config_path)
+            df = df[df['unique_id'].isin(series_filter)]
+            print(f"  Segment filter applied: {len(series_filter)} series")
         corrected_df, outliers_df = orchestrator.step_outlier_detection(df)
         n_adjusted = outliers_df['unique_id'].nunique() if not outliers_df.empty else 0
         print(f"Outlier detection complete: {len(outliers_df)} outliers in {n_adjusted} series")
 
     elif step == 'characterize':
-        df = _load_demand_actuals(config_path)
+        print("Loading demand data from PostgreSQL (corrected)...")
+        df = _load_demand_from_db(config_path, use_corrected=True)
+        if segment_id is not None:
+            series_filter = _load_segment_series(segment_id, config_path)
+            df = df[df['unique_id'].isin(series_filter)]
+            print(f"  Segment filter applied: {len(series_filter)} series")
         chars_df = orchestrator.step_characterize(df)
         print(f"Characterization complete: {len(chars_df)} series analyzed")
 
     elif step == 'forecast':
-        df = _load_demand_actuals(config_path)
-        chars_df = load_table(config_path, f"{schema}.time_series_characteristics")
-
-        # Filter to specific series if requested
-        if series_filter:
+        print("Loading demand data from PostgreSQL (corrected)...")
+        df = _load_demand_from_db(config_path, use_corrected=True)
+        print("Loading characteristics from PostgreSQL...")
+        chars_df = _load_characteristics_from_db(config_path)
+        if segment_id is not None:
+            series_filter = _load_segment_series(segment_id, config_path)
             df = df[df['unique_id'].isin(series_filter)]
             chars_df = chars_df[chars_df['unique_id'].isin(series_filter)]
-            print(f"Filtered to {len(chars_df)} series: {series_filter}")
-
-        # Override recommended_methods with ALL methods from config
-        if all_methods and not chars_df.empty:
-            import yaml as _yaml
-            with open(config_path, 'r') as _f:
-                _cfg = _yaml.safe_load(_f)
-            fc = _cfg.get('forecasting', {})
-            full_list = (
-                fc.get('statsforecast_models', [])
-                + fc.get('ml_models', [])
-                + fc.get('neuralforecast_models', [])
-            )
-            if fc.get('timesfm', {}).get('model_name'):
-                full_list.append('TimesFM')
-            chars_df = chars_df.copy()
-            chars_df['recommended_methods'] = [full_list] * len(chars_df)
-            print(f"All-methods mode: using {len(full_list)} methods per series")
-
-        # Start Dask for parallel batch processing
+            print(f"  Segment filter applied: {len(series_filter)} series")
+        # Start Dask for parallel batch processing (mirrors run_complete_pipeline behaviour)
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
             orchestrator.start_dask_client()
@@ -159,9 +221,16 @@ def run_single_step(step: str, config_path: str, output_dir: str = None,
         print(f"Forecasting complete: {len(forecasts_df)} forecasts generated")
 
     elif step == 'backtest':
-        df = _load_demand_actuals(config_path)
-        chars_df = load_table(config_path, f"{schema}.time_series_characteristics")
-        # Start Dask for parallel backtesting
+        print("Loading demand data from PostgreSQL (corrected)...")
+        df = _load_demand_from_db(config_path, use_corrected=True)
+        print("Loading characteristics from PostgreSQL...")
+        chars_df = _load_characteristics_from_db(config_path)
+        if segment_id is not None:
+            series_filter = _load_segment_series(segment_id, config_path)
+            df = df[df['unique_id'].isin(series_filter)]
+            chars_df = chars_df[chars_df['unique_id'].isin(series_filter)]
+            print(f"  Segment filter applied: {len(series_filter)} series")
+        # Start Dask for parallel backtesting (mirrors forecast step behaviour)
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
             orchestrator.start_dask_client()
@@ -173,13 +242,15 @@ def run_single_step(step: str, config_path: str, output_dir: str = None,
         print(f"Backtesting complete: {len(metrics_df)} metric rows, {len(origin_df)} origin forecast rows")
 
     elif step == 'best-method':
-        metrics_df = load_table(config_path, f"{schema}.backtest_metrics")
+        print("Loading backtest metrics from PostgreSQL...")
+        metrics_df = _load_metrics_from_db(config_path)
         best_df = orchestrator.step_select_best_methods(metrics_df)
         print(f"Best method selection complete: {len(best_df)} series ranked")
 
     elif step == 'distributions':
-        forecasts_df = load_table(config_path, f"{schema}.forecast_results")
-        # Start Dask for parallel distribution fitting
+        print("Loading forecasts from PostgreSQL...")
+        forecasts_df = _load_forecasts_from_db(config_path)
+        # Start Dask for parallel distribution fitting (mirrors forecast/backtest steps)
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
             orchestrator.start_dask_client()
@@ -215,14 +286,11 @@ Examples:
         '--config', type=str, default='config/config.yaml',
         help='Path to config.yaml (default: config/config.yaml)'
     )
-    parser.add_argument(
-        '--output', type=str, default=None,
-        help='Output directory override (default: from config)'
-    )
 
     # Step control
     parser.add_argument('--skip-etl', action='store_true', help='Skip ETL step')
     parser.add_argument('--skip-outlier-detection', action='store_true', help='Skip outlier detection step')
+    parser.add_argument('--skip-segmentation', action='store_true', help='Skip segmentation step')
     parser.add_argument('--skip-characterization', action='store_true', help='Skip characterization step')
     parser.add_argument('--skip-forecasting', action='store_true', help='Skip forecasting step')
     parser.add_argument('--skip-backtest', action='store_true', help='Skip backtesting step')
@@ -232,18 +300,15 @@ Examples:
     # Single step mode
     parser.add_argument(
         '--only', type=str, default=None,
-        choices=['etl', 'outlier-detection', 'characterize', 'forecast', 'backtest', 'best-method', 'distributions'],
+        choices=['etl', 'outlier-detection', 'segmentation', 'characterize',
+                 'forecast', 'backtest', 'best-method', 'distributions'],
         help='Run only a single step'
     )
 
-    # Series filtering and method override (used by the "Run Forecast" UI button)
+    # Segment scoping
     parser.add_argument(
-        '--series', type=str, default=None,
-        help='Comma-separated list of unique_ids to process (e.g., 63530_517,63531_518)'
-    )
-    parser.add_argument(
-        '--all-methods', action='store_true',
-        help='Run ALL forecast methods instead of only recommended ones'
+        '--segment-id', type=int, default=None,
+        help='Scope step to only series belonging to this segment (by segment.id)'
     )
 
     # Schema discovery
@@ -280,12 +345,7 @@ Examples:
     # Single step mode
     if args.only:
         logger.info(f"Running single step: {args.only}")
-        series_filter = args.series.split(',') if args.series else None
-        run_single_step(
-            args.only, args.config, args.output,
-            series_filter=series_filter,
-            all_methods=args.all_methods,
-        )
+        run_single_step(args.only, args.config, segment_id=args.segment_id)
         return
 
     # Full pipeline
@@ -293,10 +353,10 @@ Examples:
 
     orchestrator = ForecastOrchestrator(args.config)
 
-    output_tables = orchestrator.run_complete_pipeline(
-        output_dir=args.output,
+    output_paths = orchestrator.run_complete_pipeline(
         skip_etl=args.skip_etl,
         skip_outlier_detection=args.skip_outlier_detection,
+        skip_segmentation=args.skip_segmentation,
         skip_characterization=args.skip_characterization,
         skip_forecasting=args.skip_forecasting,
         skip_backtest=args.skip_backtest,
@@ -307,10 +367,10 @@ Examples:
     print("\n" + "=" * 80)
     print("PIPELINE COMPLETE!")
     print("=" * 80)
-    print("\nOutput tables:")
-    for key, table in output_tables.items():
-        if table:
-            print(f"  {key}: {table}")
+    print("\nOutput files:")
+    for key, path in output_paths.items():
+        if path:
+            print(f"  {key}: {path}")
 
 
 if __name__ == "__main__":

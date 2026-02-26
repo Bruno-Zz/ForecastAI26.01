@@ -2,10 +2,66 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  :root {
+    /* Surface colors */
+    --color-surface: #ffffff;
+    --color-surface-alt: #f9fafb;
+    --color-surface-raised: #ffffff;
+    /* Border colors */
+    --color-border: #e5e7eb;
+    --color-border-subtle: #f3f4f6;
+    /* Content colors */
+    --color-content: #111827;
+    --color-content-secondary: #6b7280;
+    --color-content-tertiary: #9ca3af;
+    /* Chart backgrounds */
+    --color-chart-bg: #ffffff;
+    --color-chart-grid: #e5e7eb;
+    --color-chart-text: #374151;
+  }
+
+  .dark {
+    --color-surface: #1f2937;
+    --color-surface-alt: #111827;
+    --color-surface-raised: #374151;
+    --color-border: #4b5563;
+    --color-border-subtle: #374151;
+    --color-content: #f9fafb;
+    --color-content-secondary: #d1d5db;
+    --color-content-tertiary: #9ca3af;
+    --color-chart-bg: #1f2937;
+    --color-chart-grid: #4b5563;
+    --color-chart-text: #e5e7eb;
+  }
+}
+
 body {
   margin: 0;
   min-height: 100vh;
-  background-color: #f9fafb;
-  color: #111827;
+  background-color: var(--color-surface-alt);
+  color: var(--color-content);
   font-family: Inter, system-ui, -apple-system, sans-serif;
+}
+
+/* Scrollbar styling for dark mode */
+.dark ::-webkit-scrollbar { width: 8px; height: 8px; }
+.dark ::-webkit-scrollbar-track { background: #1f2937; }
+.dark ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+
+/* Note indicator triangle for forecast cells */
+.cell-note-indicator {
+  position: relative;
+}
+.cell-note-indicator::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 0 8px 8px 0;
+  border-color: transparent #818cf8 transparent transparent;
 }

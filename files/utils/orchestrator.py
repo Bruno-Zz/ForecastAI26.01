@@ -3,17 +3,14 @@ Parallel Forecast Orchestrator
 Coordinates all forecasting methods across time series using Dask.
 
 Pipeline steps:
-  1. ETL: Extract from PostgreSQL, transform, load to PostgreSQL
+  1. ETL: Extract from source, transform, load to PostgreSQL
   2. Characterization: Analyze each series (seasonality, trend, intermittency, complexity)
   3. Forecasting: Statistical + Neural + Foundation + ML models
   4. Backtesting: Rolling-window evaluation with per-origin forecast storage
   5. Best method selection: Composite-score ranking per series
   6. Distribution fitting: Parametric distributions for MEIO
-
-All intermediate and final results are persisted to PostgreSQL (zcube schema).
 """
 
-import json
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional
@@ -48,9 +45,6 @@ from characterization.characterization import TimeSeriesCharacterizer
 from selection.best_method import MethodSelector
 from outlier.detection import OutlierDetector
 from utils.process_logger import ProcessLogger, ListHandler
-
-# Database helpers
-from db.db import get_conn, bulk_insert, jsonb_serialize, load_table, get_schema
 
 
 def _dask_forecast_batch(config_path: str,
@@ -89,9 +83,24 @@ def _dask_forecast_batch(config_path: str,
         logger.warning(f"Statistical forecasting failed in worker: {e}")
 
     # ML forecasts (LightGBM / XGBoost) — only for eligible series
-    ml_eligible = batch_chars[
-        batch_chars.get('sufficient_for_ml', pd.Series(dtype=bool)).fillna(False)
-    ] if 'sufficient_for_ml' in batch_chars.columns else pd.DataFrame()
+    # Recompute eligibility from current config thresholds so we don't rely on
+    # stale booleans that may have been stored with different threshold settings.
+    try:
+        import yaml as _yaml
+        with open(config_path, 'r') as _fh:
+            _cfg = _yaml.safe_load(_fh)
+        _sufficiency = _cfg.get('characterization', {}).get('data_sufficiency', {})
+        _min_ml = _sufficiency.get('min_for_ml', 100)
+        _min_dl = _sufficiency.get('min_for_deep_learning', 200)
+    except Exception:
+        _min_ml, _min_dl = 100, 200
+
+    if 'n_observations' in batch_chars.columns:
+        ml_eligible = batch_chars[batch_chars['n_observations'] >= _min_ml]
+    else:
+        ml_eligible = batch_chars[
+            batch_chars.get('sufficient_for_ml', pd.Series(dtype=bool)).fillna(False)
+        ] if 'sufficient_for_ml' in batch_chars.columns else pd.DataFrame()
 
     if len(ml_eligible) > 0:
         try:
@@ -318,39 +327,19 @@ class ForecastOrchestrator:
             self._start_local_client(dask_config)
 
     def _start_local_client(self, dask_config: Dict):
-        """Start local Dask client with heartbeat / timeout settings."""
-        import os
-        n_workers = dask_config.get('n_workers') or os.cpu_count()
-        threads_per_worker = dask_config.get('threads_per_worker', 2)
+        """Start local Dask client."""
+        n_workers = dask_config.get('n_workers')
+        threads_per_worker = dask_config.get('threads_per_worker', 1)
         memory_limit = dask_config.get('memory_limit', 'auto')
-        death_timeout = dask_config.get('death_timeout', 120)
-        heartbeat_interval = dask_config.get('heartbeat_interval', '10s')
-
-        # Configure Dask distributed timeouts to prevent CommClosedError
-        # on Windows when many workers are under heavy CPU load.
-        if DASK_AVAILABLE:
-            dask.config.set({
-                "distributed.comm.timeouts.connect": "60s",
-                "distributed.comm.timeouts.tcp": "120s",
-                "distributed.worker.heartbeat-interval": heartbeat_interval,
-            })
 
         self.client = Client(
             n_workers=n_workers,
             threads_per_worker=threads_per_worker,
             memory_limit=memory_limit,
-            processes=True,
-            timeout=death_timeout,
+            processes=True
         )
 
-        total_slots = n_workers * threads_per_worker
-        cpu_count = os.cpu_count() or 1
-        pct = int(100 * total_slots / cpu_count)
-        self.logger.info(
-            f"Started local Dask client: {n_workers} workers × "
-            f"{threads_per_worker} threads = {total_slots} slots "
-            f"({pct}% of {cpu_count} cores)"
-        )
+        self.logger.info(f"Started local Dask client: {self.client}")
         self.logger.info(f"Dashboard: {self.client.dashboard_link}")
 
     def stop_dask_client(self):
@@ -358,13 +347,6 @@ class ForecastOrchestrator:
         if self.client:
             self.client.close()
             self.client = None
-
-    # -- DB helpers --
-
-    def _load_table_as_df(self, table_name: str) -> pd.DataFrame:
-        """Load a zcube table into a pandas DataFrame."""
-        schema = get_schema(self.config_path)
-        return load_table(self.config_path, f"{schema}.{table_name}")
 
     # -- ProcessLogger helpers --
 
@@ -412,7 +394,7 @@ class ForecastOrchestrator:
 
     def step_etl(self) -> pd.DataFrame:
         """
-        Step 1: Extract data from PostgreSQL, transform, load back to PostgreSQL.
+        Step 1: Extract data from source, transform, load to PostgreSQL.
 
         Returns:
             DataFrame with columns [unique_id, date, y, ...]
@@ -442,56 +424,88 @@ class ForecastOrchestrator:
 
         corrected_df, outliers_df = self.outlier_detector.detect_and_correct_all(df)
 
-        schema = get_schema(self.config_path)
-
-        # Persist outlier records to PostgreSQL
-        if not outliers_df.empty:
-            outlier_cols = [
-                "unique_id", "date", "original_value", "corrected_value",
-                "detection_method", "correction_method", "z_score",
-                "lower_bound", "upper_bound",
-            ]
-            outlier_rows = []
-            for _, r in outliers_df.iterrows():
-                outlier_rows.append(tuple(
-                    r.get(c) if c != "date" else (r["date"].date() if hasattr(r["date"], "date") else r["date"])
-                    for c in outlier_cols
-                ))
-            bulk_insert(
-                self.config_path,
-                f"{schema}.detected_outliers",
-                outlier_cols,
-                outlier_rows,
-            )
-            self.logger.info(f"Outliers saved to DB: {len(outlier_rows)} rows")
-
-            # Update corrected_qty in demand_actuals for affected rows
-            conn = get_conn(self.config_path)
+        # Save corrected data to PostgreSQL (update corrected_qty in demand_actuals)
+        try:
+            from db.db import get_conn, get_schema
+            config_path = str(self.config_path)
+            schema = get_schema(config_path)
+            conn = get_conn(config_path)
             try:
                 with conn.cursor() as cur:
-                    update_rows = [
-                        (float(r["corrected_value"]), str(r["unique_id"]),
-                         r["date"].date() if hasattr(r["date"], "date") else r["date"])
-                        for _, r in outliers_df.iterrows()
-                    ]
-                    from psycopg2.extras import execute_batch
-                    execute_batch(
-                        cur,
-                        f"UPDATE {schema}.demand_actuals SET corrected_qty = %s WHERE unique_id = %s AND date = %s",
-                        update_rows,
-                        page_size=5000,
-                    )
+                    # Build a mapping of (unique_id, date) → corrected y value
+                    updates = []
+                    for _, row in corrected_df.iterrows():
+                        updates.append((float(row['y']), str(row['unique_id']), str(row['date'])))
+
+                    if updates:
+                        from psycopg2.extras import execute_batch
+                        update_sql = f"""
+                            UPDATE {schema}.demand_actuals
+                            SET corrected_qty = %s
+                            WHERE unique_id = %s AND date = %s
+                        """
+                        execute_batch(cur, update_sql, updates, page_size=5000)
                 conn.commit()
-                self.logger.info(f"Updated corrected_qty for {len(update_rows)} rows in demand_actuals")
-            except Exception as exc:
-                conn.rollback()
-                self.logger.warning(f"Failed to update corrected_qty: {exc}")
+                self.logger.info(f"Corrected data saved to {schema}.demand_actuals ({len(updates):,} rows updated)")
             finally:
                 conn.close()
+        except Exception as db_err:
+            self.logger.error(f"Could not save corrected data to DB: {db_err}")
+            raise
+
+        # Save outlier log to PostgreSQL
+        if not outliers_df.empty:
+            try:
+                from db.db import bulk_insert, get_schema, jsonb_serialize
+                config_path = str(self.config_path)
+                schema = get_schema(config_path)
+                outlier_table = f"{schema}.detected_outliers"
+
+                # Map outlier_df columns to DB columns
+                db_cols = ['unique_id', 'date', 'original_value', 'corrected_value',
+                           'detection_method', 'correction_method', 'z_score',
+                           'lower_bound', 'upper_bound']
+                # Build rows from the DataFrame (handle missing columns gracefully)
+                rows = []
+                for _, row in outliers_df.iterrows():
+                    rows.append((
+                        str(row.get('unique_id', '')),
+                        str(row.get('date', '')),
+                        float(row['original_value']) if pd.notna(row.get('original_value')) else None,
+                        float(row['corrected_value']) if pd.notna(row.get('corrected_value')) else None,
+                        str(row.get('detection_method', '')),
+                        str(row.get('correction_method', '')),
+                        float(row['z_score']) if pd.notna(row.get('z_score')) else None,
+                        float(row['lower_bound']) if pd.notna(row.get('lower_bound')) else None,
+                        float(row['upper_bound']) if pd.notna(row.get('upper_bound')) else None,
+                    ))
+                bulk_insert(config_path, outlier_table, db_cols, rows, truncate=True)
+                self.logger.info(f"Outliers saved to {outlier_table} ({len(rows):,} outliers)")
+            except Exception as db_err:
+                self.logger.error(f"Could not save outliers to DB: {db_err}")
+                raise
         else:
             self.logger.info("No outliers detected")
 
         return corrected_df, outliers_df
+
+    def step_segmentation(self) -> Dict[str, int]:
+        """
+        Step 1c: Compute ABC classification and assign series to all segments.
+
+        Returns:
+            Dict mapping segment_name → count of assigned series
+        """
+        self.logger.info("=" * 80)
+        self.logger.info("STEP 1c: Segmentation — ABC Classification + Segment Assignment")
+        self.logger.info("=" * 80)
+
+        from segmentation.segmentation import SegmentationEngine
+        engine = SegmentationEngine(self.config_path)
+        results = engine.run_all()
+        for seg_name, count in results.items():
+            self.logger.info(f"  '{seg_name}': {count} series")
+        return results
 
     def step_characterize(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -550,12 +564,20 @@ class ForecastOrchestrator:
             self.logger.warning(f"Statistical forecasting failed: {e}")
 
         # --- ML forecasts (LightGBM / XGBoost) ---
-        ml_eligible = characteristics_df[
-            characteristics_df.get('sufficient_for_ml', pd.Series(dtype=bool)).fillna(False)
-        ] if 'sufficient_for_ml' in characteristics_df.columns else pd.DataFrame()
+        # Recompute eligibility from current config so stale DB booleans are ignored.
+        _sufficiency = self.config.get('characterization', {}).get('data_sufficiency', {})
+        _min_ml = _sufficiency.get('min_for_ml', 100)
+        _min_dl = _sufficiency.get('min_for_deep_learning', 200)
+
+        if 'n_observations' in characteristics_df.columns:
+            ml_eligible = characteristics_df[characteristics_df['n_observations'] >= _min_ml]
+        else:
+            ml_eligible = characteristics_df[
+                characteristics_df.get('sufficient_for_ml', pd.Series(dtype=bool)).fillna(False)
+            ] if 'sufficient_for_ml' in characteristics_df.columns else pd.DataFrame()
 
         if len(ml_eligible) > 0:
-            self.logger.info(f"ML forecasts for {len(ml_eligible)} series...")
+            self.logger.info(f"ML forecasts for {len(ml_eligible)} series (min_obs={_min_ml})...")
             try:
                 ml_forecasts = self.ml_forecaster.forecast_multiple_series(
                     df=df,
@@ -567,12 +589,15 @@ class ForecastOrchestrator:
                 self.logger.warning(f"ML forecasting failed: {e}")
 
         # --- Neural forecasts ---
-        neural_eligible = characteristics_df[
-            characteristics_df.get('sufficient_for_deep_learning', pd.Series(dtype=bool)).fillna(False)
-        ] if 'sufficient_for_deep_learning' in characteristics_df.columns else pd.DataFrame()
+        if 'n_observations' in characteristics_df.columns:
+            neural_eligible = characteristics_df[characteristics_df['n_observations'] >= _min_dl]
+        else:
+            neural_eligible = characteristics_df[
+                characteristics_df.get('sufficient_for_deep_learning', pd.Series(dtype=bool)).fillna(False)
+            ] if 'sufficient_for_deep_learning' in characteristics_df.columns else pd.DataFrame()
 
         if len(neural_eligible) > 0:
-            self.logger.info(f"Neural forecasts for {len(neural_eligible)} series...")
+            self.logger.info(f"Neural forecasts for {len(neural_eligible)} series (min_obs={_min_dl})...")
             try:
                 neural_forecasts = self.neural_forecaster.forecast_multiple_series(
                     df=df,
@@ -609,7 +634,7 @@ class ForecastOrchestrator:
         Step 3: Generate forecasts using all model families.
 
         Args:
-            df: Time series data (must contain unique_id, date, y)
+            df: Time series data
             characteristics_df: Series characteristics
 
         Returns:
@@ -619,18 +644,15 @@ class ForecastOrchestrator:
         self.logger.info("STEP 3: Forecasting (Statistical + ML + Neural + Foundation)")
         self.logger.info("=" * 80)
 
-        # Strip to canonical columns only — extra columns (item_id, site_id,
-        # channel, item_name, site_name etc.) would be treated as exogenous
-        # features by StatsForecast, causing forecast failures.
-        keep_cols = [c for c in ['unique_id', 'date', 'y'] if c in df.columns]
-        df = df[keep_cols].copy()
-
         batch_size = self.parallel_config.get('batch_size', 100)
 
         if self.client is None or not DASK_AVAILABLE:
             # Serial mode
+            n_series = len(characteristics_df)
             self.logger.info("Running forecasting in serial mode...")
+            self.logger.info(f"[FORECAST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total=1")
             forecasts_df = self.forecast_batch(df, characteristics_df)
+            self.logger.info(f"[FORECAST_PROGRESS] completed={n_series} total={n_series} batches_done=1 batches_total=1")
         else:
             # Parallel with Dask — use the module-level standalone function so
             # the orchestrator instance (which holds un-picklable asyncio state)
@@ -641,6 +663,7 @@ class ForecastOrchestrator:
             self.logger.info(f"  {n_series} series → {n_batches} batches")
 
             futures = []
+            self.logger.info(f"[FORECAST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total={n_batches}")
             for i in range(n_batches):
                 start_idx = i * batch_size
                 end_idx = min((i + 1) * batch_size, n_series)
@@ -657,13 +680,27 @@ class ForecastOrchestrator:
                 futures.append(future)
 
             results = []
+            completed_series = 0
+            completed_batches = 0
             for future in as_completed(futures):
+                completed_batches += 1
                 try:
                     result = future.result()
                     if not result.empty:
                         results.append(result)
+                        if 'unique_id' in result.columns:
+                            completed_series = min(completed_series + result['unique_id'].nunique(), n_series)
+                        else:
+                            completed_series = min(completed_batches * batch_size, n_series)
+                    else:
+                        completed_series = min(completed_batches * batch_size, n_series)
                 except Exception as e:
                     self.logger.error(f"Batch failed: {e}")
+                    completed_series = min(completed_batches * batch_size, n_series)
+                self.logger.info(
+                    f"[FORECAST_PROGRESS] completed={completed_series} total={n_series} "
+                    f"batches_done={completed_batches} batches_total={n_batches}"
+                )
 
             forecasts_df = pd.concat(results, ignore_index=True) if results else pd.DataFrame()
             self.logger.info(f"Generated {len(forecasts_df)} forecasts across {n_batches} batches")
@@ -673,32 +710,18 @@ class ForecastOrchestrator:
             return forecasts_df
 
         # Save to PostgreSQL
-        schema = get_schema(self.config_path)
-        fc_cols = ["unique_id", "method", "point_forecast", "quantiles", "hyperparameters", "training_time"]
-        fc_rows = []
-        for _, r in forecasts_df.iterrows():
-            fc_rows.append((
-                str(r["unique_id"]),
-                str(r["method"]),
-                jsonb_serialize(r.get("point_forecast")),
-                jsonb_serialize(r.get("quantiles")),
-                jsonb_serialize(r.get("hyperparameters")),
-                float(r["training_time"]) if pd.notna(r.get("training_time")) else None,
-            ))
-
-        # Only delete rows for the series we just forecasted, preserving
-        # results for other series (important for --series partial runs).
-        forecasted_uids = forecasts_df["unique_id"].unique().tolist()
-        uid_list = ", ".join(f"'{u}'" for u in forecasted_uids)
-        bulk_insert(
-            self.config_path,
-            f"{schema}.forecast_results",
-            fc_cols,
-            fc_rows,
-            truncate=False,
-            delete_where=f"unique_id IN ({uid_list})",
-        )
-        self.logger.info(f"Forecasts saved to DB: {len(fc_rows)} rows")
+        try:
+            from db.db import bulk_insert, get_schema, jsonb_serialize
+            schema = get_schema(str(self.config_path))
+            cols = list(forecasts_df.columns)
+            rows = [tuple(jsonb_serialize(v) for v in row)
+                    for row in forecasts_df.itertuples(index=False, name=None)]
+            n = bulk_insert(str(self.config_path), f"{schema}.forecast_results",
+                            cols, rows, truncate=True)
+            self.logger.info(f"Forecasts saved to {schema}.forecast_results ({n} rows)")
+        except Exception as db_err:
+            self.logger.error(f"Could not save forecasts to DB: {db_err}")
+            raise
 
         return forecasts_df
 
@@ -721,10 +744,6 @@ class ForecastOrchestrator:
         self.logger.info("=" * 80)
         self.logger.info("STEP 4: Backtesting with Per-Origin Forecast Storage")
         self.logger.info("=" * 80)
-
-        # Strip to canonical columns only — same as step_forecast().
-        keep_cols = [c for c in ['unique_id', 'date', 'y'] if c in df.columns]
-        df = df[keep_cols].copy()
 
         # Build per-series work items: (unique_id, series_df_slice, methods, chars_dict)
         work_items = []
@@ -754,6 +773,7 @@ class ForecastOrchestrator:
                 f"Running parallel backtesting with Dask "
                 f"({n_series} series → {n_batches} batches of ~{batch_size})..."
             )
+            self.logger.info(f"[BACKTEST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total={n_batches}")
 
             futures = []
             for b in range(n_batches):
@@ -772,7 +792,9 @@ class ForecastOrchestrator:
                 futures.append(future)
 
             completed_series = 0
+            completed_batches = 0
             for future in as_completed(futures):
+                completed_batches += 1
                 try:
                     metrics, origin_forecasts = future.result()
                     if not metrics.empty:
@@ -782,12 +804,17 @@ class ForecastOrchestrator:
                         all_origin_forecasts.append(origin_forecasts)
                 except Exception as e:
                     self.logger.warning(f"Backtest batch failed: {e}")
+                self.logger.info(
+                    f"[BACKTEST_PROGRESS] completed={completed_series} total={n_series} "
+                    f"batches_done={completed_batches} batches_total={n_batches}"
+                )
 
             self.logger.info(f"Backtest complete: {completed_series}/{n_series} series processed")
 
         else:
             # ---- Serial fallback ----
             self.logger.info(f"Running serial backtesting ({n_series} series)...")
+            self.logger.info(f"[BACKTEST_PROGRESS] completed=0 total={n_series}")
             for idx, (unique_id, series_slice, methods, chars_dict) in enumerate(work_items):
                 self.logger.info(f"Backtesting [{idx+1}/{n_series}]: {unique_id} with {methods}")
                 try:
@@ -813,6 +840,7 @@ class ForecastOrchestrator:
                         all_metrics.append(metrics)
                 except Exception as e:
                     self.logger.warning(f"Backtest failed for {unique_id}: {e}")
+                self.logger.info(f"[BACKTEST_PROGRESS] completed={idx+1} total={n_series}")
 
         # Combine metrics
         metrics_df = pd.concat(all_metrics, ignore_index=True) if all_metrics else pd.DataFrame()
@@ -820,53 +848,37 @@ class ForecastOrchestrator:
         # Combine per-origin forecasts
         origin_df = pd.concat(all_origin_forecasts, ignore_index=True) if all_origin_forecasts else pd.DataFrame()
 
-        # Save to PostgreSQL
-        schema = get_schema(self.config_path)
+        # Save outputs to PostgreSQL
+        from db.db import bulk_insert, get_schema, jsonb_serialize
+        schema = get_schema(str(self.config_path))
 
         if not metrics_df.empty:
-            m_cols = [
-                "unique_id", "method", "forecast_origin", "horizon",
-                "mae", "rmse", "mape", "smape", "mase", "bias",
-                "crps", "winkler_score",
-                "coverage_50", "coverage_80", "coverage_90", "coverage_95",
-                "quantile_loss", "aic", "bic", "aicc",
-            ]
-            m_rows = []
-            for _, r in metrics_df.iterrows():
-                row = []
-                for c in m_cols:
-                    v = r.get(c)
-                    if c == "forecast_origin" and v is not None:
-                        v = pd.Timestamp(v).date() if pd.notna(v) else None
-                    elif c == "horizon":
-                        v = int(v) if pd.notna(v) else None
-                    elif c in ("unique_id", "method"):
-                        v = str(v) if v is not None else None
-                    else:
-                        v = float(v) if pd.notna(v) else None
-                    row.append(v)
-                m_rows.append(tuple(row))
-            bulk_insert(self.config_path, f"{schema}.backtest_metrics", m_cols, m_rows)
-            self.logger.info(f"Backtest metrics saved to DB: {len(m_rows)} rows")
+            try:
+                cols = list(metrics_df.columns)
+                rows = [tuple(jsonb_serialize(v) for v in row)
+                        for row in metrics_df.itertuples(index=False, name=None)]
+                n = bulk_insert(str(self.config_path), f"{schema}.backtest_metrics",
+                                cols, rows, truncate=True)
+                self.logger.info(f"Backtest metrics saved to {schema}.backtest_metrics ({n} rows)")
+            except Exception as db_err:
+                self.logger.error(f"Could not save backtest metrics to DB: {db_err}")
+                raise
 
-            # Log summary
             summary = metrics_df.groupby('method')[['mae', 'rmse']].mean()
-            self.logger.info(f"Backtest summary by method:\n{summary}")
+            self.logger.info(f"Backtest summary by method:
+{summary}")
 
         if not origin_df.empty:
-            o_cols = ["unique_id", "method", "forecast_origin", "horizon_step", "point_forecast", "actual_value"]
-            o_rows = []
-            for _, r in origin_df.iterrows():
-                o_rows.append((
-                    str(r["unique_id"]),
-                    str(r["method"]),
-                    pd.Timestamp(r["forecast_origin"]).date() if pd.notna(r.get("forecast_origin")) else None,
-                    int(r["horizon_step"]) if pd.notna(r.get("horizon_step")) else None,
-                    float(r["point_forecast"]) if pd.notna(r.get("point_forecast")) else None,
-                    float(r["actual_value"]) if pd.notna(r.get("actual_value")) else None,
-                ))
-            bulk_insert(self.config_path, f"{schema}.forecasts_by_origin", o_cols, o_rows)
-            self.logger.info(f"Per-origin forecasts saved to DB: {len(o_rows)} rows")
+            try:
+                cols = list(origin_df.columns)
+                rows = [tuple(jsonb_serialize(v) for v in row)
+                        for row in origin_df.itertuples(index=False, name=None)]
+                n = bulk_insert(str(self.config_path), f"{schema}.forecasts_by_origin",
+                                cols, rows, truncate=True)
+                self.logger.info(f"Per-origin forecasts saved to {schema}.forecasts_by_origin ({n} rows)")
+            except Exception as db_err:
+                self.logger.error(f"Could not save origin forecasts to DB: {db_err}")
+                raise
 
         return metrics_df, origin_df
 
@@ -891,20 +903,18 @@ class ForecastOrchestrator:
         best_methods_df = self.method_selector.select_best_methods(metrics_df)
 
         # Save to PostgreSQL
-        schema = get_schema(self.config_path)
-        bm_cols = ["unique_id", "best_method", "best_score", "runner_up_method", "runner_up_score", "all_rankings"]
-        bm_rows = []
-        for _, r in best_methods_df.iterrows():
-            bm_rows.append((
-                str(r["unique_id"]),
-                str(r["best_method"]) if pd.notna(r.get("best_method")) else None,
-                float(r["best_score"]) if pd.notna(r.get("best_score")) else None,
-                str(r["runner_up_method"]) if pd.notna(r.get("runner_up_method")) else None,
-                float(r["runner_up_score"]) if pd.notna(r.get("runner_up_score")) else None,
-                jsonb_serialize(r.get("all_rankings")),
-            ))
-        bulk_insert(self.config_path, f"{schema}.best_method_per_series", bm_cols, bm_rows)
-        self.logger.info(f"Best methods saved to DB: {len(bm_rows)} rows")
+        try:
+            from db.db import bulk_insert, get_schema, jsonb_serialize
+            schema = get_schema(str(self.config_path))
+            cols = list(best_methods_df.columns)
+            rows = [tuple(jsonb_serialize(v) for v in row)
+                    for row in best_methods_df.itertuples(index=False, name=None)]
+            n = bulk_insert(str(self.config_path), f"{schema}.best_method_per_series",
+                            cols, rows, truncate=True)
+            self.logger.info(f"Best methods saved to {schema}.best_method_per_series ({n} rows)")
+        except Exception as db_err:
+            self.logger.error(f"Could not save best methods to DB: {db_err}")
+            raise
 
         # Log distribution
         if 'best_method' in best_methods_df.columns:
@@ -964,37 +974,27 @@ class ForecastOrchestrator:
             distributions_df = self.dist_fitter.fit_forecast_distributions(forecasts_df)
 
         # Save to PostgreSQL
-        schema = get_schema(self.config_path)
-        d_cols = [
-            "unique_id", "method", "forecast_horizon", "distribution_type",
-            "mean", "std", "params", "ks_statistic", "ks_pvalue",
-            "service_level_quantiles",
-        ]
-        d_rows = []
-        for _, r in distributions_df.iterrows():
-            d_rows.append((
-                str(r["unique_id"]),
-                str(r["method"]) if pd.notna(r.get("method")) else None,
-                int(r["forecast_horizon"]) if pd.notna(r.get("forecast_horizon")) else None,
-                str(r["distribution_type"]) if pd.notna(r.get("distribution_type")) else None,
-                float(r["mean"]) if pd.notna(r.get("mean")) else None,
-                float(r["std"]) if pd.notna(r.get("std")) else None,
-                jsonb_serialize(r.get("params")),
-                float(r["ks_statistic"]) if pd.notna(r.get("ks_statistic")) else None,
-                float(r["ks_pvalue"]) if pd.notna(r.get("ks_pvalue")) else None,
-                jsonb_serialize(r.get("service_level_quantiles")),
-            ))
-        bulk_insert(self.config_path, f"{schema}.fitted_distributions", d_cols, d_rows)
-        self.logger.info(f"Distributions saved to DB: {len(d_rows)} rows")
+        try:
+            from db.db import bulk_insert, get_schema, jsonb_serialize
+            schema = get_schema(str(self.config_path))
+            cols = list(distributions_df.columns)
+            rows = [tuple(jsonb_serialize(v) for v in row)
+                    for row in distributions_df.itertuples(index=False, name=None)]
+            n = bulk_insert(str(self.config_path), f"{schema}.fitted_distributions",
+                            cols, rows, truncate=True)
+            self.logger.info(f"Distributions saved to {schema}.fitted_distributions ({n} rows)")
+        except Exception as db_err:
+            self.logger.error(f"Could not save distributions to DB: {db_err}")
+            raise
 
         return distributions_df
 
     # -- Full pipeline --
 
     def run_complete_pipeline(self,
-                              output_dir: Optional[str] = None,
                               skip_etl: bool = False,
                               skip_outlier_detection: bool = False,
+                              skip_segmentation: bool = False,
                               skip_characterization: bool = False,
                               skip_forecasting: bool = False,
                               skip_backtest: bool = False,
@@ -1002,21 +1002,17 @@ class ForecastOrchestrator:
                               skip_distributions: bool = False) -> Dict[str, str]:
         """
         Run the complete forecasting pipeline.
-
-        All data is read from and written to PostgreSQL (zcube schema).
+        All data is read from and written to PostgreSQL.
 
         Args:
-            output_dir: Output directory override (for summary YAML only)
-            skip_*: Flags to skip individual steps
+            skip_*: Flags to skip individual steps (skipped steps load their
+                    inputs from PostgreSQL instead of re-computing them)
 
         Returns:
-            Dictionary with output table names
+            Dictionary describing what each step wrote to (PostgreSQL table names)
         """
         start_time = time.time()
-        output_base = Path(output_dir or self.output_config['base_path'])
-        output_base.mkdir(parents=True, exist_ok=True)
-        schema = get_schema(self.config_path)
-        output_tables = {}
+        output_paths = {}
 
         self.logger.info("=" * 80)
         self.logger.info("STARTING COMPLETE FORECASTING PIPELINE")
@@ -1034,15 +1030,22 @@ class ForecastOrchestrator:
         try:
             # Step 1: ETL
             if skip_etl:
-                self.logger.info("Skipping ETL, loading from DB...")
-                df = self._load_table_as_df("demand_actuals")
-                # Reconstruct the standard (unique_id, date, y) format
-                if "qty" in df.columns:
-                    df["y"] = df["corrected_qty"].combine_first(df["qty"]) if "corrected_qty" in df.columns else df["qty"]
-                    df["date"] = pd.to_datetime(df["date"])
+                self.logger.info("Skipping ETL, loading demand data from PostgreSQL...")
+                from db.db import get_conn, get_schema
+                _schema = get_schema(str(self.config_path))
+                _table = f"{_schema}.demand_actuals" if _schema != "public" else "demand_actuals"
+                _conn = get_conn(str(self.config_path))
+                try:
+                    df = pd.read_sql(
+                        f"SELECT unique_id, date, COALESCE(corrected_qty, qty) AS y FROM {_table} ORDER BY unique_id, date",
+                        _conn,
+                    )
+                finally:
+                    _conn.close()
+                self.logger.info(f"Loaded {len(df):,} rows from {_table}")
             else:
                 df = self._run_step(pl, "etl", self.step_etl)
-                output_tables['demand_actuals'] = f"{schema}.demand_actuals"
+                output_paths['time_series'] = 'PostgreSQL: demand_actuals'
 
             self.logger.info(f"Data: {len(df)} rows, {df['unique_id'].nunique()} series")
 
@@ -1050,48 +1053,66 @@ class ForecastOrchestrator:
             outlier_config = self.config.get('outlier_detection', {})
             if not skip_outlier_detection and outlier_config.get('enabled', False):
                 df, outliers_df = self._run_step(pl, "outlier_detection", self.step_outlier_detection, df)
-                output_tables['detected_outliers'] = f"{schema}.detected_outliers"
+                output_paths['outliers'] = 'PostgreSQL: detected_outliers'
+                output_paths['time_series_corrected'] = 'PostgreSQL: demand_actuals.corrected_qty'
             else:
                 self.logger.info("Skipping outlier detection")
 
+            # Step 1c: Segmentation
+            if not skip_segmentation:
+                self._run_step(pl, "segmentation", self.step_segmentation)
+                output_paths['segmentation'] = 'PostgreSQL: segment_membership'
+            else:
+                self.logger.info("Skipping segmentation step")
+
             # Step 2: Characterization
             if skip_characterization:
-                self.logger.info("Skipping characterization, loading from DB...")
-                characteristics_df = self._load_table_as_df("time_series_characteristics")
+                self.logger.info("Skipping characterization, loading from PostgreSQL...")
+                from db.db import load_table, get_schema
+                _schema = get_schema(str(self.config_path))
+                _table = f"{_schema}.time_series_characteristics" if _schema != "public" else "time_series_characteristics"
+                characteristics_df = load_table(str(self.config_path), _table)
+                self.logger.info(f"Loaded {len(characteristics_df):,} characteristics from {_table}")
             else:
                 characteristics_df = self._run_step(pl, "characterization", self.step_characterize, df)
-                output_tables['characteristics'] = f"{schema}.time_series_characteristics"
+                output_paths['characteristics'] = 'PostgreSQL: time_series_characteristics'
 
             # Step 3: Forecasting
             if not skip_forecasting:
                 forecasts_df = self._run_step(pl, "forecasting", self.step_forecast, df, characteristics_df)
-                output_tables['forecasts'] = f"{schema}.forecast_results"
+                output_paths['forecasts'] = 'PostgreSQL: forecast_results'
             else:
-                self.logger.info("Skipping forecasting step")
-                forecasts_df = self._load_table_as_df("forecast_results")
+                self.logger.info("Skipping forecasting step -- loading from PostgreSQL...")
+                from db.db import load_table, get_schema
+                _schema = get_schema(str(self.config_path))
+                forecasts_df = load_table(str(self.config_path),
+                                          f"{_schema}.forecast_results")
 
             # Step 4: Backtesting
             if not skip_backtest:
                 metrics_df, origin_df = self._run_step(pl, "backtesting", self.step_backtest, df, characteristics_df)
                 if not metrics_df.empty:
-                    output_tables['metrics'] = f"{schema}.backtest_metrics"
+                    output_paths['metrics'] = 'PostgreSQL: backtest_metrics'
                 if not origin_df.empty:
-                    output_tables['forecasts_by_origin'] = f"{schema}.forecasts_by_origin"
+                    output_paths['forecasts_by_origin'] = 'PostgreSQL: forecasts_by_origin'
             else:
-                self.logger.info("Skipping backtesting step")
-                metrics_df = self._load_table_as_df("backtest_metrics")
+                self.logger.info("Skipping backtesting step -- loading metrics from PostgreSQL...")
+                from db.db import load_table, get_schema
+                _schema = get_schema(str(self.config_path))
+                metrics_df = load_table(str(self.config_path),
+                                        f"{_schema}.backtest_metrics")
 
             # Step 5: Best method selection
             if not skip_best_method and not metrics_df.empty:
                 best_methods_df = self._run_step(pl, "best_method_selection", self.step_select_best_methods, metrics_df)
-                output_tables['best_methods'] = f"{schema}.best_method_per_series"
+                output_paths['best_methods'] = 'PostgreSQL: best_method_per_series'
             else:
                 self.logger.info("Skipping best method selection")
 
             # Step 6: Distribution fitting
             if not skip_distributions and not forecasts_df.empty:
                 distributions_df = self._run_step(pl, "distribution_fitting", self.step_fit_distributions, forecasts_df)
-                output_tables['distributions'] = f"{schema}.fitted_distributions"
+                output_paths['distributions'] = 'PostgreSQL: fitted_distributions'
             else:
                 self.logger.info("Skipping distribution fitting")
 
@@ -1108,15 +1129,15 @@ class ForecastOrchestrator:
                 'n_observations': int(len(df)),
                 'n_forecasts': int(len(forecasts_df)) if not forecasts_df.empty else 0,
                 'execution_time_seconds': round(elapsed, 1),
-                'output_tables': output_tables,
+                'output_files': output_paths
             }
 
             summary_path = output_base / "pipeline_summary.yaml"
             with open(str(summary_path), 'w') as f:
                 yaml.dump(summary, f, default_flow_style=False)
-            output_tables['summary'] = str(summary_path)
+            output_paths['summary'] = str(summary_path)
 
-            return output_tables
+            return output_paths
 
         finally:
             if self.client:

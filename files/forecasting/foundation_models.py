@@ -5,7 +5,7 @@ Zero-shot time series forecasting with uncertainty quantification
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import logging
 import yaml
 from pathlib import Path
@@ -93,15 +93,17 @@ class FoundationForecaster:
     def forecast_single_series(self,
                               series: np.ndarray,
                               unique_id: str,
-                              freq: Optional[int] = None) -> ForecastResult:
+                              freq: Optional[int] = None,
+                              overrides: Optional[Dict[str, Any]] = None) -> ForecastResult:
         """
         Generate forecast for a single time series using TimesFM.
-        
+
         Args:
             series: Time series values as numpy array
             unique_id: Series identifier
             freq: Frequency hint (0=high freq, 1=medium, 2=low)
-            
+            overrides: Optional user hyperparameter overrides.
+
         Returns:
             ForecastResult object
         """
@@ -156,9 +158,12 @@ class FoundationForecaster:
                 point_forecast=point_forecast,
                 quantiles=quantiles,
                 hyperparameters={
-                    'context_length': self.context_length,
-                    'horizon_length': self.horizon_length,
-                    'freq': freq
+                    'context_length': overrides.get('context_length', self.context_length) if overrides else self.context_length,
+                    'horizon_length': overrides.get('horizon_length', self.horizon_length) if overrides else self.horizon_length,
+                    'freq': freq,
+                    'method_family': 'Foundation',
+                    'description': 'Google TimesFM foundation model for time series forecasting.',
+                    **(({'has_overrides': True, 'overrides_applied': overrides} if overrides else {})),
                 },
                 training_time=training_time,
                 insample_actual=series

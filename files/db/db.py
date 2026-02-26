@@ -118,18 +118,44 @@ def init_schema(config_path: Union[str, Path]) -> None:
     -- Schema
     CREATE SCHEMA IF NOT EXISTS {schema};
 
-    -- ─── Master tables ───────────────────────────────────────────────
+    -- ─── Lookup / type tables (must come before item/site) ───────────
 
-    -- Items
-    CREATE TABLE IF NOT EXISTS {schema}.item (
-        id          INTEGER PRIMARY KEY,
-        name        TEXT
+    -- Item types (mirrors dp_plan.dp_item_type)
+    CREATE TABLE IF NOT EXISTS {schema}.item_type (
+        id          BIGINT PRIMARY KEY,
+        xuid        TEXT,
+        name        TEXT,
+        description TEXT
     );
 
-    -- Sites
+    -- Site types (mirrors dp_plan.dp_site_type)
+    CREATE TABLE IF NOT EXISTS {schema}.site_type (
+        id          BIGINT PRIMARY KEY,
+        xuid        TEXT,
+        name        TEXT,
+        description TEXT
+    );
+
+    -- ─── Master tables ───────────────────────────────────────────────
+
+    -- Items (mirrors dp_plan.dp_item)
+    CREATE TABLE IF NOT EXISTS {schema}.item (
+        id          BIGINT PRIMARY KEY,
+        xuid        TEXT,
+        name        TEXT,
+        description TEXT,
+        attributes  JSONB,
+        type_id     BIGINT
+    );
+
+    -- Sites (mirrors dp_plan.dp_site)
     CREATE TABLE IF NOT EXISTS {schema}.site (
-        id          INTEGER PRIMARY KEY,
-        name        TEXT
+        id          BIGINT PRIMARY KEY,
+        xuid        TEXT,
+        name        TEXT,
+        description TEXT,
+        attributes  JSONB,
+        type_id     BIGINT
     );
 
     -- ─── Demand actuals ──────────────────────────────────────────────
@@ -301,6 +327,45 @@ def init_schema(config_path: Union[str, Path]) -> None:
         UNIQUE (unique_id, forecast_date, adjustment_type)
     );
 
+    -- ─── Hyperparameter overrides (user-edited params from the UI) ───
+
+    CREATE TABLE IF NOT EXISTS {schema}.hyperparameter_overrides (
+        id          SERIAL PRIMARY KEY,
+        unique_id   TEXT NOT NULL,
+        method      TEXT NOT NULL,
+        overrides   JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+        updated_at  TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (unique_id, method)
+    );
+    CREATE INDEX IF NOT EXISTS idx_hypoverrides_uid
+        ON {schema}.hyperparameter_overrides (unique_id);
+
+    -- ─── Segments ────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS {schema}.segment (
+        id          SERIAL PRIMARY KEY,
+        name        TEXT NOT NULL UNIQUE,
+        description TEXT,
+        criteria    JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+        is_default  BOOLEAN DEFAULT FALSE,
+        created_at  TIMESTAMPTZ DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS {schema}.segment_membership (
+        id          SERIAL PRIMARY KEY,
+        segment_id  INTEGER NOT NULL REFERENCES {schema}.segment(id) ON DELETE CASCADE,
+        unique_id   TEXT NOT NULL,
+        item_id     BIGINT,
+        site_id     BIGINT,
+        assigned_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (segment_id, unique_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_seg_membership_seg
+        ON {schema}.segment_membership (segment_id);
+    CREATE INDEX IF NOT EXISTS idx_seg_membership_uid
+        ON {schema}.segment_membership (unique_id);
+
     -- ─── Process log (pipeline run tracking) ─────────────────────────
 
     CREATE TABLE IF NOT EXISTS {schema}.process_log (
@@ -322,6 +387,7 @@ def init_schema(config_path: Union[str, Path]) -> None:
 
     # Separate ALTER statements for adding columns to existing tables
     alter_stmts = [
+        # demand_actuals — corrected_qty (legacy add)
         f"""
         DO $$
         BEGIN
@@ -336,16 +402,162 @@ def init_schema(config_path: Union[str, Path]) -> None:
             END IF;
         END $$;
         """,
+        # item — xuid
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'item'
+                  AND column_name = 'xuid'
+            ) THEN
+                ALTER TABLE {schema}.item ADD COLUMN xuid TEXT;
+            END IF;
+        END $$;
+        """,
+        # item — description
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'item'
+                  AND column_name = 'description'
+            ) THEN
+                ALTER TABLE {schema}.item ADD COLUMN description TEXT;
+            END IF;
+        END $$;
+        """,
+        # item — attributes
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'item'
+                  AND column_name = 'attributes'
+            ) THEN
+                ALTER TABLE {schema}.item ADD COLUMN attributes JSONB;
+            END IF;
+        END $$;
+        """,
+        # item — type_id
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'item'
+                  AND column_name = 'type_id'
+            ) THEN
+                ALTER TABLE {schema}.item ADD COLUMN type_id BIGINT;
+            END IF;
+        END $$;
+        """,
+        # site — xuid
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'site'
+                  AND column_name = 'xuid'
+            ) THEN
+                ALTER TABLE {schema}.site ADD COLUMN xuid TEXT;
+            END IF;
+        END $$;
+        """,
+        # site — description
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'site'
+                  AND column_name = 'description'
+            ) THEN
+                ALTER TABLE {schema}.site ADD COLUMN description TEXT;
+            END IF;
+        END $$;
+        """,
+        # site — attributes
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'site'
+                  AND column_name = 'attributes'
+            ) THEN
+                ALTER TABLE {schema}.site ADD COLUMN attributes JSONB;
+            END IF;
+        END $$;
+        """,
+        # site — type_id
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'site'
+                  AND column_name = 'type_id'
+            ) THEN
+                ALTER TABLE {schema}.site ADD COLUMN type_id BIGINT;
+            END IF;
+        END $$;
+        """,
+        # time_series_characteristics — abc_class
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'time_series_characteristics'
+                  AND column_name = 'abc_class'
+            ) THEN
+                ALTER TABLE {schema}.time_series_characteristics
+                    ADD COLUMN abc_class TEXT;
+            END IF;
+        END $$;
+        """,
     ]
 
     conn = get_conn(config_path)
     try:
+        # Phase 1: CREATE TABLE statements + seed data — all or nothing
         with conn.cursor() as cur:
             cur.execute(ddl)
-            for stmt in alter_stmts:
-                cur.execute(stmt)
+            # Seed the default "All" segment (matches every series)
+            cur.execute(f"""
+                INSERT INTO {schema}.segment (name, description, criteria, is_default)
+                VALUES ('All', 'All item/site combinations', '{{}}'::jsonb, TRUE)
+                ON CONFLICT (name) DO NOTHING
+            """)
         conn.commit()
-        logger.info(f"Schema '{schema}' and tables initialised")
+        logger.info(f"Schema '{schema}' tables created/verified")
+
+        # Phase 2: ALTER statements run independently so one failure doesn't
+        # roll back all the others (e.g. adding abc_class to a table that may
+        # not exist yet if characterisation has never been run).
+        for stmt in alter_stmts:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(stmt)
+                conn.commit()
+            except Exception as alter_err:
+                conn.rollback()
+                logger.warning(f"ALTER skipped (will retry next startup): {alter_err}")
+
+        logger.info(f"Schema '{schema}' fully initialised")
     except Exception:
         conn.rollback()
         raise

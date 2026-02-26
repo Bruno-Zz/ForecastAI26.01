@@ -90,6 +90,25 @@ class MLForecaster:
             'B': 5,
         }
 
+        # Frequency-aware feature window configuration.
+        # Lags, rolling windows and EWM span are expressed in *periods* so
+        # they capture the same "semantic" durations regardless of granularity.
+        # e.g. for weekly data lag_52 = 1 year; for monthly data lag_12 = 1 year.
+        self._freq_feature_cfg = {
+            'H':  {'lags': [1, 2, 3, 6, 12, 24],      'windows': [6, 12, 24],     'ewm_span': 6},
+            'D':  {'lags': [1, 2, 3, 7, 14, 30],       'windows': [7, 14, 30],     'ewm_span': 7},
+            'W':  {'lags': [1, 2, 4, 8, 13, 26, 52],   'windows': [4, 8, 13, 26],  'ewm_span': 13},
+            'M':  {'lags': [1, 2, 3, 6, 12],           'windows': [3, 6, 12],      'ewm_span': 12},
+            'ME': {'lags': [1, 2, 3, 6, 12],           'windows': [3, 6, 12],      'ewm_span': 12},
+            'Q':  {'lags': [1, 2, 4],                  'windows': [2, 4],          'ewm_span': 4},
+            'QE': {'lags': [1, 2, 4],                  'windows': [2, 4],          'ewm_span': 4},
+            'Y':  {'lags': [1, 2, 3],                  'windows': [2, 3],          'ewm_span': 3},
+            'YE': {'lags': [1, 2, 3],                  'windows': [2, 3],          'ewm_span': 3},
+            'B':  {'lags': [1, 2, 5, 10, 20],          'windows': [5, 10, 20],     'ewm_span': 5},
+        }
+        # Fall back to monthly config when frequency is unrecognised
+        self._default_feature_cfg = {'lags': [1, 2, 3, 6, 12], 'windows': [3, 6, 12], 'ewm_span': 12}
+
     # ------------------------------------------------------------------
     # Feature engineering
     # ------------------------------------------------------------------
@@ -100,13 +119,13 @@ class MLForecaster:
         """
         Generate engineered features from a univariate time series.
 
-        Features produced:
-            - Lag features at periods 1, 2, 3, 6, 12
+        Features produced (window sizes are frequency-aware, e.g. weekly → 4/8/13/26):
+            - Lag features at frequency-scaled periods (short + medium + long range)
             - Seasonal lag (if has_seasonality) at the dominant seasonal period
-            - Rolling statistics (mean, std, min, max) for windows 3, 6, 12
+            - Rolling statistics (mean, std, min, max) for frequency-scaled windows
             - Calendar features (month, quarter, day_of_week) when datetime index
             - Trend features: time_idx and time_idx_squared
-            - EWM features: exponentially weighted mean and std with span=12
+            - EWM features: exponentially weighted mean and std with frequency-scaled span
 
         Args:
             series: Time series values with a DatetimeIndex (preferred) or
@@ -119,8 +138,14 @@ class MLForecaster:
         """
         features = pd.DataFrame(index=series.index)
 
+        # Resolve frequency-aware window sizes
+        feat_cfg = self._freq_feature_cfg.get(self.frequency, self._default_feature_cfg)
+        lag_periods  = feat_cfg['lags']
+        window_sizes = feat_cfg['windows']
+        ewm_span     = feat_cfg['ewm_span']
+
         # --- Lag features ---
-        for lag in [1, 2, 3, 6, 12]:
+        for lag in lag_periods:
             if lag < len(series):
                 features[f'lag_{lag}'] = series.shift(lag)
 
@@ -132,11 +157,11 @@ class MLForecaster:
                 sp = int(seasonal_periods[0])
             else:
                 sp = self._freq_season_map.get(self.frequency, 12)
-            if sp < len(series):
+            if sp < len(series) and sp not in lag_periods:
                 features[f'seasonal_lag_{sp}'] = series.shift(sp)
 
         # --- Rolling statistics ---
-        for window in [3, 6, 12]:
+        for window in window_sizes:
             if window < len(series):
                 features[f'rolling_mean_{window}'] = series.rolling(window=window).mean()
                 features[f'rolling_std_{window}'] = series.rolling(window=window).std()
@@ -153,9 +178,9 @@ class MLForecaster:
         features['time_idx'] = np.arange(len(series))
         features['time_idx_squared'] = features['time_idx'] ** 2
 
-        # --- Exponentially weighted features ---
-        features['ewm_mean'] = series.ewm(span=12, min_periods=1).mean()
-        features['ewm_std'] = series.ewm(span=12, min_periods=1).std()
+        # --- Exponentially weighted features (span scaled to frequency) ---
+        features['ewm_mean'] = series.ewm(span=ewm_span, min_periods=1).mean()
+        features['ewm_std'] = series.ewm(span=ewm_span, min_periods=1).std()
 
         # Drop rows that have NaN values introduced by lags / rolling
         features = features.dropna()
@@ -166,11 +191,12 @@ class MLForecaster:
     # Model helpers
     # ------------------------------------------------------------------
 
-    def _get_lgb_params(self, quantile: Optional[float] = None) -> Dict[str, Any]:
+    def _get_lgb_params(self, quantile: Optional[float] = None,
+                        overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Return LightGBM parameters.  When *quantile* is provided the model
         is configured for quantile regression; otherwise squared-error
-        regression is used.
+        regression is used.  User overrides are merged on top of defaults.
         """
         params: Dict[str, Any] = {
             'n_estimators': 300,
@@ -184,6 +210,12 @@ class MLForecaster:
             'verbose': -1,
             'n_jobs': -1,
         }
+        # Apply user overrides
+        if overrides:
+            for k in ('n_estimators', 'learning_rate', 'max_depth', 'num_leaves',
+                       'subsample', 'colsample_bytree', 'min_child_samples', 'random_state'):
+                if k in overrides:
+                    params[k] = type(params[k])(overrides[k])  # coerce to original type
         if quantile is not None:
             params['objective'] = 'quantile'
             params['alpha'] = quantile
@@ -191,10 +223,11 @@ class MLForecaster:
             params['objective'] = 'regression'
         return params
 
-    def _get_xgb_params(self, quantile: Optional[float] = None) -> Dict[str, Any]:
+    def _get_xgb_params(self, quantile: Optional[float] = None,
+                        overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Return XGBoost parameters.  When *quantile* is provided the model
-        uses the ``reg:quantileerror`` objective.
+        uses the ``reg:quantileerror`` objective.  User overrides are merged.
         """
         params: Dict[str, Any] = {
             'n_estimators': 300,
@@ -207,6 +240,12 @@ class MLForecaster:
             'verbosity': 0,
             'n_jobs': -1,
         }
+        # Apply user overrides
+        if overrides:
+            for k in ('n_estimators', 'learning_rate', 'max_depth',
+                       'subsample', 'colsample_bytree', 'min_child_weight', 'random_state'):
+                if k in overrides:
+                    params[k] = type(params[k])(overrides[k])
         if quantile is not None:
             params['objective'] = 'reg:quantileerror'
             params['quantile_alpha'] = quantile
@@ -214,7 +253,8 @@ class MLForecaster:
             params['objective'] = 'reg:squarederror'
         return params
 
-    def _build_model(self, method: str, quantile: Optional[float] = None):
+    def _build_model(self, method: str, quantile: Optional[float] = None,
+                     overrides: Optional[Dict[str, Any]] = None):
         """
         Instantiate a LightGBM or XGBoost regressor.
 
@@ -222,6 +262,7 @@ class MLForecaster:
             method: 'LightGBM' or 'XGBoost'.
             quantile: If provided, builds a quantile regression model for
                       the given quantile level.
+            overrides: Optional user hyperparameter overrides.
 
         Returns:
             An unfitted scikit-learn-compatible regressor.
@@ -229,13 +270,13 @@ class MLForecaster:
         if method == 'LightGBM':
             if not LIGHTGBM_AVAILABLE:
                 raise ImportError("LightGBM is required. Install: pip install lightgbm")
-            params = self._get_lgb_params(quantile)
+            params = self._get_lgb_params(quantile, overrides=overrides)
             return lgb.LGBMRegressor(**params)
 
         if method == 'XGBoost':
             if not XGBOOST_AVAILABLE:
                 raise ImportError("XGBoost is required. Install: pip install xgboost")
-            params = self._get_xgb_params(quantile)
+            params = self._get_xgb_params(quantile, overrides=overrides)
             return xgb.XGBRegressor(**params)
 
         raise ValueError(f"Unknown ML method: {method}. Supported: {self.SUPPORTED_METHODS}")
@@ -277,7 +318,8 @@ class MLForecaster:
     def _forecast_method(self,
                          series: pd.Series,
                          characteristics: Dict,
-                         method: str) -> ForecastResult:
+                         method: str,
+                         overrides: Optional[Dict[str, Any]] = None) -> ForecastResult:
         """
         Train and forecast a single series with one ML method using direct
         multi-step quantile regression.
@@ -290,6 +332,7 @@ class MLForecaster:
             series: Univariate time series with DatetimeIndex.
             characteristics: Time series characteristics dict.
             method: 'LightGBM' or 'XGBoost'.
+            overrides: Optional user hyperparameter overrides for this method.
 
         Returns:
             A ForecastResult with point forecasts and quantile forecasts.
@@ -340,7 +383,7 @@ class MLForecaster:
 
             # --- Point forecast (median, q=0.5) ---
             try:
-                model_point = self._build_model(method, quantile=0.5)
+                model_point = self._build_model(method, quantile=0.5, overrides=overrides)
                 if X_val is not None and method == 'LightGBM':
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
@@ -368,7 +411,7 @@ class MLForecaster:
             # --- Quantile forecasts ---
             for q in self.quantile_levels:
                 try:
-                    model_q = self._build_model(method, quantile=q)
+                    model_q = self._build_model(method, quantile=q, overrides=overrides)
                     if X_val is not None and method == 'LightGBM':
                         with warnings.catch_warnings():
                             warnings.simplefilter("ignore")
@@ -403,14 +446,19 @@ class MLForecaster:
         # Collect hyper-parameters for traceability
         hyperparameters: Dict[str, Any] = {
             'method': method,
+            'method_family': 'ML',
             'horizon': self.horizon,
             'n_features': features_df.shape[1],
             'n_train_rows': len(features_df),
+            'description': f'{method} gradient boosting with direct multi-step quantile regression.',
         }
         if method == 'LightGBM':
-            hyperparameters.update(self._get_lgb_params())
+            hyperparameters.update(self._get_lgb_params(overrides=overrides))
         else:
-            hyperparameters.update(self._get_xgb_params())
+            hyperparameters.update(self._get_xgb_params(overrides=overrides))
+        if overrides:
+            hyperparameters['has_overrides'] = True
+            hyperparameters['overrides_applied'] = overrides
 
         result = ForecastResult(
             unique_id=unique_id,
@@ -460,7 +508,8 @@ class MLForecaster:
                                df: pd.DataFrame,
                                unique_id: str,
                                methods: List[str],
-                               characteristics: Dict) -> List[ForecastResult]:
+                               characteristics: Dict,
+                               overrides_map: Optional[Dict[str, Dict[str, Any]]] = None) -> List[ForecastResult]:
         """
         Generate ML forecasts for a single time series using the requested
         methods.
@@ -472,6 +521,7 @@ class MLForecaster:
             methods: List of method names ('LightGBM', 'XGBoost').
             characteristics: Time series characteristics dictionary.  Must
                              include at least 'n_observations'.
+            overrides_map: Optional {method: {param: value}} overrides for this series.
 
         Returns:
             List of ForecastResult objects (one per method that succeeded).
@@ -524,7 +574,8 @@ class MLForecaster:
                 continue
 
             try:
-                result = self._forecast_method(series, characteristics, method)
+                method_ovr = (overrides_map or {}).get(method, None)
+                result = self._forecast_method(series, characteristics, method, overrides=method_ovr)
                 results.append(result)
             except Exception as e:
                 self.logger.warning(
@@ -536,7 +587,8 @@ class MLForecaster:
 
     def forecast_multiple_series(self,
                                  df: pd.DataFrame,
-                                 characteristics_df: pd.DataFrame) -> pd.DataFrame:
+                                 characteristics_df: pd.DataFrame,
+                                 overrides_map: dict = None) -> pd.DataFrame:
         """
         Generate ML forecasts for multiple time series.
 
@@ -546,6 +598,7 @@ class MLForecaster:
             characteristics_df: DataFrame where each row contains at least
                 'unique_id', 'recommended_methods', and the fields expected
                 by ``generate_features`` / ``forecast_single_series``.
+            overrides_map: Optional {unique_id: {method: {param: value}}} overrides.
 
         Returns:
             DataFrame with all forecast results (one row per
@@ -579,11 +632,13 @@ class MLForecaster:
             characteristics = char_row.to_dict()
 
             try:
+                series_overrides = (overrides_map or {}).get(unique_id, None)
                 results = self.forecast_single_series(
                     df=df,
                     unique_id=unique_id,
                     methods=ml_methods,
                     characteristics=characteristics,
+                    overrides_map=series_overrides,
                 )
                 all_results.extend(results)
             except Exception as e:

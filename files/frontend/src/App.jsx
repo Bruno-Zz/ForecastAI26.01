@@ -4,6 +4,9 @@ import Dashboard from './components/Dashboard';
 import TimeSeriesViewer from './components/TimeSeriesViewer';
 import PipelineRunner from './components/PipelineRunner';
 import ProcessLog from './components/ProcessLog';
+import Settings from './components/Settings';
+import Segments from './components/Segments';
+import ThemeToggle from './components/ThemeToggle';
 import { useTour } from './tour/useTour';
 
 function Sidebar({ open, onToggle, onStartTour }) {
@@ -18,7 +21,7 @@ function Sidebar({ open, onToggle, onStartTour }) {
   const navLink = (to, icon, label, disabled = false) => {
     const isActive = location.pathname === to || (to !== '/' && location.pathname.startsWith(to));
     return disabled ? (
-      <span className="flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 cursor-not-allowed text-sm">
+      <span className="flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 dark:text-gray-600 cursor-not-allowed text-sm">
         <span className="text-base">{icon}</span>
         {open && <span className="truncate">{label}</span>}
       </span>
@@ -26,7 +29,9 @@ function Sidebar({ open, onToggle, onStartTour }) {
       <Link
         to={to}
         className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors
-          ${isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900'}`}
+          ${isActive
+            ? 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+            : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-gray-700 dark:hover:text-white'}`}
       >
         <span className="text-base flex-shrink-0">{icon}</span>
         {open && <span className="truncate">{label}</span>}
@@ -36,19 +41,19 @@ function Sidebar({ open, onToggle, onStartTour }) {
 
   return (
     <aside
-      className={`flex flex-col bg-white border-r border-gray-200 transition-all duration-200 ease-in-out flex-shrink-0
+      className={`flex flex-col bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transition-all duration-200 ease-in-out flex-shrink-0
         ${open ? 'w-52' : 'w-14'}`}
     >
       {/* Logo / Title */}
-      <div className={`flex items-center h-14 border-b border-gray-100 px-3 gap-3 ${open ? 'justify-between' : 'justify-center'}`}>
+      <div className={`flex items-center h-14 border-b border-gray-100 dark:border-gray-700 px-3 gap-3 ${open ? 'justify-between' : 'justify-center'}`}>
         {open && (
-          <Link to="/" className="text-base font-bold text-blue-600 truncate hover:text-blue-700">
+          <Link to="/" className="text-base font-bold text-blue-600 dark:text-blue-400 truncate hover:text-blue-700 dark:hover:text-blue-300">
             ForecastAI
           </Link>
         )}
         <button
           onClick={onToggle}
-          className="p-1.5 rounded-md text-gray-500 hover:bg-gray-100 hover:text-gray-700 flex-shrink-0"
+          className="p-1.5 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-700 dark:hover:text-white flex-shrink-0"
           title={open ? 'Collapse sidebar' : 'Expand sidebar'}
         >
           {open ? (
@@ -70,8 +75,10 @@ function Sidebar({ open, onToggle, onStartTour }) {
           ? navLink(`/series/${encodeURIComponent(lastSeries)}`, '📈', `Series: ${lastSeries}`)
           : navLink('/', '📈', 'Time Series', true)
         }
+        {navLink('/segments', '🗂️', 'Segments')}
         {navLink('/pipeline', '⚙️', 'Pipeline')}
         {navLink('/logs', '📋', 'Process Log')}
+        {navLink('/settings', '🔧', 'Settings')}
       </nav>
 
       {/* Tour trigger */}
@@ -79,7 +86,7 @@ function Sidebar({ open, onToggle, onStartTour }) {
         <button
           id="tour-trigger"
           onClick={onStartTour}
-          className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-700 hover:bg-gray-100 hover:text-gray-900 w-full"
+          className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white w-full"
           title="Start guided tour"
         >
           <span className="text-base flex-shrink-0">🎯</span>
@@ -87,23 +94,28 @@ function Sidebar({ open, onToggle, onStartTour }) {
         </button>
       </div>
 
-      {/* Footer */}
-      {open && (
-        <div className="p-3 border-t border-gray-100">
-          <p className="text-xs text-gray-400 truncate">ForecastAI 2026.01</p>
-        </div>
-      )}
+      {/* Footer with theme toggle */}
+      <div className={`px-2 pb-2 border-t border-gray-100 dark:border-gray-700 pt-2 flex items-center ${open ? 'justify-between' : 'justify-center'}`}>
+        {open && <p className="text-xs text-gray-400 dark:text-gray-500 truncate">ForecastAI 2026.01</p>}
+        <ThemeToggle />
+      </div>
     </aside>
   );
 }
 
 function App() {
   const { startTour } = useTour();
+  const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     const stored = localStorage.getItem('sidebar_open');
     return stored === null ? true : stored === 'true';
   });
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Auto-close mobile drawer on navigation
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [location.pathname]);
 
   const toggleSidebar = () => {
     setSidebarOpen(prev => {
@@ -114,11 +126,11 @@ function App() {
   };
 
   return (
-    <div className="flex h-screen bg-gray-50 overflow-hidden">
+    <div className="flex h-screen overflow-hidden" style={{ backgroundColor: 'var(--color-surface-alt)' }}>
       {/* Mobile backdrop */}
       {mobileMenuOpen && (
         <div
-          className="fixed inset-0 z-40 bg-black bg-opacity-40 md:hidden"
+          className="fixed inset-0 z-40 bg-black/40 md:hidden"
           onClick={() => setMobileMenuOpen(false)}
         />
       )}
@@ -128,7 +140,7 @@ function App() {
         <Sidebar open={sidebarOpen} onToggle={toggleSidebar} onStartTour={startTour} />
       </div>
       {mobileMenuOpen && (
-        <div className="fixed inset-y-0 left-0 z-50 flex md:hidden">
+        <div className="fixed inset-y-0 left-0 z-50 flex md:hidden shadow-2xl">
           <Sidebar open={true} onToggle={() => setMobileMenuOpen(false)} onStartTour={startTour} />
         </div>
       )}
@@ -136,16 +148,19 @@ function App() {
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Mobile top bar */}
-        <div className="flex items-center h-12 px-4 bg-white border-b border-gray-200 md:hidden flex-shrink-0">
-          <button
-            onClick={() => setMobileMenuOpen(true)}
-            className="p-1.5 rounded-md text-gray-500 hover:bg-gray-100 mr-3"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-            </svg>
-          </button>
-          <Link to="/" className="text-base font-bold text-blue-600">ForecastAI</Link>
+        <div className="flex items-center justify-between h-12 px-4 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 md:hidden flex-shrink-0">
+          <div className="flex items-center">
+            <button
+              onClick={() => setMobileMenuOpen(true)}
+              className="p-1.5 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 mr-3"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+            <Link to="/" className="text-base font-bold text-blue-600 dark:text-blue-400">ForecastAI</Link>
+          </div>
+          <ThemeToggle />
         </div>
 
         {/* Page content */}
@@ -153,8 +168,10 @@ function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/series/:uniqueId" element={<TimeSeriesViewer />} />
+            <Route path="/segments" element={<Segments />} />
             <Route path="/pipeline" element={<PipelineRunner />} />
             <Route path="/logs" element={<ProcessLog />} />
+            <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>
       </div>

@@ -71,6 +71,18 @@ class ForecastEvaluator:
         # min_train_size kept for backward compat but no longer gates backtesting
         self.min_train_size = self.backtesting_config.get('min_train_size', 12)
 
+        # Frequency (used to derive periods-per-year when date calc is unavailable)
+        self.frequency = self.forecast_config.get('frequency', 'M')
+
+        # Periods per year by frequency — used as a fallback when date inference fails
+        self._freq_periods_year = {
+            'H': 8760, 'D': 365, 'B': 260,
+            'W': 52,
+            'M': 12, 'ME': 12,
+            'Q': 4,  'QE': 4,
+            'Y': 1,  'YE': 1, 'A': 1,
+        }
+
     def create_rolling_windows(self,
                                series: pd.Series,
                                dates: pd.Series) -> List[Tuple[int, pd.Series, pd.Series]]:
@@ -78,8 +90,8 @@ class ForecastEvaluator:
         Create rolling window splits for backtesting.
 
         Rules:
-        - First forecast origin = earliest observation + 2 years (24 periods for
-          monthly data).  If the series is shorter than 2 years we use the
+        - First forecast origin = earliest observation + 2 years (periods derived
+          from actual date spacing or configured frequency).  If the series is shorter than 2 years we use the
           midpoint so that we always have *some* training data.
         - n_windows windows are attempted, each step_size periods apart.
         - A window is only included when there are enough actuals to evaluate
@@ -100,17 +112,18 @@ class ForecastEvaluator:
             self.logger.debug(f"Series too short ({n} obs) for backtesting — need at least 2")
             return windows
 
-        # Determine 2-year offset in periods using actual date spacing
-        # Fall back to 24 (monthly) if dates don't parse cleanly
+        # Determine 2-year offset in periods using actual date spacing.
+        # Fall back to the configured frequency when dates don't parse cleanly.
+        _fallback_ppy = self._freq_periods_year.get(self.frequency, 12)
         try:
             span_days = (dates.iloc[-1] - dates.iloc[0]).days
             if span_days > 0 and n > 1:
                 days_per_period = span_days / (n - 1)
                 periods_per_year = max(1, round(365.25 / days_per_period))
             else:
-                periods_per_year = 12
+                periods_per_year = _fallback_ppy
         except Exception:
-            periods_per_year = 12
+            periods_per_year = _fallback_ppy
 
         two_year_periods = 2 * periods_per_year
 
