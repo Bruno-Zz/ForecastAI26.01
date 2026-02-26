@@ -23,6 +23,7 @@ PUBLIC_PATHS = frozenset({
 PUBLIC_PREFIXES = (
     "/api/auth/login",
     "/api/auth/microsoft",
+    "/api/auth/google",
 )
 
 

@@ -3,6 +3,8 @@ echo ============================================
 echo  ForecastAI2026 - Starting servers
 echo ============================================
 
+set VITE_GOOGLE_CLIENT_ID=119493301979-k6m91ol8e5ftfi71ba4380dpp4qdo8in.apps.googleusercontent.com
+
 REM Kill any existing instances
 echo Stopping existing servers...
 for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr :8002 ^| findstr LISTENING') do taskkill /F /PID %%p >nul 2>&1

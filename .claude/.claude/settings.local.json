@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(done)",
+      "Bash(npx vite build:*)",
+      "Bash(ls:*)",
+      "Bash(head:*)",
+      "Bash(grep:*)",
+      "Bash(python3:*)",
+      "Bash(npx tailwindcss --help:*)",
+      "Bash(node -e:*)",
+      "Bash(tasklist:*)",
+      "Bash(wmic process where \"name=''node.exe''\" get processid,commandline)",
+      "Bash(taskkill:*)",
+      "Bash(TASKKILL //PID 43668 //F:*)",
+      "Bash(TASKKILL:*)",
+      "Bash(curl:*)",
+      "Bash(wmic process:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(npm install:*)",
+      "Bash(sort:*)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)"
+    ]
+  }
+}
