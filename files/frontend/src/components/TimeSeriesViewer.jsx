@@ -12,12 +12,10 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom';
 import { VegaLite } from 'react-vega';
 import Plot from 'react-plotly.js';
-import axios from 'axios';
 import { useLocale } from '../contexts/LocaleContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { formatNumber, formatDate, formatYearMonth, formatPercent, toISODate, formatDateTime } from '../utils/formatting';
-
-const API_BASE_URL = '/api';
+import api from '../utils/api';
 
 const METHOD_COLORS = {
   AutoETS: '#2563eb',
@@ -994,14 +992,14 @@ export const TimeSeriesViewer = () => {
 
   // ---- Load all series list for dropdowns (once) ----
   useEffect(() => {
-    axios.get(`${API_BASE_URL}/series`, { params: { limit: 50000 } })
+    api.get(`/series`, { params: { limit: 50000 } })
       .then(res => setAllSeriesList(res.data || []))
       .catch(() => {});
   }, []);
 
   // ---- Load segments (once) + auto-select the default ----
   useEffect(() => {
-    axios.get(`${API_BASE_URL}/segments`)
+    api.get(`/segments`)
       .then(res => {
         const segs = res.data || [];
         setSegments(segs);
@@ -1022,7 +1020,7 @@ export const TimeSeriesViewer = () => {
       return;
     }
     setSegmentLoading(true);
-    axios.get(`${API_BASE_URL}/segments/${selectedSegmentId}/members`, { params: { limit: 200000 } })
+    api.get(`/segments/${selectedSegmentId}/members`, { params: { limit: 200000 } })
       .then(res => {
         const members = res.data.members || [];
         setSegmentMemberSet(new Set(members));
@@ -1087,9 +1085,9 @@ export const TimeSeriesViewer = () => {
     setMultiLoading(true);
     Promise.allSettled(selectedUids.map(uid =>
       Promise.allSettled([
-        axios.get(`${API_BASE_URL}/series/${encodeURIComponent(uid)}/data`),
-        axios.get(`${API_BASE_URL}/forecasts/${encodeURIComponent(uid)}`),
-        axios.get(`${API_BASE_URL}/metrics/${encodeURIComponent(uid)}`),
+        api.get(`/series/${encodeURIComponent(uid)}/data`),
+        api.get(`/forecasts/${encodeURIComponent(uid)}`),
+        api.get(`/metrics/${encodeURIComponent(uid)}`),
       ])
     )).then(results => {
       // Aggregate: demand = sum, forecast = sum, metrics = weighted avg (by n_windows)
@@ -1219,15 +1217,15 @@ export const TimeSeriesViewer = () => {
     setError(null);
     try {
       const [dataRes, forecastRes, seriesRes, metricsRes, bestRes, originsRes, outlierRes, explainRes, distRes] = await Promise.allSettled([
-        axios.get(`${API_BASE_URL}/series/${encodeURIComponent(decodedId)}/data`),
-        axios.get(`${API_BASE_URL}/forecasts/${encodeURIComponent(decodedId)}`),
-        axios.get(`${API_BASE_URL}/series`, { params: { search: decodedId, limit: 1 } }),
-        axios.get(`${API_BASE_URL}/metrics/${encodeURIComponent(decodedId)}`),
-        axios.get(`${API_BASE_URL}/series/${encodeURIComponent(decodedId)}/best-method`),
-        axios.get(`${API_BASE_URL}/forecasts/${encodeURIComponent(decodedId)}/origins`),
-        axios.get(`${API_BASE_URL}/series/${encodeURIComponent(decodedId)}/outliers`),
-        axios.get(`${API_BASE_URL}/series/${encodeURIComponent(decodedId)}/method-explanation`),
-        axios.get(`${API_BASE_URL}/series/${encodeURIComponent(decodedId)}/distributions`)
+        api.get(`/series/${encodeURIComponent(decodedId)}/data`),
+        api.get(`/forecasts/${encodeURIComponent(decodedId)}`),
+        api.get(`/series`, { params: { search: decodedId, limit: 1 } }),
+        api.get(`/metrics/${encodeURIComponent(decodedId)}`),
+        api.get(`/series/${encodeURIComponent(decodedId)}/best-method`),
+        api.get(`/forecasts/${encodeURIComponent(decodedId)}/origins`),
+        api.get(`/series/${encodeURIComponent(decodedId)}/outliers`),
+        api.get(`/series/${encodeURIComponent(decodedId)}/method-explanation`),
+        api.get(`/series/${encodeURIComponent(decodedId)}/distributions`)
       ]);
 
       if (dataRes.status === 'fulfilled') {
@@ -1294,14 +1292,14 @@ export const TimeSeriesViewer = () => {
 
       // Load hyperparameter overrides (non-blocking)
       try {
-        const hpRes = await axios.get(`${API_BASE_URL}/hyperparams/${encodeURIComponent(decodedId)}`);
+        const hpRes = await api.get(`/hyperparams/${encodeURIComponent(decodedId)}`);
         setHpSavedOverrides(hpRes.data.overrides || {});
         setHpEdits({});  // clear local edits on fresh load
       } catch { /* no overrides yet — that's fine */ }
 
       // Load forecast convergence data (non-blocking)
       try {
-        const convRes = await axios.get(`${API_BASE_URL}/series/${encodeURIComponent(decodedId)}/forecast-convergence`);
+        const convRes = await api.get(`/series/${encodeURIComponent(decodedId)}/forecast-convergence`);
         console.log('[convergence] loaded', convRes.data?.targets?.length, 'targets,', convRes.data?.methods?.length, 'methods');
         setConvergenceData(convRes.data);
       } catch (convErr) {
@@ -1320,7 +1318,7 @@ export const TimeSeriesViewer = () => {
     if (forecastUids.length === 0) return;
     try {
       setForecastJobStatus('pending');
-      const res = await axios.post(`${API_BASE_URL}/pipeline/run-forecast`, {
+      const res = await api.post(`/pipeline/run-forecast`, {
         series: forecastUids,
         all_methods: true,
       });
@@ -1332,7 +1330,7 @@ export const TimeSeriesViewer = () => {
       if (forecastPollRef.current) clearInterval(forecastPollRef.current);
       forecastPollRef.current = setInterval(async () => {
         try {
-          const r = await axios.get(`${API_BASE_URL}/pipeline/jobs/${jobId}`);
+          const r = await api.get(`/pipeline/jobs/${jobId}`);
           const st = r.data.status;
           setForecastJobStatus(st);
           if (st === 'success' || st === 'error') {
@@ -1340,7 +1338,7 @@ export const TimeSeriesViewer = () => {
             forecastPollRef.current = null;
             if (st === 'success') {
               // Refresh the API data cache, then reload this series
-              try { await axios.post(`${API_BASE_URL}/reload`); } catch { /* non-fatal */ }
+              try { await api.post(`/reload`); } catch { /* non-fatal */ }
               loadData();
             }
           }
@@ -1368,7 +1366,7 @@ export const TimeSeriesViewer = () => {
   // ---- Load / save adjustments ----
   const loadAdjustments = useCallback(async () => {
     try {
-      const res = await axios.get(`${API_BASE_URL}/adjustments/${encodeURIComponent(decodedId)}`);
+      const res = await api.get(`/adjustments/${encodeURIComponent(decodedId)}`);
       const map = {};
       (res.data || []).forEach(a => {
         map[`${a.forecast_date}|${a.adjustment_type}`] = a;
@@ -1427,7 +1425,7 @@ export const TimeSeriesViewer = () => {
   const resetAllAdjustments = useCallback(async () => {
     if (!window.confirm('Reset ALL adjustments and overrides for this series?')) return;
     try {
-      await axios.delete(`${API_BASE_URL}/adjustments/${encodeURIComponent(decodedId)}`);
+      await api.delete(`/adjustments/${encodeURIComponent(decodedId)}`);
       setAdjustments({});
     } catch { /* non-fatal */ }
   }, [decodedId]);
@@ -1436,7 +1434,7 @@ export const TimeSeriesViewer = () => {
     if (origins.length === 0) return;
     const origin = origins[selectedOriginIdx];
     if (!origin) return;
-    axios.get(`${API_BASE_URL}/forecasts/${encodeURIComponent(decodedId)}/origins/${origin}`)
+    api.get(`/forecasts/${encodeURIComponent(decodedId)}/origins/${origin}`)
       .then(res => setOriginForecasts(res.data))
       .catch(() => setOriginForecasts(null));
   }, [selectedOriginIdx, origins, decodedId]);
@@ -2873,7 +2871,7 @@ export const TimeSeriesViewer = () => {
                   if (Object.keys(merged).length === 0) return;
                   setHpSaving(true);
                   try {
-                    await axios.put(`${API_BASE_URL}/hyperparams/${encodeURIComponent(decodedId)}`, {
+                    await api.put(`/hyperparams/${encodeURIComponent(decodedId)}`, {
                       overrides: { [method]: merged }
                     });
                     setHpSavedOverrides(prev => ({ ...prev, [method]: merged }));
@@ -2888,7 +2886,7 @@ export const TimeSeriesViewer = () => {
                 const handleResetMethod = async () => {
                   setHpSaving(true);
                   try {
-                    await axios.delete(`${API_BASE_URL}/hyperparams/${encodeURIComponent(decodedId)}?method=${encodeURIComponent(method)}`);
+                    await api.delete(`/hyperparams/${encodeURIComponent(decodedId)}?method=${encodeURIComponent(method)}`);
                     setHpSavedOverrides(prev => { const next = { ...prev }; delete next[method]; return next; });
                     setHpEdits(prev => { const next = { ...prev }; delete next[method]; return next; });
                   } catch (err) {

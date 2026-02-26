@@ -7,8 +7,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-
-const API = '';  // relative — proxied through Vite dev server (same as other components)
+import api from '../utils/api';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -345,22 +344,10 @@ function EditModal({ segment, onSave, onClose, allFields }) {
     if (!segment?.id) return;
     setPreviewing(true);
     try {
-      const res = await fetch(`${API}/api/segments/${segment.id}/preview`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-      // We need to first save then preview — or preview uses current criteria via PUT
-      // Instead: POST to a temporary preview that accepts criteria in the body
-      // Since the endpoint uses the DB row, we need to save first if new.
-      // For simplicity, we do a live preview via a dedicated body-based call.
-      // The endpoint signature accepts no body — it reads from DB.
-      // So we use a workaround: PUT then preview (if existing), or call engine directly.
-      if (res.ok) {
-        setPreview(await res.json());
-      }
+      const res = await api.post(`/segments/${segment.id}/preview`);
+      setPreview(res.data);
     } catch (e) {
-      setError(`Preview failed: ${e.message}`);
+      setError(`Preview failed: ${e.response?.data?.detail || e.message}`);
     } finally {
       setPreviewing(false);
     }
@@ -376,18 +363,11 @@ function EditModal({ segment, onSave, onClose, allFields }) {
         return;
       }
       // Update criteria silently, then preview
-      await fetch(`${API}/api/segments/${segment.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, description, criteria }),
-      });
-      const pRes = await fetch(`${API}/api/segments/${segment.id}/preview`, {
-        method: 'POST',
-      });
-      if (pRes.ok) setPreview(await pRes.json());
-      else setError('Preview failed');
+      await api.put(`/segments/${segment.id}`, { name, description, criteria });
+      const pRes = await api.post(`/segments/${segment.id}/preview`);
+      setPreview(pRes.data);
     } catch (e) {
-      setError(`Preview failed: ${e.message}`);
+      setError(`Preview failed: ${e.response?.data?.detail || e.message}`);
     } finally {
       setPreviewing(false);
     }
@@ -398,21 +378,13 @@ function EditModal({ segment, onSave, onClose, allFields }) {
     setSaving(true);
     setError('');
     try {
-      const url = isNew ? `${API}/api/segments` : `${API}/api/segments/${segment.id}`;
-      const method = isNew ? 'POST' : 'PUT';
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, description, criteria }),
-      });
-      if (!res.ok) {
-        const d = await res.json();
-        throw new Error(d.detail || 'Save failed');
-      }
-      const saved = await res.json();
+      const res = isNew
+        ? await api.post('/segments', { name, description, criteria })
+        : await api.put(`/segments/${segment.id}`, { name, description, criteria });
+      const saved = res.data;
       onSave(saved);
     } catch (e) {
-      setError(e.message);
+      setError(e.response?.data?.detail || e.message);
     } finally {
       setSaving(false);
     }
@@ -621,13 +593,13 @@ export default function Segments() {
     setLoading(true);
     try {
       const [segRes, fldRes] = await Promise.all([
-        fetch(`${API}/api/segments`),
-        fetch(`${API}/api/segments/fields`),
+        api.get('/segments'),
+        api.get('/segments/fields'),
       ]);
-      if (segRes.ok) setSegments(await segRes.json());
-      if (fldRes.ok) setFields(await fldRes.json());
+      setSegments(segRes.data);
+      setFields(fldRes.data);
     } catch (e) {
-      setToast({ msg: `Load failed: ${e.message}`, type: 'error' });
+      setToast({ msg: `Load failed: ${e.response?.data?.detail || e.message}`, type: 'error' });
     } finally {
       setLoading(false);
     }
@@ -645,12 +617,11 @@ export default function Segments() {
     if (!window.confirm(`Delete segment "${seg.name}"?`)) return;
     setDeleting(seg.id);
     try {
-      const res = await fetch(`${API}/api/segments/${seg.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error((await res.json()).detail);
+      await api.delete(`/segments/${seg.id}`);
       setToast({ msg: `Segment "${seg.name}" deleted`, type: 'success' });
       await loadAll();
     } catch (e) {
-      setToast({ msg: `Delete failed: ${e.message}`, type: 'error' });
+      setToast({ msg: `Delete failed: ${e.response?.data?.detail || e.message}`, type: 'error' });
     } finally {
       setDeleting(null);
     }
@@ -659,13 +630,11 @@ export default function Segments() {
   async function handleAssign(seg) {
     setAssigning(seg.id);
     try {
-      const res = await fetch(`${API}/api/segments/${seg.id}/assign`, { method: 'POST' });
-      if (!res.ok) throw new Error((await res.json()).detail);
-      const data = await res.json();
-      setToast({ msg: `"${seg.name}": ${data.assigned.toLocaleString()} series assigned`, type: 'success' });
+      const res = await api.post(`/segments/${seg.id}/assign`);
+      setToast({ msg: `"${seg.name}": ${res.data.assigned.toLocaleString()} series assigned`, type: 'success' });
       await loadAll();
     } catch (e) {
-      setToast({ msg: `Assign failed: ${e.message}`, type: 'error' });
+      setToast({ msg: `Assign failed: ${e.response?.data?.detail || e.message}`, type: 'error' });
     } finally {
       setAssigning(null);
     }
@@ -673,13 +642,7 @@ export default function Segments() {
 
   async function handleRunStep(stepId, seg) {
     try {
-      const res = await fetch(`${API}/api/pipeline/run/${stepId}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ segment_id: seg.id }),
-      });
-      if (!res.ok) throw new Error((await res.json()).detail);
-      const data = await res.json();
+      await api.post(`/pipeline/run/${stepId}`, { segment_id: seg.id });
       setToast({
         msg: `${stepId.charAt(0).toUpperCase() + stepId.slice(1)} job started for "${seg.name}"`,
         type: 'success',
@@ -687,7 +650,7 @@ export default function Segments() {
       // Navigate to pipeline page
       setTimeout(() => navigate('/pipeline'), 1000);
     } catch (e) {
-      setToast({ msg: `Run failed: ${e.message}`, type: 'error' });
+      setToast({ msg: `Run failed: ${e.response?.data?.detail || e.message}`, type: 'error' });
     }
   }
 

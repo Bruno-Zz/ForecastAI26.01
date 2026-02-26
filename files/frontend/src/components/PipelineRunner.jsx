@@ -7,12 +7,10 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import axios from 'axios';
 import { useLocale } from '../contexts/LocaleContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { formatTime, formatNumber } from '../utils/formatting';
-
-const API_BASE_URL = '/api';
+import api from '../utils/api';
 
 const STEP_ORDER = ['etl', 'outlier-detection', 'forecast', 'backtest', 'best-method', 'distributions'];
 
@@ -385,7 +383,8 @@ export const PipelineRunner = () => {
       delete eventSources.current[key];
     }
 
-    const es = new EventSource(`${API_BASE_URL}/pipeline/jobs/${jobId}/stream`);
+    const token = localStorage.getItem('forecastai_token') || '';
+    const es = new EventSource(`/api/pipeline/jobs/${jobId}/stream${token ? `?token=${token}` : ''}`);
 
     es.onmessage = (e) => {
       try {
@@ -459,7 +458,7 @@ export const PipelineRunner = () => {
 
   // Load step definitions once
   useEffect(() => {
-    axios.get(`${API_BASE_URL}/pipeline/steps`)
+    api.get(`/pipeline/steps`)
       .then(r => setSteps(r.data))
       .catch(e => setError(e.message));
   }, []);
@@ -474,7 +473,7 @@ export const PipelineRunner = () => {
 
     (async () => {
       try {
-        const r = await axios.get(`${API_BASE_URL}/pipeline/jobs`);
+        const r = await api.get(`/pipeline/jobs`);
         const allJobs = r.data; // sorted newest-first
 
         const restoredStepJobs = {};
@@ -535,14 +534,14 @@ export const PipelineRunner = () => {
       const runningEntries = Object.entries(jobs).filter(([, j]) => j.status === 'running' || j.status === 'pending');
       for (const [stepId, job] of runningEntries) {
         try {
-          const r = await axios.get(`${API_BASE_URL}/pipeline/jobs/${job.job_id}`);
+          const r = await api.get(`/pipeline/jobs/${job.job_id}`);
           setJobs(prev => ({ ...prev, [stepId]: r.data }));
         } catch { /* ignore */ }
       }
       // Full-pipeline job
       if (fullJob && (fullJob.status === 'running' || fullJob.status === 'pending')) {
         try {
-          const r = await axios.get(`${API_BASE_URL}/pipeline/jobs/${fullJob.job_id}`);
+          const r = await api.get(`/pipeline/jobs/${fullJob.job_id}`);
           setFullJob(r.data);
         } catch { /* ignore */ }
       }
@@ -558,7 +557,7 @@ export const PipelineRunner = () => {
   const handleRun = async (stepId) => {
     try {
       setError(null);
-      const r = await axios.post(`${API_BASE_URL}/pipeline/run/${stepId}`);
+      const r = await api.post(`/pipeline/run/${stepId}`);
       const job = { ...r.data, log_lines: [], started_at: null, ended_at: null };
       setJobs(prev => ({ ...prev, [stepId]: job }));
       setShowLogs(prev => ({ ...prev, [stepId]: true }));
@@ -571,7 +570,7 @@ export const PipelineRunner = () => {
   const handleRunAll = async () => {
     try {
       setError(null);
-      const r = await axios.post(`${API_BASE_URL}/pipeline/run-all`);
+      const r = await api.post(`/pipeline/run-all`);
       const job = { ...r.data, log_lines: [], started_at: null, ended_at: null, current_step: null };
       setFullJob(job);
       setShowFullLogs(true);
@@ -583,7 +582,7 @@ export const PipelineRunner = () => {
 
   const handleKill = async (jobId) => {
     try {
-      await axios.post(`${API_BASE_URL}/pipeline/jobs/${jobId}/kill`);
+      await api.post(`/pipeline/jobs/${jobId}/kill`);
     } catch (e) {
       setError(e.response?.data?.detail || e.message);
     }
@@ -592,7 +591,7 @@ export const PipelineRunner = () => {
   const handleResetJobs = async () => {
     try {
       setError(null);
-      const r = await axios.post(`${API_BASE_URL}/pipeline/jobs/reset`);
+      const r = await api.post(`/pipeline/jobs/reset`);
       setFullJob(null);
       setJobs({});
       setShowFullLogs(false);

@@ -9,12 +9,10 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { VegaLite } from 'react-vega';
-import axios from 'axios';
 import { useLocale } from '../contexts/LocaleContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { formatNumber } from '../utils/formatting';
-
-const API_BASE_URL = '/api';
+import api from '../utils/api';
 
 /** Collapsible section wrapper */
 const Section = ({ title, storageKey, defaultOpen = true, children, id }) => {
@@ -102,8 +100,8 @@ export const Dashboard = () => {
     setError(null);
     try {
       const [seriesRes, analyticsRes] = await Promise.allSettled([
-        axios.get(`${API_BASE_URL}/series`, { params: { limit: 50000 } }),
-        axios.get(`${API_BASE_URL}/analytics`),
+        api.get('/series', { params: { limit: 50000 } }),
+        api.get('/analytics'),
       ]);
       if (seriesRes.status === 'fulfilled') setSeries(seriesRes.value.data);
       if (analyticsRes.status === 'fulfilled') setAnalytics(analyticsRes.value.data);
@@ -142,7 +140,7 @@ export const Dashboard = () => {
   const fetchSparklines = useCallback(async (ids) => {
     if (ids.length === 0) return;
     try {
-      const res = await axios.post(`${API_BASE_URL}/sparklines`, ids);
+      const res = await api.post('/sparklines', ids);
       setSparklineData(prev => ({ ...prev, ...res.data }));
     } catch { /* non-critical */ }
   }, []);

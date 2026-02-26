@@ -255,6 +255,19 @@ output:
     forecasts: postgres
     metrics: postgres
     plots: png
+auth:
+  jwt_secret: "CHANGE-ME-use-a-random-64-char-string-in-production"
+  token_expiry_minutes: 480
+  microsoft:
+    client_id: "YOUR-AZURE-APP-CLIENT-ID"
+    tenant_id: "YOUR-AZURE-TENANT-ID"
+    redirect_uri: "http://localhost:5173"
+  google:
+    client_id: "YOUR-GOOGLE-CLIENT-ID"
+  default_admin:
+    email: "admin@forecastai.local"
+    display_name: "Admin"
+    password: "ChangeMe123!"
 logging:
   level: INFO
   format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'

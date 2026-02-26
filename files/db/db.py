@@ -383,6 +383,40 @@ def init_schema(config_path: Union[str, Path]) -> None:
     );
     CREATE INDEX IF NOT EXISTS idx_process_log_run
         ON {schema}.process_log (run_id);
+
+    -- Authentication: users
+    CREATE TABLE IF NOT EXISTS {schema}.users (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email           TEXT NOT NULL UNIQUE,
+        display_name    TEXT NOT NULL,
+        hashed_password TEXT,
+        auth_provider   TEXT NOT NULL DEFAULT 'local'
+                        CHECK (auth_provider IN ('local', 'microsoft', 'google')),
+        role            TEXT NOT NULL DEFAULT 'user'
+                        CHECK (role IN ('admin', 'user')),
+        is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at      TIMESTAMPTZ DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_users_email
+        ON {schema}.users (email);
+
+    -- Authentication: revoked JWT tokens (for logout / forced invalidation)
+    CREATE TABLE IF NOT EXISTS {schema}.revoked_tokens (
+        jti         TEXT PRIMARY KEY,
+        revoked_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Configuration sections (pipeline config stored in DB)
+    CREATE TABLE IF NOT EXISTS {schema}.config_sections (
+        id          SERIAL PRIMARY KEY,
+        section     TEXT NOT NULL UNIQUE,
+        label       TEXT NOT NULL,
+        config      JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+        description TEXT,
+        updated_at  TIMESTAMPTZ DEFAULT NOW(),
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+    );
     """
 
     # Separate ALTER statements for adding columns to existing tables
@@ -526,6 +560,20 @@ def init_schema(config_path: Union[str, Path]) -> None:
             ) THEN
                 ALTER TABLE {schema}.time_series_characteristics
                     ADD COLUMN abc_class TEXT;
+            END IF;
+        END $$;
+        """,
+        # users — update auth_provider CHECK to include 'google'
+        f"""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = '{schema}' AND table_name = 'users'
+            ) THEN
+                ALTER TABLE {schema}.users DROP CONSTRAINT IF EXISTS users_auth_provider_check;
+                ALTER TABLE {schema}.users ADD CONSTRAINT users_auth_provider_check
+                    CHECK (auth_provider IN ('local', 'microsoft', 'google'));
             END IF;
         END $$;
         """,

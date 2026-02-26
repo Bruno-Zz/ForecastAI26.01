@@ -57,3 +57,9 @@ python-multipart>=0.0.6
 # Additional utilities
 pydantic>=2.5.0
 python-dotenv>=1.0.0
+
+# Authentication
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.0,<4.1.0  # 4.1+ breaks passlib compatibility
+httpx>=0.25.0

@@ -4,9 +4,7 @@ import { useTheme } from '../contexts/ThemeContext';
 import { useLocale, LOCALE_PRESETS } from '../contexts/LocaleContext';
 import { formatDate, formatNumber, formatDateTime } from '../utils/formatting';
 import DateInput from './DateInput';
-import axios from 'axios';
-
-const API_BASE_URL = '/api';
+import api from '../utils/api';
 
 const TABS = [
   { id: 'appearance', label: 'Appearance', icon: (
@@ -594,30 +592,28 @@ function fmtGroupLabel(raw) {
   return raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
-/* ─── Config Tab ─── */
+/* ─── Config Tab (sub-tabbed, DB-backed) ─── */
 function ConfigTab() {
-  const [configYaml, setConfigYaml] = useState(null);
-  const [configObj, setConfigObj] = useState(null);
+  const [sections, setSections] = useState([]);
+  const [activeSection, setActiveSection] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
-  const [expandedSections, setExpandedSections] = useState({});
   const [yamlOpen, setYamlOpen] = useState(false);
+  const [rawYaml, setRawYaml] = useState('');
   const [saving, setSaving] = useState(null);
   const [saveMsg, setSaveMsg] = useState(null);
 
   useEffect(() => {
-    axios.get(`${API_BASE_URL}/config`)
-      .then(res => {
-        setConfigYaml(res.data.config_yaml);
-        setConfigObj(res.data.config);
-        const sections = {};
-        Object.keys(res.data.config || {}).forEach(k => {
-          if (typeof res.data.config[k] === 'object' && res.data.config[k] !== null) {
-            sections[k] = true;
-          }
-        });
-        setExpandedSections(sections);
+    Promise.all([
+      api.get('/config/sections'),
+      api.get('/config'),
+    ])
+      .then(([sectRes, cfgRes]) => {
+        const sects = sectRes.data;
+        setSections(sects);
+        setActiveSection(sects[0]?.section ?? null);
+        setRawYaml(cfgRes.data.config_yaml ?? '');
         setLoading(false);
       })
       .catch(err => {
@@ -626,26 +622,28 @@ function ConfigTab() {
       });
   }, []);
 
-  const toggleSection = (key) => {
-    setExpandedSections(prev => ({ ...prev, [key]: !prev[key] }));
-  };
-
   const handleParamChange = async (path, value) => {
+    const topSection = path.split('.')[0];
+    const sect = sections.find(s => s.section === topSection);
+    if (!sect) return;
+
+    // Build updated config for this section
+    const parts = path.split('.').slice(1); // strip section prefix
+    const updatedConfig = JSON.parse(JSON.stringify(sect.config));
+    let node = updatedConfig;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (node[parts[i]] === undefined) node[parts[i]] = {};
+      node = node[parts[i]];
+    }
+    node[parts[parts.length - 1]] = value;
+
     setSaving(path);
     setSaveMsg(null);
     try {
-      await axios.post(`${API_BASE_URL}/config/update`, { path, value });
-      const parts = path.split('.');
-      setConfigObj(prev => {
-        const updated = JSON.parse(JSON.stringify(prev));
-        let node = updated;
-        for (let i = 0; i < parts.length - 1; i++) {
-          if (node[parts[i]] === undefined) node[parts[i]] = {};
-          node = node[parts[i]];
-        }
-        node[parts[parts.length - 1]] = value;
-        return updated;
-      });
+      await api.put(`/config/sections/${sect.id}`, { config: updatedConfig });
+      setSections(prev => prev.map(s =>
+        s.id === sect.id ? { ...s, config: updatedConfig } : s
+      ));
       setSaveMsg({ type: 'ok', text: `${path} updated` });
       setTimeout(() => setSaveMsg(null), 3000);
     } catch (err) {
@@ -655,12 +653,15 @@ function ConfigTab() {
     }
   };
 
-  const matchesSearch = (key, entries) => {
-    if (!searchTerm) return true;
-    const term = searchTerm.toLowerCase();
-    if (key.toLowerCase().includes(term)) return true;
-    return entries.some(e => e.key.toLowerCase().includes(term) || e.path.toLowerCase().includes(term) || String(e.value).toLowerCase().includes(term));
-  };
+  const activeSect = sections.find(s => s.section === activeSection);
+  const entries = activeSect ? flattenConfig(activeSect.config, activeSect.section) : [];
+  const filteredEntries = searchTerm
+    ? entries.filter(e =>
+        e.key.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        e.path.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        String(e.value).toLowerCase().includes(searchTerm.toLowerCase()))
+    : entries;
+  const groups = groupEntries(filteredEntries);
 
   return (
     <div className="space-y-4">
@@ -670,7 +671,7 @@ function ConfigTab() {
           <div>
             <h2 className="text-lg font-semibold text-gray-900 dark:text-white">System Configuration</h2>
             <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-              Edit pipeline parameters below. Changes are saved to <code className="bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded text-xs">config/config.yaml</code> immediately.
+              Edit pipeline parameters below. Changes are saved to the database and <code className="bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded text-xs">config.yaml</code> immediately.
             </p>
           </div>
           {saveMsg && (
@@ -705,59 +706,59 @@ function ConfigTab() {
         </div>
       )}
 
-      {/* Editable parameter sections */}
-      {configObj && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {Object.entries(configObj).map(([sectionKey, sectionVal]) => {
-            if (typeof sectionVal !== 'object' || sectionVal === null) return null;
-            const entries = flattenConfig(sectionVal, sectionKey);
-            if (!matchesSearch(sectionKey, entries)) return null;
-            const isExpanded = expandedSections[sectionKey];
-            const filteredEntries = searchTerm
-              ? entries.filter(e => e.key.toLowerCase().includes(searchTerm.toLowerCase()) || e.path.toLowerCase().includes(searchTerm.toLowerCase()) || String(e.value).toLowerCase().includes(searchTerm.toLowerCase()))
-              : entries;
-            const sectionLabel = sectionKey.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      {/* Sub-tab bar — one pill per config section */}
+      {sections.length > 0 && (
+        <div className="flex gap-1 overflow-x-auto pb-1 border-b border-gray-200 dark:border-gray-700">
+          {sections.map(sect => (
+            <button
+              key={sect.section}
+              onClick={() => setActiveSection(sect.section)}
+              className={`px-3 py-2 text-xs font-medium border-b-2 whitespace-nowrap flex-shrink-0 transition-colors
+                ${activeSection === sect.section
+                  ? 'border-blue-600 text-blue-600 dark:text-blue-400 dark:border-blue-400'
+                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
+                }`}
+            >
+              {sect.label}
+            </button>
+          ))}
+        </div>
+      )}
 
-            return (
-              <div key={sectionKey} className="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900/50 overflow-hidden">
-                <button
-                  onClick={() => toggleSection(sectionKey)}
-                  className="flex items-center justify-between w-full px-5 py-3.5 text-left hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
-                >
-                  <div className="flex items-center gap-3">
-                    <span className="text-sm font-semibold text-gray-900 dark:text-white">{sectionLabel}</span>
-                    <span className="text-[10px] bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400 px-1.5 py-0.5 rounded-full">{filteredEntries.length}</span>
-                  </div>
-                  <svg className={`w-4 h-4 text-gray-400 transition-transform flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`}
-                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
-                {isExpanded && (
-                  <div className="px-5 pb-4 border-t border-gray-100 dark:border-gray-700">
-                    {groupEntries(filteredEntries).map((grp, gi) => (
-                      <div key={grp.group || gi}>
-                        {grp.label && (
-                          <div className="mt-3 mb-1 flex items-center gap-2">
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-blue-500 dark:text-blue-400">{grp.label}</span>
-                            <div className="flex-1 h-px bg-blue-100 dark:bg-blue-900/40" />
-                          </div>
-                        )}
-                        {grp.entries.map(({ key, path, value }) => (
-                          <ParamField key={path} label={key} path={path} value={value} onChange={handleParamChange} saving={saving} />
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+      {/* Active section parameters */}
+      {activeSect && (
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900/50 px-5 py-4">
+          {activeSect.description && (
+            <p className="text-xs text-gray-400 dark:text-gray-500 mb-3 italic">
+              {activeSect.description}
+              <span className="ml-2 font-mono text-[10px] text-gray-300 dark:text-gray-600">
+                id={activeSect.id}
+              </span>
+            </p>
+          )}
+          {groups.map((grp, gi) => (
+            <div key={grp.group || gi}>
+              {grp.label && (
+                <div className="mt-3 mb-1 flex items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-blue-500 dark:text-blue-400">{grp.label}</span>
+                  <div className="flex-1 h-px bg-blue-100 dark:bg-blue-900/40" />
+                </div>
+              )}
+              {grp.entries.map(({ key, path, value }) => (
+                <ParamField key={path} label={key} path={path} value={value} onChange={handleParamChange} saving={saving} />
+              ))}
+            </div>
+          ))}
+          {filteredEntries.length === 0 && searchTerm && (
+            <div className="py-6 text-center text-gray-400 dark:text-gray-500 text-xs italic">
+              No parameters match &ldquo;{searchTerm}&rdquo;
+            </div>
+          )}
         </div>
       )}
 
       {/* Collapsible raw YAML */}
-      {configYaml && (
+      {rawYaml && (
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900/50 overflow-hidden">
           <button
             onClick={() => setYamlOpen(o => !o)}
@@ -778,7 +779,7 @@ function ConfigTab() {
           {yamlOpen && (
             <div className="px-5 pb-5">
               <pre className="bg-gray-900 dark:bg-gray-950 text-gray-300 rounded-lg p-4 text-xs font-mono overflow-x-auto max-h-[600px] overflow-y-auto leading-5 border border-gray-700 dark:border-gray-600 selection:bg-blue-800">
-                {configYaml}
+                {rawYaml}
               </pre>
             </div>
           )}

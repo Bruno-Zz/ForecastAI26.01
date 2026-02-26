@@ -1,9 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocale } from '../contexts/LocaleContext';
 import { formatDateTime } from '../utils/formatting';
-import axios from 'axios';
-
-const API = '/api';
+import api from '../utils/api';
 
 /* ─── Helpers ─── */
 const STATUS_CFG = {
@@ -97,7 +95,7 @@ function RunSteps({ runId, locale }) {
   const [logLoading, setLogLoading] = useState(false);
 
   useEffect(() => {
-    axios.get(`${API}/process-log/${runId}/steps`)
+    api.get(`/process-log/${runId}/steps`)
       .then(r => { setSteps(r.data); setLoading(false); })
       .catch(() => setLoading(false));
   }, [runId]);
@@ -107,7 +105,7 @@ function RunSteps({ runId, locale }) {
     setExpandedLog(stepId);
     setLogLoading(true);
     try {
-      const r = await axios.get(`${API}/process-log/step/${stepId}/tail`);
+      const r = await api.get(`/process-log/step/${stepId}/tail`);
       setLogTail(r.data.log_tail || '');
     } catch { setLogTail('Failed to load log.'); }
     setLogLoading(false);
@@ -188,8 +186,8 @@ const ProcessLog = () => {
   const fetchAll = useCallback(async () => {
     try {
       const [runsRes, jobsRes] = await Promise.all([
-        axios.get(`${API}/process-log/runs`).catch(() => ({ data: [] })),
-        axios.get(`${API}/pipeline/jobs`).catch(() => ({ data: [] })),
+        api.get(`/process-log/runs`).catch(() => ({ data: [] })),
+        api.get(`/pipeline/jobs`).catch(() => ({ data: [] })),
       ]);
       setDbRuns(runsRes.data || []);
       setLiveJobs(Array.isArray(jobsRes.data) ? jobsRes.data : []);

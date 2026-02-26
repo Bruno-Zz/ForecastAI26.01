@@ -43,12 +43,24 @@ except ImportError:
     _DASK_AVAILABLE = False
     logging.warning("Dask not available; data_cache will use pandas DataFrames")
 
+def _api_config_path() -> str:
+    """Return the path to config.yaml as a string."""
+    p = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+    return str(p)
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Time Series Forecasting API",
     description="API for accessing forecasts, demand analytics, and MEIO data",
     version="1.1.0"  # bump when routes change — used to verify the right server is running
 )
+
+# ── Authentication ──
+from api.auth import router as auth_router, seed_default_admin
+from api.auth_middleware import JWTAuthMiddleware
+
+app.include_router(auth_router)
 
 # Configure CORS for React frontend
 app.add_middleware(
@@ -59,9 +71,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# JWT auth middleware (added AFTER CORS so preflight passes)
+def _get_jwt_secret():
+    cfg_path = _api_config_path()
+    try:
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get("auth", {}).get("jwt_secret", "CHANGE-ME")
+    except Exception:
+        return "CHANGE-ME"
+
+app.add_middleware(
+    JWTAuthMiddleware,
+    secret_key=_get_jwt_secret(),
+    schema=get_schema(_api_config_path()) if _DB_AVAILABLE else "zcube",
+    config_path=_api_config_path(),
+)
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ── Config section registry: order + display metadata ──
+CONFIG_SECTION_REGISTRY = [
+    {"section": "data_source",       "label": "Data Source",        "description": "Source database connection and ETL table mappings"},
+    {"section": "etl",               "label": "ETL",                "description": "Extract-Transform-Load parameters"},
+    {"section": "outlier_detection",  "label": "Outlier Detection",  "description": "Outlier detection and correction settings"},
+    {"section": "characterization",   "label": "Characterization",   "description": "Time-series characterization thresholds"},
+    {"section": "forecasting",        "label": "Forecasting",        "description": "Forecast horizon, methods, and backtesting"},
+    {"section": "hierarchical",       "label": "Hierarchical",       "description": "Hierarchical reconciliation settings"},
+    {"section": "evaluation",         "label": "Evaluation",         "description": "Metric weights and scoring"},
+    {"section": "best_method",        "label": "Best Method",        "description": "Composite scoring weights"},
+    {"section": "meio",               "label": "MEIO",               "description": "Inventory optimization distributions"},
+    {"section": "parallel",           "label": "Parallel",           "description": "Dask / parallel execution settings"},
+    {"section": "output",             "label": "Output",             "description": "Output format and save flags"},
+    {"section": "auth",               "label": "Auth",               "description": "Authentication and JWT settings"},
+    {"section": "logging",            "label": "Logging",            "description": "Log level and file settings"},
+]
 
 # Data cache
 data_cache = {
@@ -340,10 +386,40 @@ def _get_config():
     return data_cache.get('config') or {}
 
 
-def _api_config_path() -> str:
-    """Return the path to config.yaml as a string."""
-    p = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
-    return str(p)
+def seed_config_sections(config_path: str) -> None:
+    """Seed config_sections table from config.yaml if the table is empty."""
+    if not _DB_AVAILABLE:
+        return
+    schema = get_schema(config_path)
+    with open(config_path, "r") as fh:
+        full_cfg = yaml.safe_load(fh) or {}
+
+    conn = get_conn(config_path)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {schema}.config_sections")
+            count = cur.fetchone()[0]
+            if count > 0:
+                logger.info(f"config_sections already has {count} row(s) — skipping seed")
+                return
+
+            for meta in CONFIG_SECTION_REGISTRY:
+                section_key = meta["section"]
+                section_data = full_cfg.get(section_key, {})
+                cur.execute(
+                    f"""INSERT INTO {schema}.config_sections
+                        (section, label, config, description)
+                    VALUES (%s, %s, %s::jsonb, %s)
+                    ON CONFLICT (section) DO NOTHING""",
+                    (section_key, meta["label"], json.dumps(section_data, default=str), meta.get("description")),
+                )
+        conn.commit()
+        logger.info(f"Seeded {len(CONFIG_SECTION_REGISTRY)} config sections into DB")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 @app.on_event("startup")
@@ -357,6 +433,16 @@ async def startup_event():
             logger.info("DB schema initialised")
         except Exception as exc:
             logger.warning(f"DB schema init failed (non-fatal): {exc}")
+        # Seed default admin user on first run
+        try:
+            seed_default_admin(_api_config_path())
+        except Exception as exc:
+            logger.warning(f"Admin seed failed (non-fatal): {exc}")
+        # Seed config sections from config.yaml
+        try:
+            seed_config_sections(_api_config_path())
+        except Exception as exc:
+            logger.warning(f"Config section seed failed (non-fatal): {exc}")
     load_data()
 
 
@@ -374,8 +460,27 @@ async def reload_data():
 
 @app.get("/api/config")
 async def get_config():
-    """Return the global YAML config (read-only, with sensitive fields redacted)."""
-    config = _get_config()
+    """Return the global config (read-only, with sensitive fields redacted). Prefers DB when available."""
+    config = None
+    # Try to assemble from DB sections first
+    if _DB_AVAILABLE:
+        try:
+            schema = get_schema(_api_config_path())
+            conn = get_conn(_api_config_path())
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT section, config FROM {schema}.config_sections ORDER BY id")
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+            if rows:
+                config = {}
+                for section_key, cfg_val in rows:
+                    config[section_key] = cfg_val if isinstance(cfg_val, dict) else json.loads(cfg_val)
+        except Exception:
+            pass
+    if not config:
+        config = _get_config()
     if not config:
         raise HTTPException(status_code=404, detail="Config not loaded")
 
@@ -468,8 +573,180 @@ async def update_config(body: dict = Body(...)):
     # Refresh in-memory cache
     data_cache['config'] = config
 
+    # Sync changed sections to config_sections DB table
+    if _DB_AVAILABLE:
+        try:
+            schema = get_schema(str(config_path))
+            conn = get_conn(str(config_path))
+            try:
+                changed_sections = set(a['path'].split('.')[0] for a in applied)
+                with conn.cursor() as cur:
+                    for sect_key in changed_sections:
+                        section_data = config.get(sect_key, {})
+                        cur.execute(
+                            f"UPDATE {schema}.config_sections SET config = %s::jsonb, updated_at = NOW() WHERE section = %s",
+                            (json.dumps(section_data, default=str), sect_key),
+                        )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            finally:
+                conn.close()
+        except Exception as sync_err:
+            logger.warning(f"Config section DB sync failed (non-fatal): {sync_err}")
+
     logger.info(f"Config updated: {[a['path'] for a in applied]}")
     return {"status": "ok", "applied": applied}
+
+
+# ===========================================================================
+# CONFIG SECTIONS endpoints (DB-backed config with surrogate keys)
+# ===========================================================================
+
+class ConfigSectionUpdate(BaseModel):
+    config: Dict[str, Any]
+
+
+@app.get("/api/config/sections")
+async def list_config_sections():
+    """List all config sections with id, section name, label, and config."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
+    schema = get_schema(_api_config_path())
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, section, label, config, description, updated_at, created_at "
+                f"FROM {schema}.config_sections ORDER BY id"
+            )
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        result = []
+        for row in rows:
+            entry = dict(zip(cols, row))
+            for ts_col in ("updated_at", "created_at"):
+                if entry.get(ts_col):
+                    entry[ts_col] = entry[ts_col].isoformat()
+            if isinstance(entry.get("config"), str):
+                entry["config"] = json.loads(entry["config"])
+            result.append(entry)
+        return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/config/sections/{section_id}")
+async def get_config_section(section_id: int):
+    """Get one config section by surrogate key."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
+    schema = get_schema(_api_config_path())
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, section, label, config, description, updated_at, created_at "
+                f"FROM {schema}.config_sections WHERE id = %s",
+                (section_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Config section not found")
+            cols = [d[0] for d in cur.description]
+            entry = dict(zip(cols, row))
+        for ts_col in ("updated_at", "created_at"):
+            if entry.get(ts_col):
+                entry[ts_col] = entry[ts_col].isoformat()
+        if isinstance(entry.get("config"), str):
+            entry["config"] = json.loads(entry["config"])
+        return entry
+    finally:
+        conn.close()
+
+
+@app.put("/api/config/sections/{section_id}")
+async def update_config_section(section_id: int, body: ConfigSectionUpdate):
+    """Update a section's config JSONB in DB, then write-back to config.yaml."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
+
+    BLOCKED_KEYS = {'password', 'secret', 'token', 'account_key', 'connection_string', 'sslmode'}
+
+    config_path = Path(_api_config_path())
+    schema = get_schema(str(config_path))
+    conn = get_conn(str(config_path))
+    section_key = None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT section FROM {schema}.config_sections WHERE id = %s",
+                (section_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Config section not found")
+            section_key = row[0]
+
+            # Strip sensitive keys from DB write
+            safe_config = {k: v for k, v in body.config.items()
+                           if not any(bk in k.lower() for bk in BLOCKED_KEYS)}
+
+            cur.execute(
+                f"UPDATE {schema}.config_sections SET config = %s::jsonb, updated_at = NOW() WHERE id = %s",
+                (json.dumps(safe_config, default=str), section_id),
+            )
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+    # Backward compat: write section back to config.yaml
+    try:
+        with open(config_path, "r") as fh:
+            full_cfg = yaml.safe_load(fh) or {}
+        # Preserve existing sensitive keys from YAML
+        existing_section = full_cfg.get(section_key, {})
+
+        def _collect_sensitive(d, prefix=""):
+            """Recursively collect sensitive key paths and values."""
+            result = {}
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    if any(bk in k.lower() for bk in BLOCKED_KEYS):
+                        result[k] = v
+                    elif isinstance(v, dict):
+                        sub = _collect_sensitive(v, f"{prefix}{k}.")
+                        if sub:
+                            result[k] = sub
+            return result
+
+        sensitive = _collect_sensitive(existing_section)
+
+        def _deep_merge(base, override):
+            """Merge override into base, preserving base keys not in override."""
+            merged = dict(base)
+            for k, v in override.items():
+                if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                    merged[k] = _deep_merge(merged[k], v)
+                else:
+                    merged[k] = v
+            return merged
+
+        full_cfg[section_key] = _deep_merge(body.config, sensitive)
+        with open(config_path, "w") as fh:
+            yaml.dump(full_cfg, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        data_cache["config"] = full_cfg
+        logger.info(f"Config section '{section_key}' (id={section_id}) saved to DB and YAML")
+    except Exception as exc:
+        logger.warning(f"YAML write-back failed (DB already updated): {exc}")
+
+    return {"status": "ok", "section_id": section_id, "section": section_key}
 
 
 # API Endpoints
