@@ -966,6 +966,8 @@ export const TimeSeriesViewer = () => {
   // ---- Run Forecast button state ----
   const [forecastJobId, setForecastJobId] = useState(null);
   const [forecastJobStatus, setForecastJobStatus] = useState(null); // null|pending|running|success|error
+  const [forecastProgress, setForecastProgress] = useState(null);   // {current_step, completed, total, pct, ...}
+  const [forecastStartedAt, setForecastStartedAt] = useState(null); // ISO timestamp of job start
   const forecastPollRef = useRef(null);
 
   // ---- Hyperparameter overrides (editable params) ----
@@ -1318,6 +1320,8 @@ export const TimeSeriesViewer = () => {
     if (forecastUids.length === 0) return;
     try {
       setForecastJobStatus('pending');
+      setForecastProgress(null);
+      setForecastStartedAt(new Date().toISOString());
       const res = await api.post(`/pipeline/run-forecast`, {
         series: forecastUids,
         all_methods: true,
@@ -1333,9 +1337,13 @@ export const TimeSeriesViewer = () => {
           const r = await api.get(`/pipeline/jobs/${jobId}`);
           const st = r.data.status;
           setForecastJobStatus(st);
+          // Capture progress and started_at from response
+          if (r.data.progress) setForecastProgress(r.data.progress);
+          if (r.data.started_at) setForecastStartedAt(r.data.started_at);
           if (st === 'success' || st === 'error') {
             clearInterval(forecastPollRef.current);
             forecastPollRef.current = null;
+            setForecastProgress(null);
             if (st === 'success') {
               // Refresh the API data cache, then reload this series
               try { await api.post(`/reload`); } catch { /* non-fatal */ }
@@ -1346,6 +1354,7 @@ export const TimeSeriesViewer = () => {
       }, 1500);
     } catch (err) {
       setForecastJobStatus('error');
+      setForecastProgress(null);
       console.error('Run forecast failed:', err);
     }
   }, [forecastUids, loadData]);
@@ -2212,6 +2221,46 @@ export const TimeSeriesViewer = () => {
                 </span>
               )}
             </div>
+            {/* ── Progress bar when job is running ── */}
+            {(forecastJobStatus === 'running' || forecastJobStatus === 'pending') && (() => {
+              const p = forecastProgress || {};
+              const overallPct = p.overall_pct || 0;
+              const stepLabel = { forecast: 'Forecasting', backtest: 'Backtesting', 'best-method': 'Selecting best', loading: 'Loading data' }[p.current_step] || 'Starting';
+              // ETA calculation based on overall progress
+              let etaText = '';
+              if (overallPct > 2 && forecastStartedAt) {
+                const elapsed = (Date.now() - new Date(forecastStartedAt).getTime()) / 1000;
+                const remaining = elapsed * (100 - overallPct) / overallPct;
+                if (remaining < 60) etaText = `~${Math.round(remaining)}s left`;
+                else if (remaining < 3600) etaText = `~${Math.round(remaining / 60)}m left`;
+                else etaText = `~${(remaining / 3600).toFixed(1)}h left`;
+              }
+              const stepDetail = p.completed != null && p.total != null && p.total > 1
+                ? ` (${p.completed}/${p.total} series)` : '';
+              return (
+                <div className="mt-2 w-full max-w-md">
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="font-medium text-indigo-700 dark:text-indigo-300">
+                      {stepLabel}{stepDetail}
+                    </span>
+                    <span className="text-gray-500 dark:text-gray-400 tabular-nums">
+                      {overallPct > 0 ? `${overallPct}%` : ''}
+                      {etaText ? ` \u00b7 ${etaText}` : ''}
+                    </span>
+                  </div>
+                  <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                    {overallPct > 0 ? (
+                      <div
+                        className="h-full bg-indigo-500 rounded-full transition-all duration-700 ease-out"
+                        style={{ width: `${Math.min(overallPct, 100)}%` }}
+                      />
+                    ) : (
+                      <div className="h-full bg-indigo-400/60 rounded-full animate-pulse" style={{ width: '100%' }} />
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
           <div className="mt-3 text-xs text-gray-400 dark:text-gray-500 flex flex-wrap gap-2 items-center">
             {/* Segment scope badge — only shown when non-default segment active */}
@@ -2325,6 +2374,45 @@ export const TimeSeriesViewer = () => {
               <span className="text-red-600 text-xs font-medium">{'\u2717'} Failed</span>
             )}
           </div>
+          {/* ── Mobile progress bar ── */}
+          {(forecastJobStatus === 'running' || forecastJobStatus === 'pending') && (() => {
+            const p = forecastProgress || {};
+            const overallPct = p.overall_pct || 0;
+            const stepLabel = { forecast: 'Forecasting', backtest: 'Backtesting', 'best-method': 'Selecting best', loading: 'Loading data' }[p.current_step] || 'Starting';
+            let etaText = '';
+            if (overallPct > 2 && forecastStartedAt) {
+              const elapsed = (Date.now() - new Date(forecastStartedAt).getTime()) / 1000;
+              const remaining = elapsed * (100 - overallPct) / overallPct;
+              if (remaining < 60) etaText = `~${Math.round(remaining)}s left`;
+              else if (remaining < 3600) etaText = `~${Math.round(remaining / 60)}m left`;
+              else etaText = `~${(remaining / 3600).toFixed(1)}h left`;
+            }
+            const stepDetail = p.completed != null && p.total != null && p.total > 1
+              ? ` (${p.completed}/${p.total} series)` : '';
+            return (
+              <div className="mt-2">
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <span className="font-medium text-indigo-700 dark:text-indigo-300">
+                    {stepLabel}{stepDetail}
+                  </span>
+                  <span className="text-gray-500 dark:text-gray-400 tabular-nums">
+                    {overallPct > 0 ? `${overallPct}%` : ''}
+                    {etaText ? ` \u00b7 ${etaText}` : ''}
+                  </span>
+                </div>
+                <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                  {overallPct > 0 ? (
+                    <div
+                      className="h-full bg-indigo-500 rounded-full transition-all duration-700 ease-out"
+                      style={{ width: `${Math.min(overallPct, 100)}%` }}
+                    />
+                  ) : (
+                    <div className="h-full bg-indigo-400/60 rounded-full animate-pulse" style={{ width: '100%' }} />
+                  )}
+                </div>
+              </div>
+            );
+          })()}
           {isMultiMode && (
             <div className="mt-2 text-xs text-gray-400 dark:text-gray-500">
               <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded font-medium">
@@ -2631,11 +2719,20 @@ export const TimeSeriesViewer = () => {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <h3 className="text-sm font-semibold text-emerald-700 dark:text-emerald-400 mb-2">Applied Methods ({methodExplanation.included?.length || 0})</h3>
-                    <div className="space-y-1">
+                    <div className="space-y-1.5">
                       {(methodExplanation.included || []).map((m, i) => (
-                        <div key={i} className="flex items-start gap-2 text-sm">
-                          <span className={`mt-0.5 text-xs ${m.status === 'forecasted' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-500 dark:text-amber-400'}`}>{m.status === 'forecasted' ? '✓' : '⚠'}</span>
-                          <div><span className="font-medium text-gray-700 dark:text-gray-300">{m.method}</span><span className="text-gray-400 dark:text-gray-500 ml-1 text-xs">{m.reason}</span></div>
+                        <div key={i}>
+                          <div className="flex items-start gap-2 text-sm">
+                            <span className={`mt-0.5 text-xs ${m.backtest_note ? 'text-amber-500 dark:text-amber-400' : m.status === 'forecasted' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-500 dark:text-amber-400'}`}>
+                              {m.backtest_note ? '⚠' : m.status === 'forecasted' ? '✓' : '⚠'}
+                            </span>
+                            <div><span className="font-medium text-gray-700 dark:text-gray-300">{m.method}</span><span className="text-gray-400 dark:text-gray-500 ml-1 text-xs">{m.reason}</span></div>
+                          </div>
+                          {m.backtest_note && (
+                            <div className="ml-5 mt-0.5 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded px-2 py-1">
+                              {m.backtest_note}
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>

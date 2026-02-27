@@ -156,6 +156,43 @@ def _dask_backtest_batch(config_path: str,
     evaluator = ForecastEvaluator(config_path)
     use_with_forecasts = hasattr(evaluator, 'backtest_series_with_forecasts')
 
+    # Lazily construct MLForecaster only when ML methods are present in the batch
+    _ml_methods = {'LightGBM', 'XGBoost'}
+    _needs_ml = any(
+        any(m in _ml_methods for m in methods)
+        for _, methods, _ in batch_work
+    )
+    ml_forecaster = None
+    if _needs_ml:
+        try:
+            ml_forecaster = MLForecaster(config_path)
+        except Exception as exc:
+            logger.warning(f"Could not init MLForecaster in worker: {exc}")
+
+    def _combined_forecast_fn(df, unique_id, methods, characteristics, **kw):
+        """Delegate to stat and/or ML forecaster depending on method names."""
+        results = []
+        stat = [m for m in methods if m in _STAT_METHODS]
+        ml = [m for m in methods if m in _ml_methods]
+        if stat:
+            results.extend(
+                stat_forecaster.forecast_single_series(
+                    df=df, unique_id=unique_id, methods=stat,
+                    characteristics=characteristics, **kw,
+                )
+            )
+        if ml and ml_forecaster is not None:
+            results.extend(
+                ml_forecaster.forecast_single_series(
+                    df=df, unique_id=unique_id, methods=ml,
+                    characteristics=characteristics, **kw,
+                )
+            )
+        return results
+
+    # Choose forecast function: combined when ML methods present, stat-only otherwise
+    forecast_fn = _combined_forecast_fn if _needs_ml else stat_forecaster.forecast_single_series
+
     all_metrics = []
     all_origins = []
 
@@ -166,7 +203,7 @@ def _dask_backtest_batch(config_path: str,
                 metrics_df, origin_df = evaluator.backtest_series_with_forecasts(
                     df=series_df,
                     unique_id=unique_id,
-                    forecast_fn=stat_forecaster.forecast_single_series,
+                    forecast_fn=forecast_fn,
                     methods=methods,
                     characteristics=characteristics,
                 )
@@ -176,7 +213,7 @@ def _dask_backtest_batch(config_path: str,
                 metrics_df = evaluator.backtest_series(
                     df=series_df,
                     unique_id=unique_id,
-                    forecast_fn=stat_forecaster.forecast_single_series,
+                    forecast_fn=forecast_fn,
                     methods=methods,
                     characteristics=characteristics,
                 )
@@ -630,13 +667,16 @@ class ForecastOrchestrator:
 
     def step_forecast(self,
                       df: pd.DataFrame,
-                      characteristics_df: pd.DataFrame) -> pd.DataFrame:
+                      characteristics_df: pd.DataFrame,
+                      series_subset: bool = False) -> pd.DataFrame:
         """
         Step 3: Generate forecasts using all model families.
 
         Args:
             df: Time series data
             characteristics_df: Series characteristics
+            series_subset: When True, use targeted delete instead of
+                           truncating when saving to DB.
 
         Returns:
             Combined forecast results
@@ -718,11 +758,22 @@ class ForecastOrchestrator:
         try:
             from db.db import bulk_insert, get_schema, jsonb_serialize
             schema = get_schema(str(self.config_path))
+
+            # Targeted delete for subset runs (don't wipe all other series)
+            _delete_clause = None
+            if series_subset and 'unique_id' in forecasts_df.columns:
+                _uids = list(forecasts_df['unique_id'].unique())
+                _quoted = ", ".join(f"'{s}'" for s in _uids)
+                _delete_clause = f"unique_id IN ({_quoted})"
+                self.logger.info(f"Targeted save: replacing forecasts for {len(_uids)} series only")
+
             cols = list(forecasts_df.columns)
             rows = [tuple(jsonb_serialize(v) for v in row)
                     for row in forecasts_df.itertuples(index=False, name=None)]
             n = bulk_insert(str(self.config_path), f"{schema}.forecast_results",
-                            cols, rows, truncate=True)
+                            cols, rows,
+                            truncate=not series_subset,
+                            delete_where=_delete_clause)
             self.logger.info(f"Forecasts saved to {schema}.forecast_results ({n} rows)")
         except Exception as db_err:
             self.logger.error(f"Could not save forecasts to DB: {db_err}")
@@ -732,7 +783,8 @@ class ForecastOrchestrator:
 
     def step_backtest(self,
                       df: pd.DataFrame,
-                      characteristics_df: pd.DataFrame) -> tuple:
+                      characteristics_df: pd.DataFrame,
+                      all_methods: bool = False) -> tuple:
         """
         Step 4: Rolling-window backtesting with per-origin forecast storage.
 
@@ -742,6 +794,8 @@ class ForecastOrchestrator:
         Args:
             df: Time series data
             characteristics_df: Series characteristics
+            all_methods: When True, backtest ML methods (LightGBM, XGBoost)
+                         alongside statistical methods.
 
         Returns:
             Tuple of (metrics_df, forecasts_by_origin_df)
@@ -750,6 +804,8 @@ class ForecastOrchestrator:
         self.logger.info("STEP 4: Backtesting with Per-Origin Forecast Storage")
         self.logger.info("=" * 80)
 
+        _ml_backtest_methods = {'LightGBM', 'XGBoost'}
+
         # Build per-series work items: (unique_id, series_df_slice, methods, chars_dict)
         work_items = []
         for _, char_row in characteristics_df.iterrows():
@@ -757,12 +813,16 @@ class ForecastOrchestrator:
             methods = char_row.get('recommended_methods', ['AutoETS', 'AutoARIMA', 'AutoTheta'])
             if isinstance(methods, str):
                 methods = [methods]
-            # Filter to statistical methods only; TimesFM / LightGBM etc. are not handled here
-            methods = [m for m in methods if m in _STAT_METHODS][:5]
-            if not methods:
-                methods = ['AutoETS', 'AutoARIMA']
+            # Statistical methods for backtest
+            stat_methods = [m for m in methods if m in _STAT_METHODS][:5]
+            if not stat_methods:
+                stat_methods = ['AutoETS', 'AutoARIMA']
+            # When all_methods is set, also include ML methods that are in recommended_methods
+            if all_methods:
+                ml_methods = [m for m in methods if m in _ml_backtest_methods]
+                stat_methods = stat_methods + ml_methods
             series_slice = df[df['unique_id'] == unique_id]
-            work_items.append((unique_id, series_slice, methods, char_row.to_dict()))
+            work_items.append((unique_id, series_slice, stat_methods, char_row.to_dict()))
 
         n_series = len(work_items)
         all_metrics = []
@@ -824,6 +884,30 @@ class ForecastOrchestrator:
             # ---- Serial fallback ----
             self.logger.info(f"Running serial backtesting ({n_series} series)...")
             self.logger.info(f"[BACKTEST_PROGRESS] completed=0 total={n_series}")
+
+            # Build a combined forecast function that delegates to the right forecaster
+            def _combined_forecast_fn(df, unique_id, methods, characteristics, **kw):
+                results = []
+                stat = [m for m in methods if m in _STAT_METHODS]
+                ml = [m for m in methods if m in _ml_backtest_methods]
+                if stat:
+                    results.extend(
+                        self.stat_forecaster.forecast_single_series(
+                            df=df, unique_id=unique_id, methods=stat,
+                            characteristics=characteristics, **kw,
+                        )
+                    )
+                if ml:
+                    results.extend(
+                        self.ml_forecaster.forecast_single_series(
+                            df=df, unique_id=unique_id, methods=ml,
+                            characteristics=characteristics, **kw,
+                        )
+                    )
+                return results
+
+            forecast_fn = _combined_forecast_fn if all_methods else self.stat_forecaster.forecast_single_series
+
             pbar = tqdm(enumerate(work_items), total=n_series, desc="  Backtesting", unit="series")
             for idx, (unique_id, series_slice, methods, chars_dict) in pbar:
                 pbar.set_postfix_str(unique_id, refresh=False)
@@ -832,7 +916,7 @@ class ForecastOrchestrator:
                         metrics, origin_forecasts = self.evaluator.backtest_series_with_forecasts(
                             df=series_slice,
                             unique_id=unique_id,
-                            forecast_fn=self.stat_forecaster.forecast_single_series,
+                            forecast_fn=forecast_fn,
                             methods=methods,
                             characteristics=chars_dict,
                         )
@@ -842,7 +926,7 @@ class ForecastOrchestrator:
                         metrics = self.evaluator.backtest_series(
                             df=series_slice,
                             unique_id=unique_id,
-                            forecast_fn=self.stat_forecaster.forecast_single_series,
+                            forecast_fn=forecast_fn,
                             methods=methods,
                             characteristics=chars_dict,
                         )
@@ -862,13 +946,25 @@ class ForecastOrchestrator:
         from db.db import bulk_insert, get_schema, jsonb_serialize
         schema = get_schema(str(self.config_path))
 
+        # When backtesting a subset (all_methods mode), do a targeted delete
+        # for the specific series instead of truncating the entire table.
+        _series_ids = list(characteristics_df['unique_id'].unique())
+        _is_subset = all_methods and len(_series_ids) > 0
+        _delete_clause = None
+        if _is_subset:
+            _quoted = ", ".join(f"'{s}'" for s in _series_ids)
+            _delete_clause = f"unique_id IN ({_quoted})"
+            self.logger.info(f"Targeted save: replacing data for {len(_series_ids)} series only")
+
         if not metrics_df.empty:
             try:
                 cols = list(metrics_df.columns)
                 rows = [tuple(jsonb_serialize(v) for v in row)
                         for row in metrics_df.itertuples(index=False, name=None)]
                 n = bulk_insert(str(self.config_path), f"{schema}.backtest_metrics",
-                                cols, rows, truncate=True)
+                                cols, rows,
+                                truncate=not _is_subset,
+                                delete_where=_delete_clause)
                 self.logger.info(f"Backtest metrics saved to {schema}.backtest_metrics ({n} rows)")
             except Exception as db_err:
                 self.logger.error(f"Could not save backtest metrics to DB: {db_err}")
@@ -883,7 +979,9 @@ class ForecastOrchestrator:
                 rows = [tuple(jsonb_serialize(v) for v in row)
                         for row in origin_df.itertuples(index=False, name=None)]
                 n = bulk_insert(str(self.config_path), f"{schema}.forecasts_by_origin",
-                                cols, rows, truncate=True)
+                                cols, rows,
+                                truncate=not _is_subset,
+                                delete_where=_delete_clause)
                 self.logger.info(f"Per-origin forecasts saved to {schema}.forecasts_by_origin ({n} rows)")
             except Exception as db_err:
                 self.logger.error(f"Could not save origin forecasts to DB: {db_err}")
@@ -891,12 +989,15 @@ class ForecastOrchestrator:
 
         return metrics_df, origin_df
 
-    def step_select_best_methods(self, metrics_df: pd.DataFrame) -> pd.DataFrame:
+    def step_select_best_methods(self, metrics_df: pd.DataFrame,
+                                 series_subset: bool = False) -> pd.DataFrame:
         """
         Step 5: Select best forecasting method per series.
 
         Args:
             metrics_df: Backtest metrics from step 4
+            series_subset: When True, use targeted delete instead of
+                           truncating when saving to DB.
 
         Returns:
             DataFrame with best method per series
@@ -915,11 +1016,21 @@ class ForecastOrchestrator:
         try:
             from db.db import bulk_insert, get_schema, jsonb_serialize
             schema = get_schema(str(self.config_path))
+
+            _delete_clause = None
+            if series_subset and 'unique_id' in best_methods_df.columns:
+                _uids = list(best_methods_df['unique_id'].unique())
+                _quoted = ", ".join(f"'{s}'" for s in _uids)
+                _delete_clause = f"unique_id IN ({_quoted})"
+                self.logger.info(f"Targeted save: replacing best methods for {len(_uids)} series only")
+
             cols = list(best_methods_df.columns)
             rows = [tuple(jsonb_serialize(v) for v in row)
                     for row in best_methods_df.itertuples(index=False, name=None)]
             n = bulk_insert(str(self.config_path), f"{schema}.best_method_per_series",
-                            cols, rows, truncate=True)
+                            cols, rows,
+                            truncate=not series_subset,
+                            delete_where=_delete_clause)
             self.logger.info(f"Best methods saved to {schema}.best_method_per_series ({n} rows)")
         except Exception as db_err:
             self.logger.error(f"Could not save best methods to DB: {db_err}")

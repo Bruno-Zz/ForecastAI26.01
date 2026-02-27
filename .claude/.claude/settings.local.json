@@ -21,7 +21,12 @@
       "Bash(npm install:*)",
       "Bash(sort:*)",
       "Bash(netstat:*)",
-      "Bash(findstr:*)"
-    ]
+      "Bash(findstr:*)",
+      "Bash(PGPASSWORD=postgres psql:*)",
+      "Bash(ping:*)",
+      "Bash(nslookup:*)",
+      "Bash(npm run build:*)"
+    ],
+    "defaultMode": "bypassPermissions"
   }
 }

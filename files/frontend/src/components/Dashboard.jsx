@@ -84,6 +84,7 @@ export const Dashboard = () => {
   const [search, setSearch] = useState('');
   const [complexityFilter, setComplexityFilter] = useState('');
   const [intermittentFilter, setIntermittentFilter] = useState('');
+  const [bestMethodFilter, setBestMethodFilter] = useState('');
   const [sortField, setSortField] = useState('unique_id');
   const [sortDir, setSortDir] = useState('asc');
 
@@ -123,6 +124,7 @@ export const Dashboard = () => {
       const isInt = intermittentFilter === 'true';
       result = result.filter(s => s.is_intermittent === isInt);
     }
+    if (bestMethodFilter) result = result.filter(s => s.best_method === bestMethodFilter);
     result.sort((a, b) => {
       let va = a[sortField], vb = b[sortField];
       if (typeof va === 'string') va = va.toLowerCase();
@@ -132,7 +134,7 @@ export const Dashboard = () => {
       return 0;
     });
     return result;
-  }, [series, search, complexityFilter, intermittentFilter, sortField, sortDir]);
+  }, [series, search, complexityFilter, intermittentFilter, bestMethodFilter, sortField, sortDir]);
 
   const pagedSeries = filteredSeries.slice(page * pageSize, (page + 1) * pageSize);
   const totalPages = Math.ceil(filteredSeries.length / pageSize);
@@ -177,50 +179,80 @@ export const Dashboard = () => {
   const complexitySpec = useMemo(() => {
     if (!analytics?.complexity_distribution) return null;
     const data = Object.entries(analytics.complexity_distribution).map(([k, v]) => ({ level: k, count: v }));
+    const encoding = {
+      theta: { field: 'count', type: 'quantitative' },
+      color: {
+        field: 'level', type: 'nominal',
+        scale: { domain: ['low', 'medium', 'high'], range: ['#4ade80', '#facc15', '#f87171'] },
+        legend: { title: 'Complexity' }
+      },
+      tooltip: [
+        { field: 'level', type: 'nominal', title: 'Complexity' },
+        { field: 'count', type: 'quantitative', title: 'Count' }
+      ]
+    };
+    if (complexityFilter) {
+      encoding.opacity = {
+        condition: { test: `datum.level === '${complexityFilter}'`, value: 1 },
+        value: 0.3
+      };
+      encoding.stroke = {
+        condition: { test: `datum.level === '${complexityFilter}'`, value: isDark ? '#e5e7eb' : '#1f2937' },
+        value: null
+      };
+      encoding.strokeWidth = {
+        condition: { test: `datum.level === '${complexityFilter}'`, value: 2 },
+        value: 0
+      };
+    }
     return {
       $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
       width: 280, height: 200,
       config: vegaConfig,
       data: { values: data },
-      mark: 'arc',
-      encoding: {
-        theta: { field: 'count', type: 'quantitative' },
-        color: {
-          field: 'level', type: 'nominal',
-          scale: { domain: ['low', 'medium', 'high'], range: ['#4ade80', '#facc15', '#f87171'] },
-          legend: { title: 'Complexity' }
-        },
-        tooltip: [
-          { field: 'level', type: 'nominal', title: 'Complexity' },
-          { field: 'count', type: 'quantitative', title: 'Count' }
-        ]
-      }
+      mark: { type: 'arc', cursor: 'pointer' },
+      encoding
     };
-  }, [analytics, vegaConfig]);
+  }, [analytics, vegaConfig, complexityFilter, isDark]);
 
   const bestMethodSpec = useMemo(() => {
     if (!analytics?.best_method_distribution) return null;
     const data = Object.entries(analytics.best_method_distribution)
       .map(([k, v]) => ({ method: k, count: v }))
       .sort((a, b) => b.count - a.count);
+    const encoding = {
+      y: { field: 'method', type: 'nominal', sort: '-x', title: 'Method' },
+      x: { field: 'count', type: 'quantitative', title: 'Series Won' },
+      color: { field: 'method', type: 'nominal', legend: null, scale: { scheme: 'tableau10' } },
+      tooltip: [
+        { field: 'method', type: 'nominal', title: 'Method' },
+        { field: 'count', type: 'quantitative', title: 'Series Won' }
+      ]
+    };
+    if (bestMethodFilter) {
+      encoding.opacity = {
+        condition: { test: `datum.method === '${bestMethodFilter}'`, value: 1 },
+        value: 0.3
+      };
+      encoding.stroke = {
+        condition: { test: `datum.method === '${bestMethodFilter}'`, value: isDark ? '#e5e7eb' : '#1f2937' },
+        value: null
+      };
+      encoding.strokeWidth = {
+        condition: { test: `datum.method === '${bestMethodFilter}'`, value: 2 },
+        value: 0
+      };
+    }
     return {
       $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
       width: 'container', height: 250,
       config: vegaConfig,
       title: { text: `Best method across ${formatNumber(analytics.best_method_total_series || 0, locale, 0)} backtested series`, fontSize: 12 },
       data: { values: data },
-      mark: { type: 'bar', cornerRadiusEnd: 4 },
-      encoding: {
-        y: { field: 'method', type: 'nominal', sort: '-x', title: 'Method' },
-        x: { field: 'count', type: 'quantitative', title: 'Series Won' },
-        color: { field: 'method', type: 'nominal', legend: null, scale: { scheme: 'tableau10' } },
-        tooltip: [
-          { field: 'method', type: 'nominal', title: 'Method' },
-          { field: 'count', type: 'quantitative', title: 'Series Won' }
-        ]
-      }
+      mark: { type: 'bar', cornerRadiusEnd: 4, cursor: 'pointer' },
+      encoding
     };
-  }, [analytics, vegaConfig, locale]);
+  }, [analytics, vegaConfig, locale, bestMethodFilter, isDark]);
 
   if (loading) return <div className="flex items-center justify-center h-64"><div className="text-xl text-gray-500 dark:text-gray-400 animate-pulse">Loading dashboard...</div></div>;
   if (error) return <div className="flex items-center justify-center h-64"><div className="text-xl text-red-600 dark:text-red-400">Error: {error}</div></div>;
@@ -272,13 +304,43 @@ export const Dashboard = () => {
             {complexitySpec && (
               <div>
                 <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-400 mb-2">Complexity Distribution</h3>
-                <div className="w-full flex justify-center"><VegaLite spec={complexitySpec} actions={false} renderer="svg" style={{display:'block'}} /></div>
+                <div className="w-full flex justify-center">
+                  <VegaLite
+                    spec={complexitySpec}
+                    actions={false}
+                    renderer="svg"
+                    style={{display:'block'}}
+                    onNewView={(view) => {
+                      view.addEventListener('click', (event, item) => {
+                        if (item?.datum?.level) {
+                          const level = item.datum.level;
+                          setComplexityFilter(prev => { setPage(0); return prev === level ? '' : level; });
+                        }
+                      });
+                    }}
+                  />
+                </div>
               </div>
             )}
             {bestMethodSpec && (
               <div>
                 <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-400 mb-2">Best Method Distribution</h3>
-                <div className="w-full overflow-x-auto"><VegaLite spec={bestMethodSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+                <div className="w-full overflow-x-auto">
+                  <VegaLite
+                    spec={bestMethodSpec}
+                    actions={false}
+                    renderer="svg"
+                    style={{width:'100%'}}
+                    onNewView={(view) => {
+                      view.addEventListener('click', (event, item) => {
+                        if (item?.datum?.method) {
+                          const method = item.datum.method;
+                          setBestMethodFilter(prev => { setPage(0); return prev === method ? '' : method; });
+                        }
+                      });
+                    }}
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -315,6 +377,23 @@ export const Dashboard = () => {
             <option value="true">Intermittent</option>
             <option value="false">Non-Intermittent</option>
           </select>
+          {bestMethodFilter && (
+            <button
+              onClick={() => { setBestMethodFilter(''); setPage(0); }}
+              className="inline-flex items-center gap-1.5 px-3 py-2 bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400 rounded-lg text-sm font-medium hover:bg-blue-200 dark:hover:bg-blue-900/60 transition-colors"
+            >
+              Method: {bestMethodFilter}
+              <span className="text-xs">{'\u2715'}</span>
+            </button>
+          )}
+          {(complexityFilter || intermittentFilter || bestMethodFilter || search) && (
+            <button
+              onClick={() => { setSearch(''); setComplexityFilter(''); setIntermittentFilter(''); setBestMethodFilter(''); setPage(0); }}
+              className="px-3 py-2 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 text-sm transition-colors"
+            >
+              Clear all
+            </button>
+          )}
         </div>
 
         {/* Table */}

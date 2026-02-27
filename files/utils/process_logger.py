@@ -180,8 +180,8 @@ class ProcessLogger:
                     """
                     UPDATE process_log
                        SET status         = %s,
-                           finished_at    = %s,
-                           duration_sec   = %s,
+                           ended_at       = %s,
+                           duration_s     = %s,
                            rows_processed = %s,
                            error_message  = %s,
                            log_tail       = %s

@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Optional, Dict, Any
+import warnings
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -14,6 +15,9 @@ from pydantic import BaseModel
 from scipy import stats as scipy_stats
 import logging
 import yaml
+
+# Silence pandas UserWarning about psycopg2 not being SQLAlchemy
+warnings.filterwarnings("ignore", message=".*pandas only supports SQLAlchemy.*")
 import json
 import subprocess
 import sys
@@ -2021,6 +2025,21 @@ async def get_method_explanation(unique_id: str):
         uid_fc = fc_pdf[fc_pdf['unique_id'] == unique_id]
         forecasted_methods = set(uid_fc['method'].unique())
 
+    # Check which methods have valid (non-null) backtest metrics
+    methods_with_valid_metrics = set()
+    methods_with_null_metrics = set()
+    if data_cache['metrics'] is not None:
+        met_pdf = _compute(data_cache['metrics'])
+        uid_met = met_pdf[met_pdf['unique_id'] == unique_id]
+        for meth_name, grp in uid_met.groupby('method'):
+            # Check if at least one row has non-null MAE
+            if grp['mae'].notna().any():
+                methods_with_valid_metrics.add(meth_name)
+            else:
+                methods_with_null_metrics.add(meth_name)
+
+    horizon = config.get('forecasting', {}).get('horizon', 52)
+
     included = []
     excluded = []
 
@@ -2047,7 +2066,22 @@ async def get_method_explanation(unique_id: str):
         # Method passed all filters
         was_run = method in forecasted_methods
         if was_run:
-            included.append({'method': method, 'reason': f"Selected from '{category}' pool — {category_reason}", 'status': 'forecasted'})
+            entry = {
+                'method': method,
+                'reason': f"Selected from '{category}' pool — {category_reason}",
+                'status': 'forecasted',
+            }
+            # Check backtest metric quality
+            if method in methods_with_null_metrics and method not in methods_with_valid_metrics:
+                entry['backtest_note'] = (
+                    f"Forecast produced but backtest metrics are empty — "
+                    f"not enough data ({n_obs} obs) to train ML model "
+                    f"within rolling backtest windows at horizon {horizon}. "
+                    f"Not included in method comparison."
+                )
+            elif method in methods_with_valid_metrics:
+                entry['backtest_note'] = None
+            included.append(entry)
         else:
             included.append({'method': method, 'reason': f"Eligible from '{category}' pool but no forecast produced (model may have failed)", 'status': 'eligible_no_result'})
 
@@ -2791,14 +2825,91 @@ async def get_pipeline_jobs():
     return sorted(jobs, key=lambda j: j.get("started_at") or "", reverse=True)
 
 
+def _extract_progress(log_lines: list) -> dict:
+    """
+    Parse the most recent [FORECAST_PROGRESS] and [BACKTEST_PROGRESS]
+    markers from log lines into a structured progress dict.
+
+    Returns e.g.::
+
+        {
+          "current_step": "backtest",          # or "forecast", "best-method", "loading"
+          "completed": 50, "total": 200,
+          "batches_done": 2, "batches_total": 4,
+          "pct": 25.0
+        }
+    """
+    progress = {}
+    # 1) Detect current step from the most recent step-indicator line
+    for line in reversed(log_lines):
+        if "Best method selection" in line or "STEP 5" in line:
+            progress["current_step"] = "best-method"
+            break
+        if "Backtesting complete" in line:
+            progress["current_step"] = "best-method"
+            break
+        if "[BACKTEST_PROGRESS]" in line or "Chaining: Backtest" in line or "STEP 4" in line:
+            progress["current_step"] = "backtest"
+            break
+        if "Forecasting complete" in line:
+            progress["current_step"] = "backtest"
+            break
+        if "[FORECAST_PROGRESS]" in line or "STEP 3" in line:
+            progress["current_step"] = "forecast"
+            break
+        if "Loading" in line:
+            progress["current_step"] = "loading"
+            break
+
+    # 2) Find the most recent progress marker for numeric completion data
+    for line in reversed(log_lines):
+        for marker in ("[BACKTEST_PROGRESS]", "[FORECAST_PROGRESS]"):
+            if marker in line:
+                part = line.split(marker, 1)[1].strip()
+                for token in part.split():
+                    if "=" in token:
+                        k, v = token.split("=", 1)
+                        try:
+                            progress[k] = int(v)
+                        except ValueError:
+                            progress[k] = v
+                total = progress.get("total", 0)
+                completed = progress.get("completed", 0)
+                progress["pct"] = round(100.0 * completed / total, 1) if total > 0 else 0
+                break
+        else:
+            continue
+        break
+
+    # 3) Compute overall_pct spanning the full chain (forecast + backtest + best-method)
+    #    Approximate weight: forecast ~30%, backtest ~65%, best-method ~5%
+    step = progress.get("current_step", "loading")
+    step_pct = progress.get("pct", 0)
+    if step == "loading":
+        progress["overall_pct"] = 0
+    elif step == "forecast":
+        progress["overall_pct"] = round(step_pct * 0.30, 1)
+    elif step == "backtest":
+        progress["overall_pct"] = round(30 + step_pct * 0.65, 1)
+    elif step == "best-method":
+        progress["overall_pct"] = 97
+    else:
+        progress["overall_pct"] = progress.get("pct", 0)
+
+    return progress
+
+
 @app.get("/api/pipeline/jobs/{job_id}")
 async def get_pipeline_job(job_id: str):
-    """Return status + full log for a specific job."""
+    """Return status + full log for a specific job, with progress info."""
     with _pipeline_lock:
         job = _pipeline_jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    return job
+    # Enrich with parsed progress
+    result = dict(job)
+    result["progress"] = _extract_progress(result.get("log_lines", []))
+    return result
 
 
 @app.post("/api/pipeline/jobs/{job_id}/kill")

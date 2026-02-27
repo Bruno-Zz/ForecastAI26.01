@@ -159,9 +159,52 @@ def _load_segment_series(segment_id: int, config_path: str):
         conn.close()
 
 
-def run_single_step(step: str, config_path: str, segment_id: int = None):
+def _collect_all_methods(config_path: str) -> list:
+    """Gather the union of ALL methods from every method_selection category in config."""
+    import yaml
+    with open(config_path, 'r') as f:
+        cfg = yaml.safe_load(f)
+    method_lists = cfg.get('forecasting', {}).get('method_selection', {})
+    all_methods = set()
+    for methods in method_lists.values():
+        if isinstance(methods, list):
+            all_methods.update(methods)
+    return sorted(all_methods)
+
+
+def _apply_series_and_method_overrides(
+    df, chars_df, *, series_filter=None, all_methods=False, config_path=None
+):
+    """
+    Apply --series filter and --all-methods override to data/characteristics.
+
+    When all_methods is True, the recommended_methods column is replaced with
+    the union of every method across all categories in config.yaml, so every
+    forecaster will attempt every method it supports.
+    """
+    if series_filter:
+        df = df[df['unique_id'].isin(series_filter)]
+        chars_df = chars_df[chars_df['unique_id'].isin(series_filter)]
+        print(f"  Series filter applied: {len(series_filter)} series")
+
+    if all_methods and config_path:
+        full_methods = _collect_all_methods(config_path)
+        print(f"  All-methods mode: overriding recommended_methods -> {full_methods}")
+        chars_df = chars_df.copy()
+        chars_df['recommended_methods'] = [full_methods] * len(chars_df)
+
+    return df, chars_df
+
+
+def run_single_step(step: str, config_path: str, segment_id: int = None,
+                    series_filter: list = None, all_methods: bool = False,
+                    overrides_json: dict = None):
     """Run a single pipeline step, loading inputs from PostgreSQL."""
+    import uuid as _uuid
+    from utils.process_logger import ProcessLogger, ListHandler
+
     orchestrator = ForecastOrchestrator(config_path)
+    pl = ProcessLogger(config_path, run_id=str(_uuid.uuid4()))
 
     import pandas as pd
 
@@ -182,9 +225,12 @@ def run_single_step(step: str, config_path: str, segment_id: int = None):
         print("Loading demand data from PostgreSQL (original qty)...")
         df = _load_demand_from_db(config_path, use_corrected=False)
         if segment_id is not None:
-            series_filter = _load_segment_series(segment_id, config_path)
+            seg_ids = _load_segment_series(segment_id, config_path)
+            df = df[df['unique_id'].isin(seg_ids)]
+            print(f"  Segment filter applied: {len(seg_ids)} series")
+        if series_filter:
             df = df[df['unique_id'].isin(series_filter)]
-            print(f"  Segment filter applied: {len(series_filter)} series")
+            print(f"  Series filter applied: {len(series_filter)} series")
         corrected_df, outliers_df = orchestrator.step_outlier_detection(df)
         n_adjusted = outliers_df['unique_id'].nunique() if not outliers_df.empty else 0
         print(f"Outlier detection complete: {len(outliers_df)} outliers in {n_adjusted} series")
@@ -193,9 +239,12 @@ def run_single_step(step: str, config_path: str, segment_id: int = None):
         print("Loading demand data from PostgreSQL (corrected)...")
         df = _load_demand_from_db(config_path, use_corrected=True)
         if segment_id is not None:
-            series_filter = _load_segment_series(segment_id, config_path)
+            seg_ids = _load_segment_series(segment_id, config_path)
+            df = df[df['unique_id'].isin(seg_ids)]
+            print(f"  Segment filter applied: {len(seg_ids)} series")
+        if series_filter:
             df = df[df['unique_id'].isin(series_filter)]
-            print(f"  Segment filter applied: {len(series_filter)} series")
+            print(f"  Series filter applied: {len(series_filter)} series")
         chars_df = orchestrator.step_characterize(df)
         print(f"Characterization complete: {len(chars_df)} series analyzed")
 
@@ -205,20 +254,80 @@ def run_single_step(step: str, config_path: str, segment_id: int = None):
         print("Loading characteristics from PostgreSQL...")
         chars_df = _load_characteristics_from_db(config_path)
         if segment_id is not None:
-            series_filter = _load_segment_series(segment_id, config_path)
-            df = df[df['unique_id'].isin(series_filter)]
-            chars_df = chars_df[chars_df['unique_id'].isin(series_filter)]
-            print(f"  Segment filter applied: {len(series_filter)} series")
-        # Start Dask for parallel batch processing (mirrors run_complete_pipeline behaviour)
+            seg_ids = _load_segment_series(segment_id, config_path)
+            df = df[df['unique_id'].isin(seg_ids)]
+            chars_df = chars_df[chars_df['unique_id'].isin(seg_ids)]
+            print(f"  Segment filter applied: {len(seg_ids)} series")
+        df, chars_df = _apply_series_and_method_overrides(
+            df, chars_df,
+            series_filter=series_filter,
+            all_methods=all_methods,
+            config_path=config_path,
+        )
+        # Pass overrides to the orchestrator for per-series hyper-param tuning
+        if overrides_json:
+            orchestrator._series_overrides = overrides_json
+
+        # --- Forecast step (logged) ---
+        handler = ListHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+        logging.getLogger().addHandler(handler)
+        log_id = pl.start_step('forecast')
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
             orchestrator.start_dask_client()
         try:
-            forecasts_df = orchestrator.step_forecast(df, chars_df)
+            forecasts_df = orchestrator.step_forecast(
+                df, chars_df, series_subset=bool(series_filter),
+            )
+            pl.end_step(log_id, 'success', rows=len(forecasts_df), log_tail=handler.get_tail())
+        except Exception as exc:
+            pl.end_step(log_id, 'error', error=str(exc), log_tail=handler.get_tail())
+            raise
         finally:
             if orchestrator.client:
                 orchestrator.stop_dask_client()
+            logging.getLogger().removeHandler(handler)
         print(f"Forecasting complete: {len(forecasts_df)} forecasts generated")
+
+        # When running for specific series with all methods, also
+        # chain backtest -> best-method so the user gets a full comparison.
+        if series_filter and all_methods:
+            print("\n--- Chaining: Backtest + Best Method for full comparison ---")
+
+            # Backtest step (logged)
+            handler = ListHandler()
+            handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+            logging.getLogger().addHandler(handler)
+            log_id = pl.start_step('backtest')
+            if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
+                orchestrator.start_dask_client()
+            try:
+                metrics_df, origin_df = orchestrator.step_backtest(
+                    df, chars_df, all_methods=True,
+                )
+                pl.end_step(log_id, 'success', rows=len(metrics_df), log_tail=handler.get_tail())
+            except Exception as exc:
+                pl.end_step(log_id, 'error', error=str(exc), log_tail=handler.get_tail())
+                raise
+            finally:
+                if orchestrator.client:
+                    orchestrator.stop_dask_client()
+                logging.getLogger().removeHandler(handler)
+            print(f"Backtesting complete: {len(metrics_df)} metric rows")
+
+            # Best method step (logged)
+            if not metrics_df.empty:
+                log_id = pl.start_step('best-method')
+                try:
+                    best_df = orchestrator.step_select_best_methods(
+                        metrics_df, series_subset=True,
+                    )
+                    pl.end_step(log_id, 'success', rows=len(best_df))
+                except Exception as exc:
+                    pl.end_step(log_id, 'error', error=str(exc))
+                    raise
+                print(f"Best method selection complete: {len(best_df)} series ranked")
 
     elif step == 'backtest':
         print("Loading demand data from PostgreSQL (corrected)...")
@@ -226,16 +335,24 @@ def run_single_step(step: str, config_path: str, segment_id: int = None):
         print("Loading characteristics from PostgreSQL...")
         chars_df = _load_characteristics_from_db(config_path)
         if segment_id is not None:
-            series_filter = _load_segment_series(segment_id, config_path)
-            df = df[df['unique_id'].isin(series_filter)]
-            chars_df = chars_df[chars_df['unique_id'].isin(series_filter)]
-            print(f"  Segment filter applied: {len(series_filter)} series")
+            seg_ids = _load_segment_series(segment_id, config_path)
+            df = df[df['unique_id'].isin(seg_ids)]
+            chars_df = chars_df[chars_df['unique_id'].isin(seg_ids)]
+            print(f"  Segment filter applied: {len(seg_ids)} series")
+        df, chars_df = _apply_series_and_method_overrides(
+            df, chars_df,
+            series_filter=series_filter,
+            all_methods=all_methods,
+            config_path=config_path,
+        )
         # Start Dask for parallel backtesting (mirrors forecast step behaviour)
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
             orchestrator.start_dask_client()
         try:
-            metrics_df, origin_df = orchestrator.step_backtest(df, chars_df)
+            metrics_df, origin_df = orchestrator.step_backtest(
+                df, chars_df, all_methods=all_methods,
+            )
         finally:
             if orchestrator.client:
                 orchestrator.stop_dask_client()
@@ -311,6 +428,20 @@ Examples:
         help='Scope step to only series belonging to this segment (by segment.id)'
     )
 
+    # Series-level run (from Time Series Viewer)
+    parser.add_argument(
+        '--series', type=str, default=None,
+        help='Comma-separated list of unique_ids to restrict the run to'
+    )
+    parser.add_argument(
+        '--all-methods', action='store_true',
+        help='Run ALL forecasting methods regardless of recommended_methods'
+    )
+    parser.add_argument(
+        '--overrides-json', type=str, default=None,
+        help='JSON string with per-series hyperparameter overrides'
+    )
+
     # Schema discovery
     parser.add_argument('--discover-schema', action='store_true', help='Discover database schema and exit')
 
@@ -342,10 +473,26 @@ Examples:
         discover_schema(args.config)
         return
 
+    # Parse optional series filter and overrides
+    series_filter = [s.strip() for s in args.series.split(',')] if args.series else None
+    overrides_json = None
+    if args.overrides_json:
+        import json as _json
+        try:
+            overrides_json = _json.loads(args.overrides_json)
+        except Exception as e:
+            logger.warning(f"Failed to parse --overrides-json: {e}")
+
     # Single step mode
     if args.only:
         logger.info(f"Running single step: {args.only}")
-        run_single_step(args.only, args.config, segment_id=args.segment_id)
+        run_single_step(
+            args.only, args.config,
+            segment_id=args.segment_id,
+            series_filter=series_filter,
+            all_methods=args.all_methods,
+            overrides_json=overrides_json,
+        )
         return
 
     # Full pipeline

@@ -50,8 +50,8 @@ class MLForecaster:
     probabilistic outputs via quantile regression.
     """
 
-    # Minimum observations required to fit ML models
-    MIN_OBSERVATIONS = 50
+    # Fallback minimum observations for ML models (used if config is missing)
+    _DEFAULT_MIN_OBSERVATIONS = 50
 
     # Supported methods
     SUPPORTED_METHODS = ['LightGBM', 'XGBoost']
@@ -68,6 +68,10 @@ class MLForecaster:
 
         self.forecast_config = self.config['forecasting']
         self.logger = logging.getLogger(__name__)
+
+        # Read min_for_ml from config, fall back to class default
+        _sufficiency = self.config.get('characterization', {}).get('data_sufficiency', {})
+        self.MIN_OBSERVATIONS = _sufficiency.get('min_for_ml', self._DEFAULT_MIN_OBSERVATIONS)
 
         # Extract configuration
         self.horizon = self.forecast_config['horizon']
