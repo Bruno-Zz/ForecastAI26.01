@@ -261,7 +261,8 @@ def init_schema(config_path: Union[str, Path]) -> None:
         quantile_loss     DOUBLE PRECISION,
         aic               DOUBLE PRECISION,
         bic               DOUBLE PRECISION,
-        aicc              DOUBLE PRECISION
+        aicc              DOUBLE PRECISION,
+        metric_source     TEXT DEFAULT 'rolling_window'
     );
     CREATE INDEX IF NOT EXISTS idx_metrics_uid
         ON {schema}.backtest_metrics (unique_id);
@@ -574,6 +575,21 @@ def init_schema(config_path: Union[str, Path]) -> None:
                 ALTER TABLE {schema}.users DROP CONSTRAINT IF EXISTS users_auth_provider_check;
                 ALTER TABLE {schema}.users ADD CONSTRAINT users_auth_provider_check
                     CHECK (auth_provider IN ('local', 'microsoft', 'google'));
+            END IF;
+        END $$;
+        """,
+        # backtest_metrics — metric_source column
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'backtest_metrics'
+                  AND column_name = 'metric_source'
+            ) THEN
+                ALTER TABLE {schema}.backtest_metrics
+                    ADD COLUMN metric_source TEXT DEFAULT 'rolling_window';
             END IF;
         END $$;
         """,

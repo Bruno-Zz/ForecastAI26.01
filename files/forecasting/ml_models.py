@@ -77,6 +77,7 @@ class MLForecaster:
         self.horizon = self.forecast_config['horizon']
         self.frequency = self.forecast_config['frequency']
         self.confidence_levels = self.forecast_config['confidence_levels']
+        self.val_split = self.forecast_config.get('ml_val_split', 0.2)
 
         # Convert confidence levels (e.g. [10, 25, 50, 75, 90, 95, 99]) to
         # quantile floats [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
@@ -357,10 +358,23 @@ class MLForecaster:
             q: np.empty(self.horizon) for q in self.quantile_levels
         }
 
+        # Containers for internal validation metrics capture
+        val_actuals_per_h: list = []
+        val_predictions_per_h: list = []
+        val_quantile_preds_per_h: Dict[float, list] = {
+            q: [] for q in self.quantile_levels
+        }
+        train_residuals_all: list = []
+        n_params_total = 0
+        has_validation = False
+
         # The last row of features represents the most recent available
         # observation.  It will be used as the input for prediction at each
         # horizon step.
         last_features = features_df.iloc[[-1]]
+
+        # Validation split ratio — per-series override or config default
+        _val_split = (overrides or {}).get('val_split', self.val_split)
 
         for h in range(1, self.horizon + 1):
             X_train, y_train = self._build_supervised_dataset(
@@ -377,10 +391,10 @@ class MLForecaster:
                     quantile_forecasts[q][h - 1] = np.nan
                 continue
 
-            # Optional train/val split for early stopping (use last 20 %)
-            if SKLEARN_AVAILABLE and len(X_train) >= 30:
+            # Optional train/val split for early stopping
+            if SKLEARN_AVAILABLE and len(X_train) >= 30 and _val_split > 0:
                 X_tr, X_val, y_tr, y_val = train_test_split(
-                    X_train, y_train, test_size=0.2, shuffle=False
+                    X_train, y_train, test_size=_val_split, shuffle=False
                 )
             else:
                 X_tr, y_tr = X_train, y_train
@@ -407,6 +421,28 @@ class MLForecaster:
                     model_point.fit(X_tr, y_tr)
 
                 point_forecasts[h - 1] = float(model_point.predict(last_features)[0])
+
+                # --- Capture validation data for internal metrics ---
+                if X_val is not None:
+                    has_validation = True
+                    val_pred_h = model_point.predict(X_val)
+                    val_actual_h = y_val.values if hasattr(y_val, 'values') else np.asarray(y_val)
+                    val_actuals_per_h.append(val_actual_h)
+                    val_predictions_per_h.append(val_pred_h)
+
+                    # Training residuals for AIC/BIC
+                    train_actual_h = y_tr.values if hasattr(y_tr, 'values') else np.asarray(y_tr)
+                    train_pred_h = model_point.predict(X_tr)
+                    train_residuals_all.extend(train_actual_h - train_pred_h)
+
+                    # Parameter count proxy: best_iteration for LightGBM, n_estimators for XGBoost
+                    if hasattr(model_point, 'best_iteration_') and model_point.best_iteration_ > 0:
+                        n_params_total += model_point.best_iteration_
+                    elif hasattr(model_point, 'n_estimators'):
+                        n_params_total += model_point.n_estimators
+                    else:
+                        n_params_total += 100  # fallback
+
             except Exception as e:
                 self.logger.warning(
                     f"{unique_id}/{method}: Point forecast failed at h={h}: {e}"
@@ -437,6 +473,11 @@ class MLForecaster:
                     quantile_forecasts[q][h - 1] = float(
                         model_q.predict(last_features)[0]
                     )
+
+                    # Capture quantile validation predictions
+                    if X_val is not None:
+                        val_quantile_preds_per_h[q].append(model_q.predict(X_val))
+
                 except Exception as e:
                     self.logger.warning(
                         f"{unique_id}/{method}: Quantile {q} failed at h={h}: {e}"
@@ -445,6 +486,25 @@ class MLForecaster:
 
         # --- Post-processing: enforce quantile monotonicity ---
         quantile_forecasts = self._enforce_quantile_monotonicity(quantile_forecasts)
+
+        # --- Compute internal validation metrics ---
+        internal_val_metrics = None
+        residuals_arr = None
+        if has_validation and val_actuals_per_h:
+            try:
+                internal_val_metrics = self._compute_internal_val_metrics(
+                    val_actuals_per_h,
+                    val_predictions_per_h,
+                    val_quantile_preds_per_h,
+                    train_residuals_all,
+                    n_params_total,
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"{unique_id}/{method}: Failed to compute internal val metrics: {e}"
+                )
+            if train_residuals_all:
+                residuals_arr = np.array(train_residuals_all)
 
         training_time = time.time() - start_time
 
@@ -455,6 +515,7 @@ class MLForecaster:
             'horizon': self.horizon,
             'n_features': features_df.shape[1],
             'n_train_rows': len(features_df),
+            'val_split': _val_split,
             'description': f'{method} gradient boosting with direct multi-step quantile regression.',
         }
         if method == 'LightGBM':
@@ -471,10 +532,11 @@ class MLForecaster:
             point_forecast=point_forecasts,
             quantiles=quantile_forecasts,
             fitted_values=None,
-            residuals=None,
+            residuals=residuals_arr,
             hyperparameters=hyperparameters,
             training_time=training_time,
             insample_actual=series.values,
+            internal_val_metrics=internal_val_metrics,
         )
 
         self.logger.debug(
@@ -504,6 +566,160 @@ class MLForecaster:
                 quantile_forecasts[q][h] = sorted_values[idx]
 
         return quantile_forecasts
+
+    # ------------------------------------------------------------------
+    # Internal validation metrics
+    # ------------------------------------------------------------------
+
+    def _compute_internal_val_metrics(
+        self,
+        val_actuals_per_h: list,
+        val_predictions_per_h: list,
+        val_quantile_preds_per_h: Dict[float, list],
+        train_residuals_all: list,
+        n_params_total: int,
+    ) -> Dict[str, Any]:
+        """
+        Compute aggregate validation metrics across all horizon steps.
+
+        For each horizon step h, the validation set (last 20 % of supervised
+        samples) provides genuine out-of-sample predictions.  Per-step metrics
+        are averaged across all H horizon steps, mirroring how rolling-window
+        backtest metrics are averaged across forecast origins.
+        """
+        all_mae, all_rmse, all_bias = [], [], []
+        all_mape, all_smape, all_mase = [], [], []
+
+        for actual, pred in zip(val_actuals_per_h, val_predictions_per_h):
+            if len(actual) == 0:
+                continue
+            errors = actual - pred
+            abs_errors = np.abs(errors)
+
+            all_mae.append(float(np.mean(abs_errors)))
+            all_rmse.append(float(np.sqrt(np.mean(errors ** 2))))
+            all_bias.append(float(np.mean(errors)))
+
+            with np.errstate(divide='ignore', invalid='ignore'):
+                mape = np.mean(np.abs(errors / actual)) * 100
+                all_mape.append(float(mape) if np.isfinite(mape) else np.nan)
+
+                denom = (np.abs(actual) + np.abs(pred)) / 2
+                smape = np.mean(np.abs(errors) / denom) * 100
+                all_smape.append(float(smape) if np.isfinite(smape) else np.nan)
+
+            # MASE — naive = one-step diff within the validation set
+            if len(actual) > 1:
+                naive_mae = np.mean(np.abs(np.diff(actual)))
+                mase = float(np.mean(abs_errors)) / naive_mae if naive_mae > 0 else np.nan
+            else:
+                mase = np.nan
+            all_mase.append(mase)
+
+        metrics: Dict[str, Any] = {
+            'mae':   float(np.nanmean(all_mae))   if all_mae   else np.nan,
+            'rmse':  float(np.nanmean(all_rmse))  if all_rmse  else np.nan,
+            'bias':  float(np.nanmean(all_bias))  if all_bias  else np.nan,
+            'mape':  float(np.nanmean(all_mape))  if all_mape  else np.nan,
+            'smape': float(np.nanmean(all_smape)) if all_smape else np.nan,
+            'mase':  float(np.nanmean(all_mase))  if all_mase  else np.nan,
+        }
+
+        # ---- Probabilistic metrics from quantile validation predictions ----
+        coverage_levels = {
+            50: (0.25, 0.75), 80: (0.10, 0.90),
+            90: (0.05, 0.95), 95: (0.025, 0.975),
+        }
+        for level, (lower_q, upper_q) in coverage_levels.items():
+            lower_list = val_quantile_preds_per_h.get(lower_q, [])
+            upper_list = val_quantile_preds_per_h.get(upper_q, [])
+            if lower_list and upper_list:
+                coverages = []
+                for h_idx, actual in enumerate(val_actuals_per_h):
+                    if h_idx < len(lower_list) and h_idx < len(upper_list):
+                        lower = lower_list[h_idx][:len(actual)]
+                        upper = upper_list[h_idx][:len(actual)]
+                        cov = np.mean((actual >= lower) & (actual <= upper))
+                        coverages.append(float(cov))
+                if coverages:
+                    metrics[f'coverage_{level}'] = float(np.nanmean(coverages))
+
+        # Winkler score (90 % interval)
+        lower_90 = val_quantile_preds_per_h.get(0.05, [])
+        upper_90 = val_quantile_preds_per_h.get(0.95, [])
+        if lower_90 and upper_90:
+            winkler_values = []
+            alpha = 0.10
+            for h_idx, actual in enumerate(val_actuals_per_h):
+                if h_idx < len(lower_90) and h_idx < len(upper_90):
+                    lower = lower_90[h_idx][:len(actual)]
+                    upper = upper_90[h_idx][:len(actual)]
+                    width = upper - lower
+                    pen_low = (2 / alpha) * (lower - actual) * (actual < lower)
+                    pen_up  = (2 / alpha) * (actual - upper) * (actual > upper)
+                    winkler_values.extend((width + pen_low + pen_up).tolist())
+            if winkler_values:
+                metrics['winkler_score'] = float(np.nanmean(winkler_values))
+
+        # CRPS approximation
+        sorted_qs = sorted(val_quantile_preds_per_h.keys())
+        if len(sorted_qs) >= 2:
+            crps_values = []
+            for h_idx, actual in enumerate(val_actuals_per_h):
+                for i, y_true in enumerate(actual):
+                    q_vals, q_preds = [], []
+                    for q in sorted_qs:
+                        preds_list = val_quantile_preds_per_h[q]
+                        if h_idx < len(preds_list) and i < len(preds_list[h_idx]):
+                            q_vals.append(q)
+                            q_preds.append(preds_list[h_idx][i])
+                    if len(q_vals) >= 2:
+                        crps = 0.0
+                        for j in range(len(q_vals) - 1):
+                            q1, q2 = q_vals[j], q_vals[j + 1]
+                            f1, f2 = q_preds[j], q_preds[j + 1]
+                            indicator = 1.0 if y_true <= (f1 + f2) / 2 else 0.0
+                            crps += (q2 - q1) * ((f1 + f2) / 2 - y_true) * (indicator - (q1 + q2) / 2)
+                        crps_values.append(abs(crps))
+            if crps_values:
+                metrics['crps'] = float(np.nanmean(crps_values))
+
+        # Quantile loss (pinball loss)
+        if sorted_qs:
+            all_ql = []
+            for q in sorted_qs:
+                q_losses = []
+                for h_idx, actual in enumerate(val_actuals_per_h):
+                    preds_list = val_quantile_preds_per_h[q]
+                    if h_idx < len(preds_list):
+                        q_pred = preds_list[h_idx][:len(actual)]
+                        err = actual - q_pred
+                        loss = np.where(err >= 0, q * err, (q - 1) * err)
+                        q_losses.append(float(np.mean(loss)))
+                if q_losses:
+                    all_ql.append(float(np.nanmean(q_losses)))
+            if all_ql:
+                metrics['quantile_loss'] = float(np.nanmean(all_ql))
+
+        # ---- AIC / BIC from training residuals ----
+        if train_residuals_all:
+            residuals = np.array(train_residuals_all)
+            n_obs = len(residuals)
+            # Average n_params per horizon model
+            n_steps_with_val = len(val_actuals_per_h) or 1
+            n_params = max(n_params_total // n_steps_with_val, 1)
+            sigma2 = np.var(residuals)
+            if sigma2 > 0 and n_obs > 0:
+                log_lik = -0.5 * n_obs * (np.log(2 * np.pi * sigma2) + 1)
+                metrics['aic'] = float(-2 * log_lik + 2 * n_params)
+                metrics['bic'] = float(-2 * log_lik + n_params * np.log(n_obs))
+                if n_obs - n_params - 1 > 0:
+                    metrics['aicc'] = float(
+                        metrics['aic'] + (2 * n_params * (n_params + 1)) / (n_obs - n_params - 1)
+                    )
+
+        metrics['metric_source'] = 'internal_validation'
+        return metrics
 
     # ------------------------------------------------------------------
     # Public API

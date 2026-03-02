@@ -43,7 +43,10 @@ class EvaluationMetrics:
     aic: Optional[float] = None
     bic: Optional[float] = None
     aicc: Optional[float] = None
-    
+
+    # Source of the metrics: 'rolling_window' (default) or 'internal_validation'
+    metric_source: str = 'rolling_window'
+
     def to_dict(self) -> Dict:
         """Convert to dictionary."""
         return asdict(self)
@@ -66,41 +69,55 @@ class ForecastEvaluator:
         
         # Extract configuration
         self.horizon = self.forecast_config['horizon']
-        self.n_windows = self.backtesting_config.get('n_windows', 3)
-        self.step_size = self.backtesting_config.get('step_size', 1)
-        # min_train_size kept for backward compat but no longer gates backtesting
-        self.min_train_size = self.backtesting_config.get('min_train_size', 12)
+
+        # New backtesting params (with backward compat for old n_windows/step_size)
+        _bt_horizon = self.backtesting_config.get('backtest_horizon', None)
+        _bt_window = self.backtesting_config.get('window_size', None)
+        _bt_n_tests = self.backtesting_config.get('n_tests', None)
+
+        if _bt_horizon is None:
+            # Old config keys — derive new-style params from them
+            _old_n_windows = self.backtesting_config.get('n_windows', 3)
+            _old_step_size = self.backtesting_config.get('step_size', 4)
+            self.window_size = _bt_window if _bt_window is not None else self.horizon
+            self.n_tests = _bt_n_tests if _bt_n_tests is not None else _old_n_windows
+            self.backtest_horizon = self.window_size + max(0, _old_n_windows - 1) * _old_step_size
+        else:
+            self.backtest_horizon = _bt_horizon
+            self.window_size = _bt_window if _bt_window is not None else self.horizon
+            self.n_tests = _bt_n_tests if _bt_n_tests is not None else 3
+
+        self.min_train_size = self.backtesting_config.get('min_train_size', 24)
 
         # Frequency (used to derive periods-per-year when date calc is unavailable)
         self.frequency = self.forecast_config.get('frequency', 'M')
 
-        # Periods per year by frequency — used as a fallback when date inference fails
-        self._freq_periods_year = {
-            'H': 8760, 'D': 365, 'B': 260,
-            'W': 52,
-            'M': 12, 'ME': 12,
-            'Q': 4,  'QE': 4,
-            'Y': 1,  'YE': 1, 'A': 1,
-        }
-
     def create_rolling_windows(self,
                                series: pd.Series,
-                               dates: pd.Series) -> List[Tuple[int, pd.Series, pd.Series]]:
+                               dates: pd.Series,
+                               backtest_horizon: int = None,
+                               window_size: int = None,
+                               n_tests: int = None) -> List[Tuple[int, pd.Series, pd.Series]]:
         """
         Create rolling window splits for backtesting.
 
-        Rules:
-        - First forecast origin = earliest observation + 2 years (periods derived
-          from actual date spacing or configured frequency).  If the series is shorter than 2 years we use the
-          midpoint so that we always have *some* training data.
-        - n_windows windows are attempted, each step_size periods apart.
-        - A window is only included when there are enough actuals to evaluate
-          at least 1 horizon step (i.e. origin_idx < n).
-        - Backtest is ALWAYS attempted — there is no hard minimum-observation gate.
+        The backtest zone is the last *backtest_horizon* periods of the series.
+        Within that zone, *n_tests* test origins are placed, each evaluating a
+        forecast of *window_size* periods.
+
+        When n_tests=0 or exceeds the maximum possible, the window slides by 1
+        period each time.  For n_tests>=2 the step between origins is derived:
+            step = (backtest_horizon - window_size) / (n_tests - 1)
+
+        Per-series overrides can be passed via the keyword arguments; when not
+        supplied, the values from the config (self.*) are used.
 
         Args:
             series: Time series values
             dates: Corresponding dates
+            backtest_horizon: Override for self.backtest_horizon
+            window_size: Override for self.window_size
+            n_tests: Override for self.n_tests
 
         Returns:
             List of (origin_idx, train_series, test_series) tuples
@@ -112,35 +129,58 @@ class ForecastEvaluator:
             self.logger.debug(f"Series too short ({n} obs) for backtesting — need at least 2")
             return windows
 
-        # Determine 2-year offset in periods using actual date spacing.
-        # Fall back to the configured frequency when dates don't parse cleanly.
-        _fallback_ppy = self._freq_periods_year.get(self.frequency, 12)
-        try:
-            span_days = (dates.iloc[-1] - dates.iloc[0]).days
-            if span_days > 0 and n > 1:
-                days_per_period = span_days / (n - 1)
-                periods_per_year = max(1, round(365.25 / days_per_period))
-            else:
-                periods_per_year = _fallback_ppy
-        except Exception:
-            periods_per_year = _fallback_ppy
+        # Use overrides or config defaults
+        _horizon = backtest_horizon if backtest_horizon is not None else self.backtest_horizon
+        _window  = window_size if window_size is not None else self.window_size
+        _n_tests = n_tests if n_tests is not None else self.n_tests
 
-        two_year_periods = 2 * periods_per_year
+        # Enforce constraints
+        _horizon = min(_horizon, n - 1)            # Can't exceed series length - 1
+        _window  = min(_window, _horizon)           # Window can't exceed backtest horizon
+        _window  = min(_window, self.horizon)        # Window can't exceed forecast horizon
 
-        # First origin: 2 years after the first observation
-        # If the series is too short for that, use at least half the series length
-        # so there is always some training data
-        first_origin = min(two_year_periods, max(1, n // 2))
+        # First origin = start of backtest zone (ensure minimum training data)
+        first_origin = max(self.min_train_size, n - _horizon)
 
-        for i in range(self.n_windows):
-            origin_idx = first_origin + i * self.step_size
+        # Last possible origin where a full window still fits
+        last_possible_origin = n - _window
+        available_range = last_possible_origin - first_origin
 
-            # Need at least 1 actual observation after the origin
-            if origin_idx >= n:
+        if available_range < 0:
+            # Not enough data — use midpoint fallback
+            first_origin = max(1, n // 2)
+            last_possible_origin = n - 1
+            available_range = last_possible_origin - first_origin
+            _window = min(_window, n - first_origin)
+
+        if available_range < 0:
+            self.logger.debug(
+                f"Could not construct any backtest windows "
+                f"(n={n}, first_origin={first_origin}, "
+                f"backtest_horizon={_horizon}, window_size={_window})"
+            )
+            return windows
+
+        # Compute step and actual number of tests
+        max_possible = available_range + 1
+        if _n_tests <= 0 or _n_tests > max_possible:
+            step = 1
+            actual_n_tests = max_possible
+        elif _n_tests == 1:
+            step = 0
+            actual_n_tests = 1
+        else:
+            step = max(1, available_range // (_n_tests - 1))
+            actual_n_tests = _n_tests
+
+        for i in range(actual_n_tests):
+            origin_idx = first_origin + i * step
+
+            if origin_idx > last_possible_origin:
                 break
 
             train_series = series.iloc[:origin_idx]
-            test_end = min(origin_idx + self.horizon, n)
+            test_end = min(origin_idx + _window, n)
             test_series = series.iloc[origin_idx:test_end]
 
             if len(train_series) == 0 or len(test_series) == 0:
@@ -151,7 +191,8 @@ class ForecastEvaluator:
         if not windows:
             self.logger.debug(
                 f"Could not construct any backtest windows "
-                f"(n={n}, first_origin={first_origin}, n_windows={self.n_windows})"
+                f"(n={n}, first_origin={first_origin}, "
+                f"backtest_horizon={_horizon}, window_size={_window}, n_tests={_n_tests})"
             )
 
         return windows
@@ -393,7 +434,59 @@ class ForecastEvaluator:
             'bic': float(bic),
             'aicc': float(aicc)
         }
-    
+
+    # ------------------------------------------------------------------
+    # Internal validation metrics converter
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def create_eval_metrics_from_internal_validation(
+        unique_id: str,
+        method: str,
+        horizon: int,
+        internal_metrics: Dict,
+        forecast_origin_date: str,
+    ) -> 'EvaluationMetrics':
+        """
+        Convert an internal-validation metrics dict (from ML models) into an
+        EvaluationMetrics instance that can be stored in backtest_metrics.
+
+        Args:
+            unique_id: Series identifier.
+            method: Method name (e.g. 'LightGBM').
+            horizon: Forecast horizon.
+            internal_metrics: Dict produced by MLForecaster._compute_internal_val_metrics().
+            forecast_origin_date: Date string for the 80/20 split point.
+
+        Returns:
+            EvaluationMetrics with metric_source='internal_validation'.
+        """
+        _g = internal_metrics.get
+
+        return EvaluationMetrics(
+            unique_id=unique_id,
+            method=method,
+            forecast_origin=forecast_origin_date,
+            horizon=horizon,
+            mae=float(_g('mae', np.nan)),
+            rmse=float(_g('rmse', np.nan)),
+            mape=float(_g('mape', np.nan)),
+            smape=float(_g('smape', np.nan)),
+            mase=float(_g('mase', np.nan)),
+            bias=float(_g('bias', np.nan)),
+            crps=_g('crps'),
+            winkler_score=_g('winkler_score'),
+            coverage_50=_g('coverage_50'),
+            coverage_80=_g('coverage_80'),
+            coverage_90=_g('coverage_90'),
+            coverage_95=_g('coverage_95'),
+            quantile_loss=_g('quantile_loss'),
+            aic=_g('aic'),
+            bic=_g('bic'),
+            aicc=_g('aicc'),
+            metric_source='internal_validation',
+        )
+
     def evaluate_forecast(self,
                          actual: pd.Series,
                          forecast_result: Dict,
@@ -458,17 +551,20 @@ class ForecastEvaluator:
                        unique_id: str,
                        forecast_fn,
                        methods: List[str],
-                       characteristics: Dict) -> pd.DataFrame:
+                       characteristics: Dict,
+                       backtest_overrides: Dict = None) -> pd.DataFrame:
         """
         Perform rolling window backtesting for a single series.
-        
+
         Args:
             df: DataFrame with time series data
             unique_id: Series identifier
             forecast_fn: Function to generate forecasts
             methods: List of methods to test
             characteristics: Series characteristics
-            
+            backtest_overrides: Optional dict with per-series backtesting
+                overrides (backtest_horizon, window_size, n_tests)
+
         Returns:
             DataFrame with evaluation metrics for all windows and methods
         """
@@ -476,24 +572,36 @@ class ForecastEvaluator:
         series_df = df[df['unique_id'] == unique_id].sort_values('date')
         series = series_df['y']
         dates = series_df['date']
-        
-        # Create rolling windows
-        windows = self.create_rolling_windows(series, dates)
-        
+
+        # Create rolling windows (with optional per-series overrides)
+        bt_ovr = backtest_overrides or {}
+        windows = self.create_rolling_windows(
+            series, dates,
+            backtest_horizon=bt_ovr.get('backtest_horizon'),
+            window_size=bt_ovr.get('window_size'),
+            n_tests=bt_ovr.get('n_tests'),
+        )
+
         if not windows:
             self.logger.debug(f"No valid windows for {unique_id} — skipping backtest")
             return pd.DataFrame()
-        
+
+        # Effective window size for naive forecast length
+        _effective_window = min(
+            bt_ovr.get('window_size', self.window_size),
+            self.horizon
+        )
+
         all_metrics = []
-        
+
         for window_idx, (origin_idx, train_series, test_series) in enumerate(windows):
             forecast_origin = dates.iloc[origin_idx]
-            
+
             self.logger.debug(f"Window {window_idx + 1}/{len(windows)} for {unique_id} at {forecast_origin}")
-            
+
             # Generate forecasts for this window
             train_df = series_df.iloc[:origin_idx].copy()
-            
+
             try:
                 forecast_results = forecast_fn(
                     df=train_df,
@@ -501,10 +609,10 @@ class ForecastEvaluator:
                     methods=methods,
                     characteristics=characteristics
                 )
-                
+
                 # Naive forecast for MASE
-                naive_forecast = np.repeat(train_series.iloc[-1], self.horizon)
-                
+                naive_forecast = np.repeat(train_series.iloc[-1], _effective_window)
+
                 # Evaluate each method
                 for forecast_result in forecast_results:
                     metrics = self.evaluate_forecast(
@@ -514,11 +622,11 @@ class ForecastEvaluator:
                         naive_forecast=naive_forecast
                     )
                     all_metrics.append(metrics.to_dict())
-            
+
             except Exception as e:
                 self.logger.warning(f"Failed window {window_idx} for {unique_id}: {e}")
                 continue
-        
+
         return pd.DataFrame(all_metrics)
 
     def backtest_series_with_forecasts(self,
@@ -526,7 +634,8 @@ class ForecastEvaluator:
                                        unique_id: str,
                                        forecast_fn,
                                        methods: List[str],
-                                       characteristics: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                                       characteristics: Dict,
+                                       backtest_overrides: Dict = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Perform rolling window backtesting and store both metrics AND forecast values per origin.
 
@@ -545,6 +654,8 @@ class ForecastEvaluator:
                 'unique_id', 'method', 'point_forecast', and 'quantiles'.
             methods: List of method names to evaluate
             characteristics: Series characteristics dict
+            backtest_overrides: Optional dict with per-series backtesting
+                overrides (backtest_horizon, window_size, n_tests)
 
         Returns:
             Tuple of (metrics_df, forecasts_by_origin_df)
@@ -564,12 +675,24 @@ class ForecastEvaluator:
         series = series_df['y']
         dates = series_df['date']
 
-        # Create rolling windows
-        windows = self.create_rolling_windows(series, dates)
+        # Create rolling windows (with optional per-series overrides)
+        bt_ovr = backtest_overrides or {}
+        windows = self.create_rolling_windows(
+            series, dates,
+            backtest_horizon=bt_ovr.get('backtest_horizon'),
+            window_size=bt_ovr.get('window_size'),
+            n_tests=bt_ovr.get('n_tests'),
+        )
 
         if not windows:
             self.logger.debug(f"No valid windows for {unique_id} — skipping backtest")
             return pd.DataFrame(), pd.DataFrame()
+
+        # Effective window size for naive forecast length
+        _effective_window = min(
+            bt_ovr.get('window_size', self.window_size),
+            self.horizon
+        )
 
         all_metrics = []
         all_forecasts = []
@@ -593,7 +716,7 @@ class ForecastEvaluator:
                 )
 
                 # Naive forecast for MASE calculation
-                naive_forecast = np.repeat(train_series.iloc[-1], self.horizon)
+                naive_forecast = np.repeat(train_series.iloc[-1], _effective_window)
 
                 # Evaluate each method and collect per-step forecasts
                 for forecast_result in forecast_results:

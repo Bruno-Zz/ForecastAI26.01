@@ -339,7 +339,7 @@ function ForecastTableWithAdjustments({
   activeForecasts, forecastDates, bestMethod, historicalData,
   isMultiMode, horizonLength, adjustments, adjSaving,
   saveAdjustment, resetAllAdjustments, locale, numberDecimals, isDark,
-  dateRangeEnd,
+  dateRangeEnd, methodExplanation,
 }) {
   const bestMethodName = bestMethod?.best_method;
   const [adjRowsOpen, setAdjRowsOpen] = React.useState(false);
@@ -405,7 +405,8 @@ function ForecastTableWithAdjustments({
     if (!remarkPopup) return;
     const { dateStr, adjType, value } = remarkPopup;
     const existing = adjustments[`${dateStr}|${adjType}`];
-    const currentVal = existing ? existing.value : value || 0;
+    // When no existing adjustment, use 0 for adjustment (no delta) or the forecast value for override
+    const currentVal = existing ? existing.value : (adjType === 'override' ? value : 0);
     saveAdjustment(dateStr, adjType, String(currentVal), remarkDraft || null);
     setRemarkPopup(null);
   };
@@ -506,6 +507,7 @@ function ForecastTableWithAdjustments({
           <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
             {activeForecasts.map((f, idx) => {
               const isBest = f.method === bestMethodName;
+              const methodNote = (methodExplanation?.included || []).find(m => m.method === f.method)?.backtest_note || '';
               const rowBg  = isBest ? 'bg-emerald-50 dark:bg-emerald-900/20' : '';
               const stickyBg = isBest
                 ? (isDark ? '#064e3b33' : '#ecfdf5')
@@ -525,6 +527,14 @@ function ForecastTableWithAdjustments({
                           style={{ backgroundColor: getMethodColor(f.method) }}
                         />
                         <span>{f.method}</span>
+                        {/* Note indicator for methods with backtest notes */}
+                        {methodNote && (
+                          <span className="shrink-0 cursor-help" title={methodNote}>
+                            <svg className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                            </svg>
+                          </span>
+                        )}
                         {/* Toggle adj rows — only for the best/selected method */}
                         {isBest && !isMultiMode && (
                           <button
@@ -532,7 +542,7 @@ function ForecastTableWithAdjustments({
                             title={adjRowsOpen ? 'Hide adjustment rows' : 'Show adjustment rows'}
                             className="ml-1 text-gray-400 hover:text-indigo-600 text-xs leading-none"
                           >
-                            {adjRowsOpen ? '▲' : '▼'}
+                            {adjRowsOpen ? '\u25B2' : '\u25BC'}
                           </button>
                         )}
                       </div>
@@ -548,18 +558,24 @@ function ForecastTableWithAdjustments({
                           : adj
                             ? v + Number(adj.value)
                             : v;
-                        const hasNote = (adj?.note || ov?.note);
+                        const noteText = adj?.note || ov?.note || '';
                         const saving = adjSaving[`${dateStr}|adjustment`] || adjSaving[`${dateStr}|override`];
                         return (
                           <td
                             key={i}
-                            className={`px-2 py-2 text-right font-mono text-xs relative ${ov ? 'text-red-700 dark:text-red-400 font-semibold' : adj ? 'text-orange-700 dark:text-orange-400 font-semibold' : 'dark:text-gray-300'} ${hasNote ? 'cell-note-indicator' : ''}`}
-                            title={hasNote ? `Note: ${adj?.note || ov?.note}` : undefined}
+                            className={`px-2 py-2 text-right font-mono text-xs relative ${ov ? 'text-red-700 dark:text-red-400 font-semibold' : adj ? 'text-orange-700 dark:text-orange-400 font-semibold' : 'dark:text-gray-300'}`}
                             onDoubleClick={(e) => handleCellDoubleClick(e, dateStr, ov ? 'override' : 'adjustment', finalVal)}
                             onContextMenu={(e) => handleCellContextMenu(e, dateStr, ov ? 'override' : 'adjustment', finalVal)}
                           >
-                            {saving && <span className="text-gray-300 dark:text-gray-600 mr-0.5 text-[10px]">\u27F3</span>}
+                            {saving && <span className="text-gray-300 dark:text-gray-600 mr-0.5 text-[10px]">{'\u27F3'}</span>}
                             {formatNumber(finalVal, locale, 0)}
+                            {noteText && (
+                              <span className="inline-block ml-0.5 align-top cursor-help" title={noteText}>
+                                <svg className="inline w-3 h-3 text-indigo-400 dark:text-indigo-300" viewBox="0 0 20 20" fill="currentColor">
+                                  <path fillRule="evenodd" d="M18 10c0 4.418-3.582 8-8 8s-8-3.582-8-8 3.582-8 8-8 8 3.582 8 8zm-4.293-3.707a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0l-2-2a1 1 0 111.414-1.414L9 9.586l3.293-3.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                                </svg>
+                              </span>
+                            )}
                           </td>
                         );
                       }
@@ -701,6 +717,10 @@ function ForecastTableWithAdjustments({
               </span>
               <span className="text-gray-300 dark:text-gray-600">{'\u00B7'} leave blank to clear</span>
               <span className="text-gray-300 dark:text-gray-600">{'\u00B7'} double-click cell to add remark</span>
+              <span className="flex items-center gap-1">
+                <svg className="w-3 h-3 text-indigo-400" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M18 10c0 4.418-3.582 8-8 8s-8-3.582-8-8 3.582-8 8-8 8 3.582 8 8zm-4.293-3.707a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0l-2-2a1 1 0 111.414-1.414L9 9.586l3.293-3.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>
+                <span className="text-gray-300 dark:text-gray-600">has remark (hover to read)</span>
+              </span>
             </>
           )}
         </div>
@@ -924,6 +944,7 @@ export const TimeSeriesViewer = () => {
   const [compositeRanking, setCompositeRanking] = useState(null);
   const [compositeWeights, setCompositeWeights] = useState(null);
   const [bestMethod, setBestMethod] = useState(null);
+  const [btConfig, setBtConfig] = useState({ backtest_horizon: 60, window_size: 8, n_tests: 4 });
   const [methodExplanation, setMethodExplanation] = useState(null);
   const [distributions, setDistributions] = useState(null);
 
@@ -1263,6 +1284,8 @@ export const TimeSeriesViewer = () => {
         setMetrics(metricsRes.value.data.metrics || []);
         setCompositeRanking(metricsRes.value.data.composite_ranking || null);
         setCompositeWeights(metricsRes.value.data.composite_weights || null);
+        if (metricsRes.value.data.backtesting_config)
+          setBtConfig(metricsRes.value.data.backtesting_config);
       }
       if (bestRes.status === 'fulfilled') {
         setBestMethod(bestRes.value.data);
@@ -1400,8 +1423,8 @@ export const TimeSeriesViewer = () => {
       // Empty field → delete existing adjustment (if any)
       adjDebounceRef.current[key] = setTimeout(async () => {
         try {
-          await axios.delete(
-            `${API_BASE_URL}/adjustments/${encodeURIComponent(decodedId)}/${forecastDate}/${adjType}`
+          await api.delete(
+            `/adjustments/${encodeURIComponent(decodedId)}/${forecastDate}/${adjType}`
           );
           setAdjustments(prev => {
             const next = { ...prev };
@@ -1417,8 +1440,8 @@ export const TimeSeriesViewer = () => {
     adjDebounceRef.current[key] = setTimeout(async () => {
       setAdjSaving(prev => ({ ...prev, [key]: true }));
       try {
-        const res = await axios.post(
-          `${API_BASE_URL}/adjustments/${encodeURIComponent(decodedId)}`,
+        const res = await api.post(
+          `/adjustments/${encodeURIComponent(decodedId)}`,
           { forecast_date: forecastDate, adjustment_type: adjType, value: numVal, note: note || null }
         );
         // Immediately update local state so chart re-renders without waiting for a reload
@@ -2721,17 +2744,20 @@ export const TimeSeriesViewer = () => {
                     <h3 className="text-sm font-semibold text-emerald-700 dark:text-emerald-400 mb-2">Applied Methods ({methodExplanation.included?.length || 0})</h3>
                     <div className="space-y-1.5">
                       {(methodExplanation.included || []).map((m, i) => (
-                        <div key={i}>
-                          <div className="flex items-start gap-2 text-sm">
-                            <span className={`mt-0.5 text-xs ${m.backtest_note ? 'text-amber-500 dark:text-amber-400' : m.status === 'forecasted' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-500 dark:text-amber-400'}`}>
-                              {m.backtest_note ? '⚠' : m.status === 'forecasted' ? '✓' : '⚠'}
-                            </span>
-                            <div><span className="font-medium text-gray-700 dark:text-gray-300">{m.method}</span><span className="text-gray-400 dark:text-gray-500 ml-1 text-xs">{m.reason}</span></div>
+                        <div key={i} className="flex items-start gap-2 text-sm">
+                          <span className={`mt-0.5 text-xs ${m.backtest_note ? 'text-amber-500 dark:text-amber-400' : m.status === 'forecasted' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-500 dark:text-amber-400'}`}>
+                            {m.status === 'forecasted' ? '\u2713' : '\u26A0'}
+                          </span>
+                          <div className="min-w-0">
+                            <span className="font-medium text-gray-700 dark:text-gray-300">{m.method}</span>
+                            <span className="text-gray-400 dark:text-gray-500 ml-1 text-xs">{m.reason}</span>
                           </div>
                           {m.backtest_note && (
-                            <div className="ml-5 mt-0.5 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded px-2 py-1">
-                              {m.backtest_note}
-                            </div>
+                            <span className="shrink-0 mt-0.5 cursor-help" title={m.backtest_note}>
+                              <svg className="w-4 h-4 text-amber-500 dark:text-amber-400" viewBox="0 0 20 20" fill="currentColor">
+                                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                              </svg>
+                            </span>
                           )}
                         </div>
                       ))}
@@ -2786,6 +2812,184 @@ export const TimeSeriesViewer = () => {
         /* metrics */
         sectionNodes['metrics'] = activeMetrics.length > 0 ? (
           <Section key="metrics" title={`Comprehensive Metrics Comparison${isMultiMode ? ' (weighted avg)' : ''}`} storageKey="tsv_metrics_open" {...dp('metrics')}>
+
+            {/* ── Backtesting Configuration sliders (single-series only) ── */}
+            {!isMultiMode && (() => {
+              const btEdits = hpEdits['_backtesting'] || {};
+              const btSaved = hpSavedOverrides['_backtesting'] || {};
+              const getBtValue = (key) => {
+                if (key in btEdits) return btEdits[key];
+                if (key in btSaved) return btSaved[key];
+                return btConfig[key];
+              };
+              const setBtEdit = (key, value) => {
+                setHpEdits(prev => ({
+                  ...prev,
+                  _backtesting: { ...(prev._backtesting || {}), [key]: value }
+                }));
+              };
+              const handleBtSave = async () => {
+                const merged = { ...btSaved, ...btEdits };
+                if (Object.keys(merged).length === 0) return;
+                try {
+                  await api.put(`/hyperparams/${encodeURIComponent(decodedId)}`, {
+                    overrides: { _backtesting: merged }
+                  });
+                  setHpSavedOverrides(prev => ({ ...prev, _backtesting: merged }));
+                  setHpEdits(prev => { const next = { ...prev }; delete next._backtesting; return next; });
+                } catch (err) {
+                  console.error('Failed to save backtesting overrides:', err);
+                }
+              };
+              const handleBtReset = async () => {
+                try {
+                  await api.delete(`/hyperparams/${encodeURIComponent(decodedId)}?method=_backtesting`);
+                  setHpSavedOverrides(prev => { const next = { ...prev }; delete next._backtesting; return next; });
+                  setHpEdits(prev => { const next = { ...prev }; delete next._backtesting; return next; });
+                } catch (err) {
+                  console.error('Failed to reset backtesting overrides:', err);
+                }
+              };
+
+              const nObs = characteristics?.n_observations || 200;
+              const forecastHorizon = activeForecasts?.[0]?.hyperparameters?.horizon || 52;
+              // Slider ranges — ensure value is always clamped to [min, max]
+              const maxHorizon = Math.max(4, nObs - 2);
+              const btHorizon = Math.min(Math.max(4, getBtValue('backtest_horizon')), maxHorizon);
+              const maxWindow = Math.min(btHorizon, forecastHorizon);
+              const btWindow = Math.min(Math.max(1, getBtValue('window_size')), maxWindow);
+              const maxTests = Math.max(1, btHorizon - btWindow + 1);
+              const btNTests = Math.min(Math.max(0, getBtValue('n_tests')), maxTests);
+              const hasBtEdits = Object.keys(btEdits).length > 0;
+              const hasBtSaved = Object.keys(btSaved).length > 0;
+
+              // Compute test positions for timeline visualization
+              const availableRange = Math.max(0, btHorizon - btWindow);
+              let step, actualTests;
+              if (btNTests <= 0 || btNTests > availableRange + 1) {
+                step = 1; actualTests = availableRange + 1;
+              } else if (btNTests === 1) {
+                step = 0; actualTests = 1;
+              } else {
+                step = Math.max(1, Math.floor(availableRange / (btNTests - 1)));
+                actualTests = btNTests;
+              }
+              const testPositions = [];
+              for (let i = 0; i < actualTests && i < 30; i++) {
+                const left = btHorizon > 0 ? (i * step / btHorizon) * 100 : 0;
+                const width = btHorizon > 0 ? (btWindow / btHorizon) * 100 : 100;
+                if (left + width > 100.5) break;
+                testPositions.push({ left, width: Math.min(width, 100 - left) });
+              }
+              const trainPct = nObs > 0 ? Math.max(10, Math.round(((nObs - btHorizon) / nObs) * 100)) : 50;
+
+              return (
+                <div className={`mb-4 p-4 rounded-lg border ${hasBtEdits ? 'border-amber-400' : hasBtSaved ? 'border-blue-400' : 'border-gray-200 dark:border-gray-600'} bg-white dark:bg-gray-800`}>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                        Backtesting Configuration
+                      </h4>
+                      {hasBtEdits && <span className="text-[9px] text-amber-500 font-normal">(unsaved)</span>}
+                      {hasBtSaved && !hasBtEdits && <span className="text-[9px] text-blue-400 font-normal">(custom)</span>}
+                    </div>
+                    <div className="flex gap-2">
+                      {hasBtEdits && (
+                        <button onClick={handleBtSave} disabled={hpSaving}
+                          className="text-xs bg-amber-500 hover:bg-amber-600 text-white px-2.5 py-1 rounded font-medium transition-colors">
+                          Save
+                        </button>
+                      )}
+                      {(hasBtSaved || hasBtEdits) && (
+                        <button onClick={handleBtReset} disabled={hpSaving}
+                          className="text-xs bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 text-gray-700 dark:text-gray-200 px-2.5 py-1 rounded font-medium transition-colors">
+                          Reset
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Slider 1: Backtest Horizon */}
+                  <div className="mb-3">
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-gray-500 dark:text-gray-400">Backtest Horizon</span>
+                      <span className="font-mono text-blue-600 dark:text-blue-400 font-semibold">{btHorizon} periods</span>
+                    </div>
+                    <input type="range" min={4} max={maxHorizon} step={1}
+                      value={btHorizon}
+                      onChange={e => {
+                        const val = parseInt(e.target.value, 10);
+                        setBtEdit('backtest_horizon', val);
+                        // Clamp window_size if needed
+                        if (getBtValue('window_size') > val)
+                          setBtEdit('window_size', val);
+                      }}
+                      className="w-full accent-blue-500 h-2 cursor-pointer"
+                      style={{ minHeight: '20px' }}
+                    />
+                    <div className="flex justify-between text-[9px] text-gray-400 mt-0.5">
+                      <span>4</span><span>{maxHorizon}</span>
+                    </div>
+                  </div>
+
+                  {/* Slider 2: Window Size */}
+                  <div className="mb-3">
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-gray-500 dark:text-gray-400">Window Size</span>
+                      <span className="font-mono text-indigo-600 dark:text-indigo-400 font-semibold">{btWindow} periods</span>
+                    </div>
+                    <input type="range" min={1} max={maxWindow} step={1}
+                      value={btWindow}
+                      onChange={e => setBtEdit('window_size', parseInt(e.target.value, 10))}
+                      className="w-full accent-indigo-500 h-2 cursor-pointer"
+                      style={{ minHeight: '20px' }}
+                    />
+                    <div className="flex justify-between text-[9px] text-gray-400 mt-0.5">
+                      <span>1</span><span>{maxWindow}</span>
+                    </div>
+                  </div>
+
+                  {/* Slider 3: Number of Tests */}
+                  <div className="mb-3">
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-gray-500 dark:text-gray-400">Number of Tests</span>
+                      <span className="font-mono text-amber-600 dark:text-amber-400 font-semibold">
+                        {btNTests === 0 ? `Auto (${availableRange + 1} tests, step=1)` : `${btNTests} tests${actualTests > 1 ? `, step=${step}` : ''}`}
+                      </span>
+                    </div>
+                    <input type="range" min={0} max={Math.min(maxTests, 50)} step={1}
+                      value={btNTests}
+                      onChange={e => setBtEdit('n_tests', parseInt(e.target.value, 10))}
+                      className="w-full accent-amber-500 h-2 cursor-pointer"
+                      style={{ minHeight: '20px' }}
+                    />
+                    <div className="flex justify-between text-[9px] text-gray-400 mt-0.5">
+                      <span>0 (auto)</span><span>{Math.min(maxTests, 50)}</span>
+                    </div>
+                  </div>
+
+                  {/* Visual: test placement timeline */}
+                  <div className="mt-3 flex h-5 rounded-full overflow-hidden border border-gray-200 dark:border-gray-600">
+                    <div className="bg-gray-200 dark:bg-gray-600 flex items-center justify-center transition-all"
+                      style={{ width: `${trainPct}%`, minWidth: '30px' }}>
+                      <span className="text-[8px] text-gray-500 dark:text-gray-400 font-medium truncate px-1">Train</span>
+                    </div>
+                    <div className="bg-blue-50 dark:bg-blue-900/20 relative flex-1 overflow-hidden">
+                      {testPositions.map((pos, i) => (
+                        <div key={i} className="absolute top-0 h-full bg-indigo-400/50 dark:bg-indigo-500/40 border-r border-white/50 dark:border-gray-800/50 transition-all"
+                          style={{ left: `${pos.left}%`, width: `${pos.width}%` }}
+                          title={`Test ${i + 1}`}
+                        />
+                      ))}
+                      <span className="absolute inset-0 flex items-center justify-center text-[8px] text-blue-600 dark:text-blue-400 font-medium pointer-events-none">
+                        {actualTests} test{actualTests !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 text-sm">
                 <thead><tr className="bg-gray-50 dark:bg-gray-700/50">
@@ -2855,8 +3059,9 @@ export const TimeSeriesViewer = () => {
                 const commonKeys = ['horizon', 'frequency', 'confidence_levels', 'n_observations'];
                 const metaKeys = ['description', 'method_family', 'training_time_seconds', 'prediction_intervals_available', 'has_overrides', 'overrides_applied'];
                 const fittedKeys = Object.keys(hp).filter(k => k.startsWith('fitted_'));
+                const sliderKeys = ['val_split'];  // rendered as custom slider, not inline input
                 const specificKeys = Object.keys(hp).filter(k =>
-                  !commonKeys.includes(k) && !metaKeys.includes(k) && !fittedKeys.includes(k)
+                  !commonKeys.includes(k) && !metaKeys.includes(k) && !fittedKeys.includes(k) && !sliderKeys.includes(k)
                 );
 
                 // ALL keys are now editable (including fitted)
@@ -3015,6 +3220,49 @@ export const TimeSeriesViewer = () => {
                         ))}
                       </div>
                     </div>
+
+                    {/* Train / Validation split slider — ML methods only */}
+                    {hp.method_family === 'ML' && (() => {
+                      const effectiveValSplit = getEffectiveValue('val_split') ?? 0.2;
+                      const trainPct = Math.round((1 - effectiveValSplit) * 100);
+                      const valPct = Math.round(effectiveValSplit * 100);
+                      const isSliderEdited = 'val_split' in localEdits;
+                      const isSliderSaved = 'val_split' in savedOvr && !isSliderEdited;
+                      return (
+                        <div className="mb-3">
+                          <div className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1.5">
+                            Train / Validation Split
+                            {isSliderEdited && <span className="ml-1.5 text-amber-500 text-[9px] font-normal">(unsaved)</span>}
+                            {isSliderSaved && <span className="ml-1.5 text-blue-400 text-[9px] font-normal">(custom)</span>}
+                          </div>
+                          <div className="flex h-3 rounded-full overflow-hidden mb-1.5 border border-gray-200 dark:border-gray-600">
+                            <div className="bg-blue-500 transition-all" style={{ width: `${trainPct}%` }}
+                              title={`Train: ${trainPct}%`} />
+                            <div className="bg-amber-400 transition-all" style={{ width: `${valPct}%` }}
+                              title={`Validation: ${valPct}%`} />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-blue-600 dark:text-blue-400 font-mono whitespace-nowrap">
+                              Train {trainPct}%
+                            </span>
+                            <input type="range" min="5" max="50" step="5"
+                              value={valPct}
+                              onChange={e => {
+                                const val = parseInt(e.target.value, 10) / 100;
+                                setHpEdits(prev => ({
+                                  ...prev,
+                                  [method]: { ...(prev[method] || {}), val_split: val }
+                                }));
+                              }}
+                              className="flex-1 accent-amber-500 h-2 cursor-pointer"
+                            />
+                            <span className="text-xs text-amber-600 dark:text-amber-400 font-mono whitespace-nowrap text-right">
+                              Val {valPct}%
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {/* Method-specific params — editable */}
                     {specificKeys.length > 0 && (
@@ -3305,6 +3553,7 @@ export const TimeSeriesViewer = () => {
               numberDecimals={numberDecimals}
               isDark={isDark}
               dateRangeEnd={dateRangeEnd}
+              methodExplanation={methodExplanation}
             />
           </div>
         ) : null;

@@ -1246,6 +1246,9 @@ async def get_metrics(unique_id: str):
     if ranking:
         best_method_name = min(ranking, key=lambda k: ranking[k] if ranking[k] is not None else float('inf'))
 
+    # Expose backtesting config defaults for frontend sliders
+    bt_config = config.get('forecasting', {}).get('backtesting', {})
+
     return {
         'unique_id': unique_id,
         'metrics': metrics_by_method,
@@ -1253,6 +1256,11 @@ async def get_metrics(unique_id: str):
         'composite_weights': weights,
         'best_method': best_method_name,
         'source': source,
+        'backtesting_config': {
+            'backtest_horizon': bt_config.get('backtest_horizon', 60),
+            'window_size': bt_config.get('window_size', 8),
+            'n_tests': bt_config.get('n_tests', 4),
+        },
     }
 
 
@@ -2071,7 +2079,7 @@ async def get_method_explanation(unique_id: str):
                 'reason': f"Selected from '{category}' pool — {category_reason}",
                 'status': 'forecasted',
             }
-            # Check backtest metric quality
+            # Check backtest metric quality and source
             if method in methods_with_null_metrics and method not in methods_with_valid_metrics:
                 entry['backtest_note'] = (
                     f"Forecast produced but backtest metrics are empty — "
@@ -2080,7 +2088,24 @@ async def get_method_explanation(unique_id: str):
                     f"Not included in method comparison."
                 )
             elif method in methods_with_valid_metrics:
-                entry['backtest_note'] = None
+                # Check if metrics came from internal ML validation
+                method_metrics = uid_met[uid_met['method'] == method]
+                if 'metric_source' in method_metrics.columns:
+                    sources = set(method_metrics['metric_source'].dropna().unique())
+                    if sources == {'internal_validation'}:
+                        entry['backtest_note'] = (
+                            "Metrics from ML model's internal 80/20 train/validation "
+                            "split (not rolling-window backtest). Included in method comparison."
+                        )
+                    elif 'internal_validation' in sources and 'rolling_window' in sources:
+                        entry['backtest_note'] = (
+                            "Metrics from rolling-window backtest supplemented with "
+                            "internal validation results."
+                        )
+                    else:
+                        entry['backtest_note'] = None
+                else:
+                    entry['backtest_note'] = None
             included.append(entry)
         else:
             included.append({'method': method, 'reason': f"Eligible from '{category}' pool but no forecast produced (model may have failed)", 'status': 'eligible_no_result'})

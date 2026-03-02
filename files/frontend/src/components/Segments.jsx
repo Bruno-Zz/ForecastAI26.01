@@ -657,7 +657,7 @@ export default function Segments() {
   return (
     <div className="p-6 max-w-6xl mx-auto">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div id="seg-header" className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Segments</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
@@ -681,7 +681,7 @@ export default function Segments() {
       </div>
 
       {/* Table */}
-      <div className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200
+      <div id="seg-table" className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200
                       dark:border-gray-700 shadow-sm overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 dark:bg-gray-800 border-b dark:border-gray-700">
@@ -778,7 +778,7 @@ export default function Segments() {
       </div>
 
       {/* Info box */}
-      <div className="mt-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200
+      <div id="seg-info" className="mt-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200
                       dark:border-blue-700 rounded-xl p-4 text-xs text-blue-700
                       dark:text-blue-300 space-y-1">
         <p><strong>Tip:</strong> Run the <strong>Segmentation</strong> pipeline step to refresh ABC

@@ -105,9 +105,10 @@ forecasting:
   horizon: 52
   frequency: W
   backtesting:
-    n_windows: 3
-    step_size: 4
-    min_train_size: 52
+    backtest_horizon: 60    # Total periods from end of series for backtesting zone
+    window_size: 8          # Evaluation window per test (periods)
+    n_tests: 4              # Number of backtest origins (0 = slide by 1 period)
+    min_train_size: 24      # Minimum training periods (safety floor)
   confidence_levels:
   - 10
   - 25
@@ -151,6 +152,7 @@ forecasting:
   ml_models:
   - LightGBM
   - XGBoost
+  ml_val_split: 0.2
   statsforecast_models:
   - AutoARIMA
   - AutoETS

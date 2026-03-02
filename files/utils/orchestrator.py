@@ -130,7 +130,8 @@ _STAT_METHODS = {
 
 def _dask_backtest_batch(config_path: str,
                          batch_df: pd.DataFrame,
-                         batch_work: list) -> tuple:
+                         batch_work: list,
+                         bt_overrides_map: dict = None) -> tuple:
     """
     Module-level standalone function submitted to Dask workers for backtesting.
 
@@ -144,6 +145,8 @@ def _dask_backtest_batch(config_path: str,
         config_path: Path to config.yaml (picklable string).
         batch_df:    DataFrame rows for all series in this batch (unique_id, date, y).
         batch_work:  List of (unique_id, methods, characteristics_dict) tuples.
+        bt_overrides_map: Optional {unique_id: {backtest_horizon, window_size, n_tests}}
+                          per-series backtesting overrides loaded from the DB.
 
     Returns:
         Tuple (metrics_df, origin_forecasts_df) — concatenation of all series
@@ -198,6 +201,7 @@ def _dask_backtest_batch(config_path: str,
 
     for unique_id, methods, characteristics in batch_work:
         series_df = batch_df[batch_df['unique_id'] == unique_id]
+        bt_ovr = (bt_overrides_map or {}).get(unique_id, {})
         try:
             if use_with_forecasts:
                 metrics_df, origin_df = evaluator.backtest_series_with_forecasts(
@@ -206,6 +210,7 @@ def _dask_backtest_batch(config_path: str,
                     forecast_fn=forecast_fn,
                     methods=methods,
                     characteristics=characteristics,
+                    backtest_overrides=bt_ovr,
                 )
                 if not origin_df.empty:
                     all_origins.append(origin_df)
@@ -216,6 +221,7 @@ def _dask_backtest_batch(config_path: str,
                     forecast_fn=forecast_fn,
                     methods=methods,
                     characteristics=characteristics,
+                    backtest_overrides=bt_ovr,
                 )
             if not metrics_df.empty:
                 all_metrics.append(metrics_df)
@@ -224,7 +230,117 @@ def _dask_backtest_batch(config_path: str,
 
     metrics_out = pd.concat(all_metrics, ignore_index=True) if all_metrics else pd.DataFrame()
     origins_out = pd.concat(all_origins, ignore_index=True) if all_origins else pd.DataFrame()
+
+    # ---- ML internal validation fallback (per-batch) ----
+    _ml_bt = {'LightGBM', 'XGBoost'}
+    ml_fallback_work = []
+
+    # 1. ML methods with all-NaN MAE
+    if not metrics_out.empty:
+        for uid, grp in metrics_out.groupby('unique_id'):
+            for mname in grp['method'].unique():
+                if mname in _ml_bt and grp.loc[grp['method'] == mname, 'mae'].isna().all():
+                    chars = next((c for u, _, c in batch_work if u == uid), None)
+                    if chars:
+                        ml_fallback_work.append((uid, [mname], chars))
+
+    # 2. ML methods that produced no metric rows at all
+    existing_pairs = set()
+    if not metrics_out.empty:
+        for _, row in metrics_out.iterrows():
+            if row['method'] in _ml_bt:
+                existing_pairs.add((row['unique_id'], row['method']))
+    for uid, methods, chars in batch_work:
+        for m in methods:
+            if m in _ml_bt and (uid, m) not in existing_pairs:
+                ml_fallback_work.append((uid, [m], chars))
+
+    if ml_fallback_work:
+        internal_df = _run_ml_internal_validation(config_path, batch_df, ml_fallback_work)
+        if not internal_df.empty:
+            metrics_out = pd.concat([metrics_out, internal_df], ignore_index=True)
+
     return metrics_out, origins_out
+
+
+def _run_ml_internal_validation(
+    config_path: str,
+    df: pd.DataFrame,
+    ml_fallback_work: list,
+) -> pd.DataFrame:
+    """
+    For ML methods that produced no valid backtest metrics, run a single
+    full-series ML forecast and extract internal validation metrics from
+    the model's 80/20 train/val split.
+
+    Module-level function for Dask picklability.
+
+    Args:
+        config_path: Path to config.yaml.
+        df: Full time-series data (unique_id, date, y).
+        ml_fallback_work: List of (unique_id, [method], characteristics_dict).
+
+    Returns:
+        DataFrame of EvaluationMetrics rows from internal validation.
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    if not ml_fallback_work:
+        return pd.DataFrame()
+
+    from evaluation.metrics import ForecastEvaluator
+
+    try:
+        ml_forecaster = MLForecaster(config_path)
+    except Exception as exc:
+        _logger.warning(f"Cannot init MLForecaster for internal validation: {exc}")
+        return pd.DataFrame()
+
+    evaluator = ForecastEvaluator(config_path)
+    horizon = ml_forecaster.horizon
+    _val_split = ml_forecaster.val_split  # config default (e.g. 0.2)
+    all_rows = []
+
+    for unique_id, ml_methods, characteristics in ml_fallback_work:
+        series_df = df[df['unique_id'] == unique_id]
+        if series_df.empty:
+            continue
+
+        # Compute the split date for forecast_origin using the configured val_split
+        dates = pd.to_datetime(series_df['date'] if 'date' in series_df.columns else series_df.get('ds'))
+        dates_sorted = dates.sort_values()
+        split_idx = int(len(dates_sorted) * (1 - _val_split))
+        origin_date = str(dates_sorted.iloc[min(split_idx, len(dates_sorted) - 1)].date())
+
+        for method in ml_methods:
+            try:
+                results = ml_forecaster.forecast_single_series(
+                    df=series_df,
+                    unique_id=unique_id,
+                    methods=[method],
+                    characteristics=characteristics,
+                )
+                for result in results:
+                    if result.internal_val_metrics is not None:
+                        eval_m = evaluator.create_eval_metrics_from_internal_validation(
+                            unique_id=unique_id,
+                            method=method,
+                            horizon=horizon,
+                            internal_metrics=result.internal_val_metrics,
+                            forecast_origin_date=origin_date,
+                        )
+                        all_rows.append(eval_m.to_dict())
+                        _logger.debug(
+                            f"Internal val metrics captured for {unique_id}/{method} "
+                            f"(MAE={result.internal_val_metrics.get('mae', '?'):.4f})"
+                        )
+            except Exception as e:
+                _logger.warning(
+                    f"Internal validation fallback failed for {unique_id}/{method}: {e}"
+                )
+
+    return pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
 
 
 def _dask_distribution_batch(config_path: str,
@@ -828,6 +944,31 @@ class ForecastOrchestrator:
         all_metrics = []
         all_origin_forecasts = []
 
+        # Load per-series backtesting overrides from DB (_backtesting pseudo-method)
+        bt_overrides_map = {}
+        try:
+            from db.db import get_conn, get_schema
+            import json as _json
+            conn = get_conn(str(self.config_path))
+            schema = get_schema(str(self.config_path))
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT unique_id, overrides FROM {schema}.hyperparameter_overrides "
+                    f"WHERE method = '_backtesting'"
+                )
+                for uid, ovr in cur.fetchall():
+                    if isinstance(ovr, str):
+                        ovr = _json.loads(ovr)
+                    bt_overrides_map[uid] = ovr
+            conn.close()
+        except Exception:
+            pass  # No DB or no overrides — use config defaults
+
+        if bt_overrides_map:
+            self.logger.info(
+                f"Loaded backtesting overrides for {len(bt_overrides_map)} series"
+            )
+
         if self.client is not None and DASK_AVAILABLE:
             # ---- Parallel Dask mode: batched, one future per batch ----
             # Batching amortises StatisticalForecaster + ForecastEvaluator
@@ -848,11 +989,15 @@ class ForecastOrchestrator:
                 batch_df = df[df['unique_id'].isin(batch_ids)]
                 # Work list: (unique_id, methods, chars_dict) — df is passed separately
                 batch_work = [(uid, methods, chars) for uid, _, methods, chars in batch]
+                # Filter bt overrides to only include series in this batch
+                batch_bt = {uid: bt_overrides_map[uid]
+                            for uid in batch_ids if uid in bt_overrides_map}
                 future = self.client.submit(
                     _dask_backtest_batch,
                     self.config_path,
                     batch_df,
                     batch_work,
+                    bt_overrides_map=batch_bt or None,
                 )
                 futures.append(future)
 
@@ -911,6 +1056,7 @@ class ForecastOrchestrator:
             pbar = tqdm(enumerate(work_items), total=n_series, desc="  Backtesting", unit="series")
             for idx, (unique_id, series_slice, methods, chars_dict) in pbar:
                 pbar.set_postfix_str(unique_id, refresh=False)
+                bt_ovr = bt_overrides_map.get(unique_id, {})
                 try:
                     if hasattr(self.evaluator, 'backtest_series_with_forecasts'):
                         metrics, origin_forecasts = self.evaluator.backtest_series_with_forecasts(
@@ -919,6 +1065,7 @@ class ForecastOrchestrator:
                             forecast_fn=forecast_fn,
                             methods=methods,
                             characteristics=chars_dict,
+                            backtest_overrides=bt_ovr,
                         )
                         if not origin_forecasts.empty:
                             all_origin_forecasts.append(origin_forecasts)
@@ -929,6 +1076,7 @@ class ForecastOrchestrator:
                             forecast_fn=forecast_fn,
                             methods=methods,
                             characteristics=chars_dict,
+                            backtest_overrides=bt_ovr,
                         )
                     if not metrics.empty:
                         all_metrics.append(metrics)
@@ -941,6 +1089,42 @@ class ForecastOrchestrator:
 
         # Combine per-origin forecasts
         origin_df = pd.concat(all_origin_forecasts, ignore_index=True) if all_origin_forecasts else pd.DataFrame()
+
+        # ---- ML internal validation fallback (serial path) ----
+        if all_methods:
+            ml_fallback_work = []
+            existing_ml_pairs = set()
+
+            if not metrics_df.empty:
+                # 1. ML methods with all-NaN MAE
+                for uid, grp in metrics_df.groupby('unique_id'):
+                    for mname in grp['method'].unique():
+                        if mname in _ml_backtest_methods:
+                            existing_ml_pairs.add((uid, mname))
+                            if grp.loc[grp['method'] == mname, 'mae'].isna().all():
+                                chars = next((cd for u, _, _, cd in work_items if u == uid), None)
+                                if chars:
+                                    ml_fallback_work.append((uid, [mname], chars))
+
+            # 2. ML methods that produced no metric rows at all
+            for uid, _, methods_list, chars_d in work_items:
+                for m in methods_list:
+                    if m in _ml_backtest_methods and (uid, m) not in existing_ml_pairs:
+                        ml_fallback_work.append((uid, [m], chars_d))
+
+            if ml_fallback_work:
+                self.logger.info(
+                    f"Running ML internal validation fallback for "
+                    f"{len(ml_fallback_work)} series/method pairs..."
+                )
+                internal_df = _run_ml_internal_validation(
+                    str(self.config_path), df, ml_fallback_work
+                )
+                if not internal_df.empty:
+                    self.logger.info(
+                        f"Internal validation produced {len(internal_df)} metric rows"
+                    )
+                    metrics_df = pd.concat([metrics_df, internal_df], ignore_index=True)
 
         # Save outputs to PostgreSQL
         from db.db import bulk_insert, get_schema, jsonb_serialize

@@ -12,7 +12,7 @@ import ThemeToggle from './components/ThemeToggle';
 import { useAuth } from './contexts/AuthContext';
 import { useTour } from './tour/useTour';
 
-function Sidebar({ open, onToggle, onStartTour }) {
+function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
   const location = useLocation();
   const { user, isAdmin, logout } = useAuth();
   const [lastSeries, setLastSeries] = useState(null);
@@ -22,15 +22,16 @@ function Sidebar({ open, onToggle, onStartTour }) {
     if (ls) setLastSeries(ls);
   }, [location]);
 
-  const navLink = (to, icon, label, disabled = false) => {
+  const navLink = (to, icon, label, disabled = false, navId = undefined) => {
     const isActive = location.pathname === to || (to !== '/' && location.pathname.startsWith(to));
     return disabled ? (
-      <span className="flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 dark:text-gray-600 cursor-not-allowed text-sm">
+      <span id={navId} className="flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 dark:text-gray-600 cursor-not-allowed text-sm">
         <span className="text-base">{icon}</span>
         {open && <span className="truncate">{label}</span>}
       </span>
     ) : (
       <Link
+        id={navId}
         to={to}
         className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors
           ${isActive
@@ -74,28 +75,37 @@ function Sidebar({ open, onToggle, onStartTour }) {
 
       {/* Nav links */}
       <nav id="sidebar-nav" className="flex-1 p-2 space-y-1 overflow-hidden">
-        {navLink('/', '🏠', 'Dashboard')}
+        {navLink('/', '🏠', 'Dashboard', false, 'nav-dashboard')}
         {lastSeries
-          ? navLink(`/series/${encodeURIComponent(lastSeries)}`, '📈', `Series: ${lastSeries}`)
-          : navLink('/', '📈', 'Time Series', true)
+          ? navLink(`/series/${encodeURIComponent(lastSeries)}`, '📈', `Series: ${lastSeries}`, false, 'nav-series')
+          : navLink('/', '📈', 'Time Series', true, 'nav-series')
         }
-        {navLink('/segments', '🗂️', 'Segments')}
-        {navLink('/pipeline', '⚙️', 'Pipeline')}
-        {navLink('/logs', '📋', 'Process Log')}
-        {navLink('/settings', '🔧', 'Settings')}
-        {isAdmin && navLink('/users', '👥', 'Users')}
+        {navLink('/segments', '🗂️', 'Segments', false, 'nav-segments')}
+        {navLink('/pipeline', '⚙️', 'Pipeline', false, 'nav-pipeline')}
+        {navLink('/logs', '📋', 'Process Log', false, 'nav-logs')}
+        {navLink('/settings', '🔧', 'Settings', false, 'nav-settings')}
+        {isAdmin && navLink('/users', '👥', 'Users', false, 'nav-users')}
       </nav>
 
-      {/* Tour trigger */}
-      <div className="px-2 pb-1">
+      {/* Tour triggers */}
+      <div className="px-2 pb-1 space-y-0.5">
         <button
           id="tour-trigger"
           onClick={onStartTour}
           className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white w-full"
-          title="Start guided tour"
+          title="Tour this page"
         >
           <span className="text-base flex-shrink-0">🎯</span>
-          {open && <span className="truncate">Tour</span>}
+          {open && <span className="truncate">Page Tour</span>}
+        </button>
+        <button
+          id="full-tour-trigger"
+          onClick={onStartFullTour}
+          className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white w-full"
+          title="Tour all pages"
+        >
+          <span className="text-base flex-shrink-0">🗺️</span>
+          {open && <span className="truncate">Full Tour</span>}
         </button>
       </div>
 
@@ -130,8 +140,8 @@ function Sidebar({ open, onToggle, onStartTour }) {
 }
 
 function App() {
-  const { isAuthenticated, loading } = useAuth();
-  const { startTour } = useTour();
+  const { isAuthenticated, loading, isAdmin } = useAuth();
+  const { startTour, startFullTour } = useTour(isAdmin);
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     const stored = localStorage.getItem('sidebar_open');
@@ -184,11 +194,11 @@ function App() {
 
       {/* Sidebar — inline on desktop, drawer on mobile */}
       <div className="hidden md:flex">
-        <Sidebar open={sidebarOpen} onToggle={toggleSidebar} onStartTour={startTour} />
+        <Sidebar open={sidebarOpen} onToggle={toggleSidebar} onStartTour={startTour} onStartFullTour={startFullTour} />
       </div>
       {mobileMenuOpen && (
         <div className="fixed inset-y-0 left-0 z-50 flex md:hidden shadow-2xl">
-          <Sidebar open={true} onToggle={() => setMobileMenuOpen(false)} onStartTour={startTour} />
+          <Sidebar open={true} onToggle={() => setMobileMenuOpen(false)} onStartTour={startTour} onStartFullTour={startFullTour} />
         </div>
       )}
 

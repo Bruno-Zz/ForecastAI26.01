@@ -50,18 +50,4 @@ body {
 .dark ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
 .dark ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
 
-/* Note indicator triangle for forecast cells */
-.cell-note-indicator {
-  position: relative;
-}
-.cell-note-indicator::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 0;
-  height: 0;
-  border-style: solid;
-  border-width: 0 8px 8px 0;
-  border-color: transparent #818cf8 transparent transparent;
-}
+/* Note indicator is now an inline SVG icon with Tailwind tooltip — see TimeSeriesViewer.jsx */

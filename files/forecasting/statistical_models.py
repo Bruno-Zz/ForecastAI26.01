@@ -55,6 +55,9 @@ class ForecastResult:
     
     # For evaluation
     insample_actual: Optional[np.ndarray] = None
+
+    # ML internal validation metrics (populated by MLForecaster only)
+    internal_val_metrics: Optional[Dict[str, Any]] = None
     
     def to_dict(self) -> Dict:
         """Convert to dictionary for storage."""

@@ -1,6 +1,11 @@
 """One-off script to copy MEIO tables from source Neon DB to local zcube schema."""
+import json
 import psycopg2
-from psycopg2.extras import execute_values
+import psycopg2.extensions
+from psycopg2.extras import execute_values, Json
+
+# Register adapter so Python dicts are sent as JSONB
+psycopg2.extensions.register_adapter(dict, Json)
 
 # ── Source DB ──
 src = psycopg2.connect(

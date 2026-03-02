@@ -88,7 +88,7 @@ export default function UserManagement() {
 
   return (
     <div className="p-4 sm:p-6 max-w-5xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
+      <div id="um-header" className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">User Management</h1>
         <button
           onClick={() => setShowCreate(!showCreate)}
@@ -147,71 +147,131 @@ export default function UserManagement() {
         </div>
       )}
 
-      {/* Users table */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
-        {loading ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">Loading users...</div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 text-left">
-                <th className="px-4 py-3 font-medium">Email</th>
-                <th className="px-4 py-3 font-medium">Name</th>
-                <th className="px-4 py-3 font-medium">Provider</th>
-                <th className="px-4 py-3 font-medium">Role</th>
-                <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 font-medium">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-              {users.map(u => (
-                <tr key={u.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                  <td className="px-4 py-3 text-gray-900 dark:text-white">{u.email}</td>
-                  <td className="px-4 py-3 text-gray-700 dark:text-gray-300">{u.display_name}</td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                      u.auth_provider === 'microsoft'
-                        ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300'
-                        : u.auth_provider === 'google'
-                        ? 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
-                        : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
-                    }`}>
-                      {u.auth_provider}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                      u.role === 'admin'
-                        ? 'bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300'
-                        : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
-                    }`}>
-                      {u.role}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                      u.is_active
-                        ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300'
-                        : 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
-                    }`}>
-                      {u.is_active ? 'Active' : 'Disabled'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 space-x-2">
-                    <button onClick={() => toggleRole(u)}
-                      className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
-                      {u.role === 'admin' ? 'Make User' : 'Make Admin'}
-                    </button>
-                    <button onClick={() => toggleActive(u)}
-                      className={`text-xs hover:underline ${u.is_active ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}`}>
-                      {u.is_active ? 'Disable' : 'Enable'}
-                    </button>
-                  </td>
+      {/* Users list */}
+      <div id="um-list">
+      {loading ? (
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-8 text-center text-gray-500 dark:text-gray-400">Loading users...</div>
+      ) : (
+        <>
+          {/* ── Mobile: card layout ── */}
+          <div className="md:hidden space-y-3">
+            {users.map(u => (
+              <div key={u.id} className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+                {/* Top row: name + status badges */}
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900 dark:text-white truncate">{u.display_name}</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{u.email}</p>
+                  </div>
+                  <span className={`shrink-0 inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                    u.is_active
+                      ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300'
+                      : 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
+                  }`}>
+                    {u.is_active ? 'Active' : 'Disabled'}
+                  </span>
+                </div>
+                {/* Badges row */}
+                <div className="flex items-center gap-2 mb-3">
+                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                    u.auth_provider === 'microsoft'
+                      ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300'
+                      : u.auth_provider === 'google'
+                      ? 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
+                      : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
+                  }`}>
+                    {u.auth_provider}
+                  </span>
+                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                    u.role === 'admin'
+                      ? 'bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300'
+                      : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
+                  }`}>
+                    {u.role}
+                  </span>
+                </div>
+                {/* Actions */}
+                <div className="flex items-center gap-3 pt-2 border-t border-gray-100 dark:border-gray-700">
+                  <button onClick={() => toggleRole(u)}
+                    className="text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline">
+                    {u.role === 'admin' ? 'Make User' : 'Make Admin'}
+                  </button>
+                  <button onClick={() => toggleActive(u)}
+                    className={`text-xs font-medium hover:underline ${u.is_active ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}`}>
+                    {u.is_active ? 'Disable' : 'Enable'}
+                  </button>
+                </div>
+              </div>
+            ))}
+            {users.length === 0 && (
+              <div className="text-center text-sm text-gray-500 dark:text-gray-400 py-8">No users found.</div>
+            )}
+          </div>
+
+          {/* ── Desktop: table layout ── */}
+          <div className="hidden md:block bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-gray-50 dark:bg-gray-700/50 text-gray-600 dark:text-gray-300 text-left">
+                  <th className="px-4 py-3 font-medium">Email</th>
+                  <th className="px-4 py-3 font-medium">Name</th>
+                  <th className="px-4 py-3 font-medium">Provider</th>
+                  <th className="px-4 py-3 font-medium">Role</th>
+                  <th className="px-4 py-3 font-medium">Status</th>
+                  <th className="px-4 py-3 font-medium">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                {users.map(u => (
+                  <tr key={u.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
+                    <td className="px-4 py-3 text-gray-900 dark:text-white">{u.email}</td>
+                    <td className="px-4 py-3 text-gray-700 dark:text-gray-300">{u.display_name}</td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                        u.auth_provider === 'microsoft'
+                          ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300'
+                          : u.auth_provider === 'google'
+                          ? 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
+                          : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
+                      }`}>
+                        {u.auth_provider}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                        u.role === 'admin'
+                          ? 'bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300'
+                          : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
+                      }`}>
+                        {u.role}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                        u.is_active
+                          ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300'
+                          : 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
+                      }`}>
+                        {u.is_active ? 'Active' : 'Disabled'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 space-x-2">
+                      <button onClick={() => toggleRole(u)}
+                        className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
+                        {u.role === 'admin' ? 'Make User' : 'Make Admin'}
+                      </button>
+                      <button onClick={() => toggleActive(u)}
+                        className={`text-xs hover:underline ${u.is_active ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}`}>
+                        {u.is_active ? 'Disable' : 'Enable'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
       </div>
     </div>
   );
