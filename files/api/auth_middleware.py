@@ -12,12 +12,14 @@ from starlette.responses import JSONResponse
 logger = logging.getLogger(__name__)
 
 # Exact paths that do NOT require authentication
-PUBLIC_PATHS = frozenset({
-    "/",
-    "/docs",
-    "/openapi.json",
-    "/redoc",
-})
+PUBLIC_PATHS = frozenset(
+    {
+        "/",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+    }
+)
 
 # Path prefixes that are public
 PUBLIC_PREFIXES = (
@@ -102,6 +104,10 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
             "role": payload.get("role"),
             "display_name": payload.get("display_name"),
             "auth_provider": payload.get("auth_provider"),
+            "allowed_segments": payload.get("allowed_segments", []),
+            "can_run_process": payload.get("can_run_process", False),
+            "can_create_override": payload.get("can_create_override", False),
+            "allowed_segments_edit": payload.get("allowed_segments_edit", []),
         }
         request.state.jti = jti
 

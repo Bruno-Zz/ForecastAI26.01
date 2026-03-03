@@ -406,6 +406,10 @@ def init_schema(config_path: Union[str, Path]) -> None:
         role            TEXT NOT NULL DEFAULT 'user'
                         CHECK (role IN ('admin', 'user')),
         is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+        allowed_segments JSONB DEFAULT '[]'::jsonb,
+        can_run_process BOOLEAN DEFAULT FALSE,
+        can_create_override BOOLEAN DEFAULT FALSE,
+        allowed_segments_edit JSONB DEFAULT '[]'::jsonb,
         created_at      TIMESTAMPTZ DEFAULT NOW(),
         updated_at      TIMESTAMPTZ DEFAULT NOW()
     );
@@ -806,6 +810,62 @@ def init_schema(config_path: Union[str, Path]) -> None:
                   AND column_name = 'latitude'
             ) THEN
                 ALTER TABLE {schema}.site ADD COLUMN latitude NUMERIC(10,7);
+            END IF;
+        END $$;
+        """,
+        # users — allowed_segments
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'users'
+                  AND column_name = 'allowed_segments'
+            ) THEN
+                ALTER TABLE {schema}.users ADD COLUMN allowed_segments JSONB DEFAULT '[]'::jsonb;
+            END IF;
+        END $$;
+        """,
+        # users — can_run_process
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'users'
+                  AND column_name = 'can_run_process'
+            ) THEN
+                ALTER TABLE {schema}.users ADD COLUMN can_run_process BOOLEAN DEFAULT FALSE;
+            END IF;
+        END $$;
+        """,
+        # users — can_create_override
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'users'
+                  AND column_name = 'can_create_override'
+            ) THEN
+                ALTER TABLE {schema}.users ADD COLUMN can_create_override BOOLEAN DEFAULT FALSE;
+            END IF;
+        END $$;
+        """,
+        # users — allowed_segments_edit
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'users'
+                  AND column_name = 'allowed_segments_edit'
+            ) THEN
+                ALTER TABLE {schema}.users ADD COLUMN allowed_segments_edit JSONB DEFAULT '[]'::jsonb;
             END IF;
         END $$;
         """,

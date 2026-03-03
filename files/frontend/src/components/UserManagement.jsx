@@ -2,6 +2,7 @@
  * User Management Page (Admin only)
  *
  * List users, create new local users, toggle active/inactive, change roles.
+ * Manage segment permissions, process run, and override permissions.
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -11,6 +12,7 @@ import api from '../utils/api';
 export default function UserManagement() {
   const { isAdmin } = useAuth();
   const [users, setUsers] = useState([]);
+  const [segments, setSegments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -20,8 +22,22 @@ export default function UserManagement() {
   const [newName, setNewName] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newRole, setNewRole] = useState('user');
+  const [newAllowedSegments, setNewAllowedSegments] = useState([]);
+  const [newCanRunProcess, setNewCanRunProcess] = useState(false);
+  const [newCanCreateOverride, setNewCanCreateOverride] = useState(false);
+  const [newAllowedSegmentsEdit, setNewAllowedSegmentsEdit] = useState([]);
   const [createError, setCreateError] = useState('');
   const [creating, setCreating] = useState(false);
+
+  // Edit user modal
+  const [editingUser, setEditingUser] = useState(null);
+  const [editForm, setEditForm] = useState({
+    allowed_segments: [],
+    can_run_process: false,
+    can_create_override: false,
+    allowed_segments_edit: [],
+  });
+  const [editSaving, setEditSaving] = useState(false);
 
   const loadUsers = useCallback(async () => {
     try {
@@ -35,7 +51,19 @@ export default function UserManagement() {
     }
   }, []);
 
-  useEffect(() => { loadUsers(); }, [loadUsers]);
+  const loadSegments = useCallback(async () => {
+    try {
+      const res = await api.get('/segments');
+      setSegments(res.data || []);
+    } catch (err) {
+      console.error('Failed to load segments:', err);
+    }
+  }, []);
+
+  useEffect(() => { 
+    loadUsers(); 
+    loadSegments();
+  }, [loadUsers, loadSegments]);
 
   const handleCreate = async (e) => {
     e.preventDefault();
@@ -48,9 +76,15 @@ export default function UserManagement() {
         display_name: newName,
         password: newPassword,
         role: newRole,
+        allowed_segments: newAllowedSegments,
+        can_run_process: newCanRunProcess,
+        can_create_override: newCanCreateOverride,
+        allowed_segments_edit: newAllowedSegmentsEdit,
       });
       setShowCreate(false);
       setNewEmail(''); setNewName(''); setNewPassword(''); setNewRole('user');
+      setNewAllowedSegments([]); setNewCanRunProcess(false); setNewCanCreateOverride(false);
+      setNewAllowedSegmentsEdit([]);
       loadUsers();
     } catch (err) {
       setCreateError(err.response?.data?.detail || 'Failed to create user');
@@ -78,6 +112,45 @@ export default function UserManagement() {
     }
   };
 
+  const openEditModal = (user) => {
+    setEditingUser(user);
+    setEditForm({
+      allowed_segments: user.allowed_segments || [],
+      can_run_process: user.can_run_process || false,
+      can_create_override: user.can_create_override || false,
+      allowed_segments_edit: user.allowed_segments_edit || [],
+    });
+  };
+
+  const saveEdit = async () => {
+    setEditSaving(true);
+    try {
+      await api.put(`/auth/users/${editingUser.id}`, {
+        allowed_segments: editForm.allowed_segments,
+        can_run_process: editForm.can_run_process,
+        can_create_override: editForm.can_create_override,
+        allowed_segments_edit: editForm.allowed_segments_edit,
+      });
+      setEditingUser(null);
+      loadUsers();
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to update user permissions');
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const handleSegmentToggle = (field, segmentId) => {
+    setEditForm(prev => {
+      const current = prev[field] || [];
+      if (current.includes(segmentId)) {
+        return { ...field, [field]: current.filter(id => id !== segmentId) };
+      } else {
+        return { ...field, [field]: [...current, segmentId] };
+      }
+    });
+  };
+
   if (!isAdmin) {
     return (
       <div className="p-6">
@@ -87,7 +160,7 @@ export default function UserManagement() {
   }
 
   return (
-    <div className="p-4 sm:p-6 max-w-5xl mx-auto">
+    <div className="p-4 sm:p-6 max-w-6xl mx-auto">
       <div id="um-header" className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">User Management</h1>
         <button
@@ -137,6 +210,52 @@ export default function UserManagement() {
                 <option value="admin">Admin</option>
               </select>
             </div>
+
+            {/* Permissions section */}
+            <div className="sm:col-span-2 mt-2 pt-4 border-t border-gray-200 dark:border-gray-700">
+              <h3 className="text-md font-medium text-gray-900 dark:text-white mb-3">Permissions</h3>
+            </div>
+
+            <div>
+              <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                <input type="checkbox" checked={newCanRunProcess} onChange={e => setNewCanRunProcess(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500" />
+                Can Run Pipeline
+              </label>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-6">Allow user to run forecast/backtest processes</p>
+            </div>
+
+            <div>
+              <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                <input type="checkbox" checked={newCanCreateOverride} onChange={e => setNewCanCreateOverride(e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500" />
+                Can Create Overrides
+              </label>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-6">Allow user to create forecast adjustments</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Allowed Segments (View)</label>
+              <select multiple value={newAllowedSegments} onChange={e => setNewAllowedSegments(Array.from(e.target.selectedOptions, o => Number(o.value)))}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none h-24">
+                {segments.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Hold Ctrl/Cmd to select multiple. Leave empty for no restrictions.</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Allowed Segments (Edit)</label>
+              <select multiple value={newAllowedSegmentsEdit} onChange={e => setNewAllowedSegmentsEdit(Array.from(e.target.selectedOptions, o => Number(o.value)))}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none h-24">
+                {segments.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Segments user can edit/assign</p>
+            </div>
+
             <div className="sm:col-span-2">
               <button type="submit" disabled={creating}
                 className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50">
@@ -153,62 +272,7 @@ export default function UserManagement() {
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-8 text-center text-gray-500 dark:text-gray-400">Loading users...</div>
       ) : (
         <>
-          {/* ── Mobile: card layout ── */}
-          <div className="md:hidden space-y-3">
-            {users.map(u => (
-              <div key={u.id} className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-                {/* Top row: name + status badges */}
-                <div className="flex items-start justify-between gap-2 mb-2">
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-gray-900 dark:text-white truncate">{u.display_name}</p>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{u.email}</p>
-                  </div>
-                  <span className={`shrink-0 inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                    u.is_active
-                      ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300'
-                      : 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
-                  }`}>
-                    {u.is_active ? 'Active' : 'Disabled'}
-                  </span>
-                </div>
-                {/* Badges row */}
-                <div className="flex items-center gap-2 mb-3">
-                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                    u.auth_provider === 'microsoft'
-                      ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300'
-                      : u.auth_provider === 'google'
-                      ? 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
-                      : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
-                  }`}>
-                    {u.auth_provider}
-                  </span>
-                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                    u.role === 'admin'
-                      ? 'bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300'
-                      : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
-                  }`}>
-                    {u.role}
-                  </span>
-                </div>
-                {/* Actions */}
-                <div className="flex items-center gap-3 pt-2 border-t border-gray-100 dark:border-gray-700">
-                  <button onClick={() => toggleRole(u)}
-                    className="text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline">
-                    {u.role === 'admin' ? 'Make User' : 'Make Admin'}
-                  </button>
-                  <button onClick={() => toggleActive(u)}
-                    className={`text-xs font-medium hover:underline ${u.is_active ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}`}>
-                    {u.is_active ? 'Disable' : 'Enable'}
-                  </button>
-                </div>
-              </div>
-            ))}
-            {users.length === 0 && (
-              <div className="text-center text-sm text-gray-500 dark:text-gray-400 py-8">No users found.</div>
-            )}
-          </div>
-
-          {/* ── Desktop: table layout ── */}
+          {/* Desktop: table layout */}
           <div className="hidden md:block bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
             <table className="w-full text-sm">
               <thead>
@@ -218,6 +282,7 @@ export default function UserManagement() {
                   <th className="px-4 py-3 font-medium">Provider</th>
                   <th className="px-4 py-3 font-medium">Role</th>
                   <th className="px-4 py-3 font-medium">Status</th>
+                  <th className="px-4 py-3 font-medium">Permissions</th>
                   <th className="px-4 py-3 font-medium">Actions</th>
                 </tr>
               </thead>
@@ -255,7 +320,22 @@ export default function UserManagement() {
                         {u.is_active ? 'Active' : 'Disabled'}
                       </span>
                     </td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-1 flex-wrap">
+                        {u.can_run_process && <span className="inline-block px-1 py-0.5 bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300 text-xs rounded">Run</span>}
+                        {u.can_create_override && <span className="inline-block px-1 py-0.5 bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-300 text-xs rounded">Override</span>}
+                        {(u.allowed_segments?.length > 0 || u.allowed_segments_edit?.length > 0) && (
+                          <span className="inline-block px-1 py-0.5 bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 text-xs rounded">
+                            {u.allowed_segments?.length || 0}V / {u.allowed_segments_edit?.length || 0}E
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-4 py-3 space-x-2">
+                      <button onClick={() => openEditModal(u)}
+                        className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
+                        Edit
+                      </button>
                       <button onClick={() => toggleRole(u)}
                         className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
                         {u.role === 'admin' ? 'Make User' : 'Make Admin'}
@@ -270,9 +350,131 @@ export default function UserManagement() {
               </tbody>
             </table>
           </div>
+
+          {/* Mobile: card layout */}
+          <div className="md:hidden space-y-3">
+            {users.map(u => (
+              <div key={u.id} className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900 dark:text-white truncate">{u.display_name}</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{u.email}</p>
+                  </div>
+                  <span className={`shrink-0 inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                    u.is_active
+                      ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300'
+                      : 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
+                  }`}>
+                    {u.is_active ? 'Active' : 'Disabled'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 mb-3">
+                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                    u.auth_provider === 'microsoft'
+                      ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300'
+                      : u.auth_provider === 'google'
+                      ? 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
+                      : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
+                  }`}>
+                    {u.auth_provider}
+                  </span>
+                  <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                    u.role === 'admin'
+                      ? 'bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300'
+                      : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400'
+                  }`}>
+                    {u.role}
+                  </span>
+                </div>
+                <div className="flex gap-1 mb-3 flex-wrap">
+                  {u.can_run_process && <span className="inline-block px-1 py-0.5 bg-cyan-100 dark:bg-cyan-900/40 text-cyan-700 dark:text-cyan-300 text-xs rounded">Run</span>}
+                  {u.can_create_override && <span className="inline-block px-1 py-0.5 bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-300 text-xs rounded">Override</span>}
+                </div>
+                <div className="flex items-center gap-3 pt-2 border-t border-gray-100 dark:border-gray-700">
+                  <button onClick={() => openEditModal(u)}
+                    className="text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline">
+                    Edit Permissions
+                  </button>
+                  <button onClick={() => toggleRole(u)}
+                    className="text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline">
+                    {u.role === 'admin' ? 'Make User' : 'Make Admin'}
+                  </button>
+                  <button onClick={() => toggleActive(u)}
+                    className={`text-xs font-medium hover:underline ${u.is_active ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}`}>
+                    {u.is_active ? 'Disable' : 'Enable'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         </>
       )}
       </div>
+
+      {/* Edit Permissions Modal */}
+      {editingUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-auto">
+            <div className="p-5 border-b dark:border-gray-700">
+              <h2 className="text-lg font-semibold dark:text-white">
+                Edit Permissions: {editingUser.display_name}
+              </h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400">{editingUser.email}</p>
+            </div>
+            <div className="p-5 space-y-4">
+              <div>
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                  <input type="checkbox" checked={editForm.can_run_process} onChange={e => setEditForm(prev => ({ ...prev, can_run_process: e.target.checked }))}
+                    className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500" />
+                  Can Run Pipeline
+                </label>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-6">Allow user to run forecast/backtest processes</p>
+              </div>
+
+              <div>
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                  <input type="checkbox" checked={editForm.can_create_override} onChange={e => setEditForm(prev => ({ ...prev, can_create_override: e.target.checked }))}
+                    className="w-4 h-4 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500" />
+                  Can Create Overrides
+                </label>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 ml-6">Allow user to create forecast adjustments</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Allowed Segments (View)</label>
+                <select multiple value={editForm.allowed_segments} onChange={e => setEditForm(prev => ({ ...prev, allowed_segments: Array.from(e.target.selectedOptions, o => Number(o.value)) }))}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none h-24">
+                  {segments.map(s => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Hold Ctrl/Cmd to select multiple</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Allowed Segments (Edit)</label>
+                <select multiple value={editForm.allowed_segments_edit} onChange={e => setEditForm(prev => ({ ...prev, allowed_segments_edit: Array.from(e.target.selectedOptions, o => Number(o.value)) }))}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none h-24">
+                  {segments.map(s => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Segments user can edit/assign</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 p-5 border-t dark:border-gray-700">
+              <button onClick={() => setEditingUser(null)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                Cancel
+              </button>
+              <button onClick={saveEdit} disabled={editSaving}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg disabled:opacity-50">
+                {editSaving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

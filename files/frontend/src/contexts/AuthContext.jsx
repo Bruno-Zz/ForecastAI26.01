@@ -80,10 +80,21 @@ export function AuthProvider({ children }) {
 
   const isAdmin = user?.role === 'admin';
   const isAuthenticated = !!user;
+  const canRunProcess = user?.can_run_process === true || isAdmin;
+  const canCreateOverride = user?.can_create_override === true || isAdmin;
+  const allowedSegments = user?.allowed_segments || [];
+  const allowedSegmentsEdit = user?.allowed_segments_edit || [];
+
+  const hasSegmentAccess = (segmentId, edit = false) => {
+    if (isAdmin) return true;
+    const list = edit ? allowedSegmentsEdit : allowedSegments;
+    return list.includes(segmentId);
+  };
 
   return (
     <AuthContext.Provider value={{
       user, loading, isAdmin, isAuthenticated,
+      canRunProcess, canCreateOverride, hasSegmentAccess,
       login, loginWithMicrosoft, loginWithGoogle, logout,
     }}>
       {children}

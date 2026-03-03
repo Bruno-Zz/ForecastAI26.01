@@ -65,6 +65,12 @@ app = FastAPI(
 
 # ── Authentication ──
 from api.auth import router as auth_router, seed_default_admin
+from api.auth import (
+    _user_has_segment_access,
+    _user_can_run_process,
+    _user_can_create_override,
+    get_current_user,
+)
 from api.auth_middleware import JWTAuthMiddleware
 
 app.include_router(auth_router)
@@ -1289,8 +1295,19 @@ async def get_parameter_segments(param_id: int):
 
 
 @app.put("/api/parameters/{param_id}/segments")
-async def set_parameter_segments(param_id: int, body: ParameterSegmentUpdate):
-    """Set the segment associations for a parameter version (replace all)."""
+async def set_parameter_segments(
+    param_id: int, body: ParameterSegmentUpdate, request: Request
+):
+    """Set the segment associations for a parameter version (replace all).
+    Requires admin role."""
+    from api.auth import get_current_user as auth_get_current_user
+
+    user = auth_get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Only admins can modify parameter segment associations",
+        )
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="DB not available")
     schema = get_schema(_api_config_path())
@@ -3435,8 +3452,19 @@ def _run_full_pipeline_thread(job_id: str):
 
 
 @app.post("/api/pipeline/run-all")
-async def run_full_pipeline():
-    """Launch all pipeline steps in order as a single background job."""
+async def run_full_pipeline(request: Request):
+    """Launch all pipeline steps in order as a single background job.
+    Requires admin role or can_run_process permission."""
+    from api.auth import (
+        get_current_user as auth_get_current_user,
+        _user_can_run_process,
+    )
+
+    user = auth_get_current_user(request)
+    if not _user_can_run_process(user):
+        raise HTTPException(
+            status_code=403, detail="You don't have permission to run the pipeline"
+        )
     # Clean up stale jobs first, then reject if any job is genuinely running
     with _pipeline_lock:
         _cleanup_stale_jobs()
@@ -3480,13 +3508,24 @@ class RunStepRequest(BaseModel):
 
 @app.post("/api/pipeline/run/{step}")
 async def run_pipeline_step(
-    step: str, body: RunStepRequest = Body(default=RunStepRequest())
+    step: str, request: Request, body: RunStepRequest = Body(default=RunStepRequest())
 ):
     """Launch a pipeline step as a background subprocess. Returns a job_id.
+    Requires admin role or can_run_process permission.
 
     Optional body: { "segment_id": <int> } to scope forecast/backtest/characterization
     to a specific segment.
     """
+    from api.auth import (
+        get_current_user as auth_get_current_user,
+        _user_can_run_process,
+    )
+
+    user = auth_get_current_user(request)
+    if not _user_can_run_process(user):
+        raise HTTPException(
+            status_code=403, detail="You don't have permission to run pipeline steps"
+        )
     if step not in PIPELINE_STEPS:
         raise HTTPException(
             status_code=400,
@@ -3537,12 +3576,23 @@ async def run_pipeline_step(
 
 
 @app.post("/api/pipeline/run-forecast")
-async def run_forecast_for_series(req: RunForecastRequest):
+async def run_forecast_for_series(req: RunForecastRequest, request: Request):
     """Launch a forecast for specific series (optionally with all methods).
+    Requires admin role or can_run_process permission.
 
     Used by the "Run Forecast" button in the Time Series Viewer.
     Returns a job_id that can be polled via GET /api/pipeline/jobs/{job_id}.
     """
+    from api.auth import (
+        get_current_user as auth_get_current_user,
+        _user_can_run_process,
+    )
+
+    user = auth_get_current_user(request)
+    if not _user_can_run_process(user):
+        raise HTTPException(
+            status_code=403, detail="You don't have permission to run forecasts"
+        )
     if not req.series:
         raise HTTPException(status_code=400, detail="No series provided")
 
@@ -4165,8 +4215,17 @@ async def list_segments():
 
 
 @app.post("/api/segments")
-async def create_segment(body: SegmentIn):
-    """Create a new segment."""
+async def create_segment(body: SegmentIn, request: Request):
+    """Create a new segment. Requires admin role or at least one segment in allowed_segments_edit."""
+    from api.auth import get_current_user as auth_get_current_user
+
+    user = auth_get_current_user(request)
+    if user.get("role") != "admin":
+        allowed_edit = user.get("allowed_segments_edit", []) or []
+        if not allowed_edit:
+            raise HTTPException(
+                status_code=403, detail="You don't have permission to create segments"
+            )
     _require_db()
     conn = get_conn(_api_config_path())
     schema = get_schema(_api_config_path())
@@ -4473,8 +4532,18 @@ async def get_segment_fields():
 
 
 @app.put("/api/segments/{segment_id}")
-async def update_segment(segment_id: int, body: SegmentIn):
-    """Update an existing segment (cannot update the default 'All' segment)."""
+async def update_segment(segment_id: int, body: SegmentIn, request: Request):
+    """Update an existing segment (cannot update the default 'All' segment).
+    Requires admin role or segment in allowed_segments_edit."""
+    from api.auth import get_current_user as auth_get_current_user
+
+    user = auth_get_current_user(request)
+    if user.get("role") != "admin":
+        allowed_edit = user.get("allowed_segments_edit", []) or []
+        if segment_id not in allowed_edit:
+            raise HTTPException(
+                status_code=403, detail="You don't have permission to edit this segment"
+            )
     _require_db()
     conn = get_conn(_api_config_path())
     schema = get_schema(_api_config_path())
@@ -4533,8 +4602,19 @@ async def update_segment(segment_id: int, body: SegmentIn):
 
 
 @app.delete("/api/segments/{segment_id}")
-async def delete_segment(segment_id: int):
-    """Delete a segment (cannot delete the default 'All' segment)."""
+async def delete_segment(segment_id: int, request: Request):
+    """Delete a segment (cannot delete the default 'All' segment).
+    Requires admin role or segment in allowed_segments_edit."""
+    from api.auth import get_current_user as auth_get_current_user
+
+    user = auth_get_current_user(request)
+    if user.get("role") != "admin":
+        allowed_edit = user.get("allowed_segments_edit", []) or []
+        if segment_id not in allowed_edit:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to delete this segment",
+            )
     _require_db()
     conn = get_conn(_api_config_path())
     schema = get_schema(_api_config_path())
@@ -4741,8 +4821,19 @@ async def get_segment_details(segment_id: int, limit: int = 200, offset: int = 0
 
 
 @app.post("/api/segments/{segment_id}/preview")
-async def preview_segment(segment_id: int):
-    """Dry-run: evaluate segment criteria and return match count + sample."""
+async def preview_segment(segment_id: int, request: Request):
+    """Dry-run: evaluate segment criteria and return match count + sample.
+    Requires admin role or segment in allowed_segments (view)."""
+    from api.auth import get_current_user as auth_get_current_user
+
+    user = auth_get_current_user(request)
+    if user.get("role") != "admin":
+        allowed = user.get("allowed_segments", []) or []
+        if segment_id not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to preview this segment",
+            )
     _require_db()
     conn = get_conn(_api_config_path())
     schema = get_schema(_api_config_path())
@@ -4774,8 +4865,19 @@ async def preview_segment(segment_id: int):
 
 
 @app.post("/api/segments/{segment_id}/assign")
-async def assign_segment(segment_id: int):
-    """Re-evaluate criteria and repopulate membership for this segment."""
+async def assign_segment(segment_id: int, request: Request):
+    """Re-evaluate criteria and repopulate membership for this segment.
+    Requires admin role or segment in allowed_segments_edit."""
+    from api.auth import get_current_user as auth_get_current_user
+
+    user = auth_get_current_user(request)
+    if user.get("role") != "admin":
+        allowed_edit = user.get("allowed_segments_edit", []) or []
+        if segment_id not in allowed_edit:
+            raise HTTPException(
+                status_code=403,
+                detail="You don't have permission to assign this segment",
+            )
     _require_db()
     conn = get_conn(_api_config_path())
     schema = get_schema(_api_config_path())
@@ -4863,11 +4965,22 @@ async def get_adjustments(unique_id: str):
 
 
 @app.post("/api/adjustments/{unique_id}", status_code=200)
-async def upsert_adjustment(unique_id: str, body: AdjustmentIn):
+async def upsert_adjustment(unique_id: str, body: AdjustmentIn, request: Request):
     """
     Create or update an adjustment / override for a series + date.
+    Requires admin role or can_create_override permission.
     Uses INSERT ... ON CONFLICT DO UPDATE (upsert).
     """
+    from api.auth import (
+        get_current_user as auth_get_current_user,
+        _user_can_create_override,
+    )
+
+    user = auth_get_current_user(request)
+    if not _user_can_create_override(user):
+        raise HTTPException(
+            status_code=403, detail="You don't have permission to create adjustments"
+        )
     _require_db()
     if body.adjustment_type not in ("adjustment", "override"):
         raise HTTPException(
@@ -4953,8 +5066,19 @@ async def delete_adjustment(unique_id: str, forecast_date: str, adjustment_type:
 
 
 @app.delete("/api/adjustments/{unique_id}", status_code=204)
-async def delete_all_adjustments(unique_id: str):
-    """Delete ALL adjustments for a series (reset)."""
+async def delete_all_adjustments(unique_id: str, request: Request):
+    """Delete ALL adjustments for a series (reset).
+    Requires admin role or can_create_override permission."""
+    from api.auth import (
+        get_current_user as auth_get_current_user,
+        _user_can_create_override,
+    )
+
+    user = auth_get_current_user(request)
+    if not _user_can_create_override(user):
+        raise HTTPException(
+            status_code=403, detail="You don't have permission to delete adjustments"
+        )
     _require_db()
     conn = get_conn(_api_config_path())
     try:

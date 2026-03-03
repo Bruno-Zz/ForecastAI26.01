@@ -8,7 +8,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import httpx
 import yaml
@@ -39,6 +39,7 @@ ALGORITHM = "HS256"
 # Config helpers
 # ────────────────────────────────────────────────────────
 
+
 def _api_config_path() -> str:
     return str(Path(__file__).resolve().parent.parent / "config" / "config.yaml")
 
@@ -61,6 +62,7 @@ def _token_expiry_minutes() -> int:
 # Pydantic request / response models
 # ────────────────────────────────────────────────────────
 
+
 class LoginRequest(BaseModel):
     email: str
     password: str
@@ -79,17 +81,20 @@ class CreateUserRequest(BaseModel):
     display_name: str
     password: str
     role: str = "user"
+    allowed_segments: List[int] = []
+    can_run_process: bool = False
+    can_create_override: bool = False
+    allowed_segments_edit: List[int] = []
 
 
 class UpdateUserRequest(BaseModel):
     display_name: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
-
-
-class ChangePasswordRequest(BaseModel):
-    current_password: str
-    new_password: str
+    allowed_segments: Optional[List[int]] = None
+    can_run_process: Optional[bool] = None
+    can_create_override: Optional[bool] = None
+    allowed_segments_edit: Optional[List[int]] = None
 
 
 class UserResponse(BaseModel):
@@ -99,6 +104,10 @@ class UserResponse(BaseModel):
     auth_provider: str
     role: str
     is_active: bool
+    allowed_segments: List[int] = []
+    can_run_process: bool = False
+    can_create_override: bool = False
+    allowed_segments_edit: List[int] = []
     created_at: str
 
 
@@ -113,6 +122,7 @@ class TokenResponse(BaseModel):
 # JWT helpers
 # ────────────────────────────────────────────────────────
 
+
 def _create_access_token(user_row: dict) -> str:
     """Create a signed JWT for the given user."""
     exp_minutes = _token_expiry_minutes()
@@ -123,6 +133,10 @@ def _create_access_token(user_row: dict) -> str:
         "role": user_row["role"],
         "display_name": user_row["display_name"],
         "auth_provider": user_row["auth_provider"],
+        "allowed_segments": user_row.get("allowed_segments", []) or [],
+        "can_run_process": user_row.get("can_run_process", False) or False,
+        "can_create_override": user_row.get("can_create_override", False) or False,
+        "allowed_segments_edit": user_row.get("allowed_segments_edit", []) or [],
         "exp": datetime.now(timezone.utc) + timedelta(minutes=exp_minutes),
     }
     return jwt.encode(payload, _jwt_secret(), algorithm=ALGORITHM)
@@ -136,6 +150,10 @@ def _user_row_to_response(row: dict) -> UserResponse:
         auth_provider=row["auth_provider"],
         role=row["role"],
         is_active=row["is_active"],
+        allowed_segments=row.get("allowed_segments", []) or [],
+        can_run_process=row.get("can_run_process", False) or False,
+        can_create_override=row.get("can_create_override", False) or False,
+        allowed_segments_edit=row.get("allowed_segments_edit", []) or [],
         created_at=str(row["created_at"]),
     )
 
@@ -148,7 +166,8 @@ def _db_fetch_user_by_email(email: str) -> Optional[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT id, email, display_name, hashed_password, auth_provider, "
-                f"role, is_active, created_at, updated_at "
+                f"role, is_active, allowed_segments, can_run_process, can_create_override, "
+                f"allowed_segments_edit, created_at, updated_at "
                 f"FROM {schema}.users WHERE email = %s",
                 (email,),
             )
@@ -168,7 +187,8 @@ def _db_fetch_user_by_id(user_id: str) -> Optional[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT id, email, display_name, hashed_password, auth_provider, "
-                f"role, is_active, created_at, updated_at "
+                f"role, is_active, allowed_segments, can_run_process, can_create_override, "
+                f"allowed_segments_edit, created_at, updated_at "
                 f"FROM {schema}.users WHERE id = %s",
                 (user_id,),
             )
@@ -181,9 +201,35 @@ def _db_fetch_user_by_id(user_id: str) -> Optional[dict]:
         conn.close()
 
 
+def _user_has_segment_access(user: dict, segment_id: int, edit: bool = False) -> bool:
+    """Check if user has access to a specific segment."""
+    if user.get("role") == "admin":
+        return True
+    if edit:
+        allowed = user.get("allowed_segments_edit", []) or []
+    else:
+        allowed = user.get("allowed_segments", []) or []
+    return segment_id in allowed
+
+
+def _user_can_run_process(user: dict) -> bool:
+    """Check if user can run processes."""
+    if user.get("role") == "admin":
+        return True
+    return user.get("can_run_process", False) or False
+
+
+def _user_can_create_override(user: dict) -> bool:
+    """Check if user can create overrides."""
+    if user.get("role") == "admin":
+        return True
+    return user.get("can_create_override", False) or False
+
+
 # ────────────────────────────────────────────────────────
 # Request helpers
 # ────────────────────────────────────────────────────────
+
 
 def get_current_user(request: Request) -> dict:
     """Extract authenticated user from request.state (set by middleware)."""
@@ -203,6 +249,7 @@ def _require_admin(request: Request) -> dict:
 # ────────────────────────────────────────────────────────
 # Auth endpoints
 # ────────────────────────────────────────────────────────
+
 
 @router.post("/login", response_model=TokenResponse)
 async def login(body: LoginRequest):
@@ -246,14 +293,13 @@ async def microsoft_login(body: MicrosoftTokenRequest):
         raise HTTPException(status_code=401, detail="Invalid Microsoft token")
 
     ms_profile = resp.json()
-    email = (
-        ms_profile.get("mail")
-        or ms_profile.get("userPrincipalName", "")
-    ).lower()
+    email = (ms_profile.get("mail") or ms_profile.get("userPrincipalName", "")).lower()
     display_name = ms_profile.get("displayName", email.split("@")[0])
 
     if not email:
-        raise HTTPException(status_code=400, detail="Could not determine email from Microsoft profile")
+        raise HTTPException(
+            status_code=400, detail="Could not determine email from Microsoft profile"
+        )
 
     # Upsert user
     user = _db_fetch_user_by_email(email)
@@ -400,7 +446,9 @@ async def create_user(body: CreateUserRequest, request: Request):
 
     existing = _db_fetch_user_by_email(body.email)
     if existing:
-        raise HTTPException(status_code=409, detail="A user with this email already exists")
+        raise HTTPException(
+            status_code=409, detail="A user with this email already exists"
+        )
 
     hashed = pwd_context.hash(body.password)
     schema = get_schema(_api_config_path())
@@ -409,11 +457,22 @@ async def create_user(body: CreateUserRequest, request: Request):
         with conn.cursor() as cur:
             cur.execute(
                 f"INSERT INTO {schema}.users "
-                f"(email, display_name, hashed_password, auth_provider, role, is_active) "
-                f"VALUES (%s, %s, %s, 'local', %s, TRUE) "
+                f"(email, display_name, hashed_password, auth_provider, role, is_active, "
+                f"allowed_segments, can_run_process, can_create_override, allowed_segments_edit) "
+                f"VALUES (%s, %s, %s, 'local', %s, TRUE, %s, %s, %s, %s) "
                 f"RETURNING id, email, display_name, hashed_password, auth_provider, "
-                f"role, is_active, created_at, updated_at",
-                (body.email, body.display_name, hashed, body.role),
+                f"role, is_active, allowed_segments, can_run_process, can_create_override, "
+                f"allowed_segments_edit, created_at, updated_at",
+                (
+                    body.email,
+                    body.display_name,
+                    hashed,
+                    body.role,
+                    body.allowed_segments,
+                    body.can_run_process,
+                    body.can_create_override,
+                    body.allowed_segments_edit,
+                ),
             )
             row = cur.fetchone()
             cols = [d[0] for d in cur.description]
@@ -440,6 +499,7 @@ async def list_users(request: Request):
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT id, email, display_name, auth_provider, role, is_active, "
+                f"allowed_segments, can_run_process, can_create_override, allowed_segments_edit, "
                 f"created_at, updated_at FROM {schema}.users ORDER BY created_at"
             )
             cols = [d[0] for d in cur.description]
@@ -458,7 +518,7 @@ async def list_users(request: Request):
 
 @router.put("/users/{user_id}", response_model=UserResponse)
 async def update_user(user_id: str, body: UpdateUserRequest, request: Request):
-    """Admin: update a user (role, active status, display name)."""
+    """Admin: update a user (role, active status, display name, permissions)."""
     _require_admin(request)
 
     user = _db_fetch_user_by_id(user_id)
@@ -472,12 +532,26 @@ async def update_user(user_id: str, body: UpdateUserRequest, request: Request):
         params.append(body.display_name)
     if body.role is not None:
         if body.role not in ("admin", "user"):
-            raise HTTPException(status_code=400, detail="Role must be 'admin' or 'user'")
+            raise HTTPException(
+                status_code=400, detail="Role must be 'admin' or 'user'"
+            )
         updates.append("role = %s")
         params.append(body.role)
     if body.is_active is not None:
         updates.append("is_active = %s")
         params.append(body.is_active)
+    if body.allowed_segments is not None:
+        updates.append("allowed_segments = %s")
+        params.append(body.allowed_segments)
+    if body.can_run_process is not None:
+        updates.append("can_run_process = %s")
+        params.append(body.can_run_process)
+    if body.can_create_override is not None:
+        updates.append("can_create_override = %s")
+        params.append(body.can_create_override)
+    if body.allowed_segments_edit is not None:
+        updates.append("allowed_segments_edit = %s")
+        params.append(body.allowed_segments_edit)
 
     if not updates:
         return _user_row_to_response(user)
@@ -492,7 +566,8 @@ async def update_user(user_id: str, body: UpdateUserRequest, request: Request):
             cur.execute(
                 f"UPDATE {schema}.users SET {', '.join(updates)} WHERE id = %s "
                 f"RETURNING id, email, display_name, hashed_password, auth_provider, "
-                f"role, is_active, created_at, updated_at",
+                f"role, is_active, allowed_segments, can_run_process, can_create_override, "
+                f"allowed_segments_edit, created_at, updated_at",
                 params,
             )
             row = cur.fetchone()
@@ -517,7 +592,9 @@ async def change_password(body: ChangePasswordRequest, request: Request):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if user["auth_provider"] != "local":
-        raise HTTPException(status_code=400, detail="Password change is only for local accounts")
+        raise HTTPException(
+            status_code=400, detail="Password change is only for local accounts"
+        )
     if not pwd_context.verify(body.current_password, user["hashed_password"]):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
 
@@ -571,6 +648,7 @@ async def logout(request: Request):
 # Admin seed (called on startup)
 # ────────────────────────────────────────────────────────
 
+
 def seed_default_admin(config_path: str) -> None:
     """Create the default admin user on first run if no users exist."""
     try:
@@ -603,7 +681,9 @@ def seed_default_admin(config_path: str) -> None:
                     conn.commit()
                     logger.info(f"Default admin user created: {default_admin['email']}")
                 else:
-                    logger.info(f"Users table has {count} row(s) -- skipping admin seed")
+                    logger.info(
+                        f"Users table has {count} row(s) -- skipping admin seed"
+                    )
         except Exception as e:
             conn.rollback()
             logger.warning(f"Admin seed failed (non-fatal): {e}")

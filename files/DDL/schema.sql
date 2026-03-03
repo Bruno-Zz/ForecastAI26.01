@@ -281,6 +281,10 @@ CREATE TABLE IF NOT EXISTS {schema}.users (
     role            TEXT NOT NULL DEFAULT 'user'
                     CHECK (role IN ('admin', 'user')),
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    allowed_segments JSONB DEFAULT '[]'::jsonb,
+    can_run_process BOOLEAN DEFAULT FALSE,
+    can_create_override BOOLEAN DEFAULT FALSE,
+    allowed_segments_edit JSONB DEFAULT '[]'::jsonb,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
