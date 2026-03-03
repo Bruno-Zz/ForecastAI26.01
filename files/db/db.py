@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Config & connection
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def _load_pg_config(config_path: Union[str, Path]) -> dict:
     """Read the postgres block from config.yaml."""
     with open(config_path, "r") as f:
@@ -60,6 +61,7 @@ def get_schema(config_path: Union[str, Path]) -> str:
 # JSON / JSONB serialisation helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def jsonb_serialize(obj):
     """
     Recursively convert numpy/pandas objects to JSON-safe Python types.
@@ -90,6 +92,7 @@ def jsonb_serialize(obj):
             return [_convert(x) for x in o]
         if isinstance(o, float):
             import math
+
             if math.isnan(o) or math.isinf(o):
                 return None
             return o
@@ -104,6 +107,7 @@ def jsonb_serialize(obj):
 # ═══════════════════════════════════════════════════════════════════════════
 # Schema initialisation
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 def init_schema(config_path: Union[str, Path]) -> None:
     """
@@ -158,7 +162,9 @@ def init_schema(config_path: Union[str, Path]) -> None:
         name        TEXT,
         description TEXT,
         attributes  JSONB,
-        type_id     BIGINT
+        type_id     BIGINT,
+        longitude   NUMERIC(10,7),
+        latitude    NUMERIC(10,7)
     );
 
     -- ─── Demand actuals ──────────────────────────────────────────────
@@ -775,6 +781,34 @@ def init_schema(config_path: Union[str, Path]) -> None:
             END IF;
         END $$;
         """,
+        # site — longitude
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'site'
+                  AND column_name = 'longitude'
+            ) THEN
+                ALTER TABLE {schema}.site ADD COLUMN longitude NUMERIC(10,7);
+            END IF;
+        END $$;
+        """,
+        # site — latitude
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'site'
+                  AND column_name = 'latitude'
+            ) THEN
+                ALTER TABLE {schema}.site ADD COLUMN latitude NUMERIC(10,7);
+            END IF;
+        END $$;
+        """,
     ]
 
     conn = get_conn(config_path)
@@ -814,6 +848,7 @@ def init_schema(config_path: Union[str, Path]) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 # Bulk insert helper
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 def bulk_insert(
     config_path: Union[str, Path],
@@ -870,7 +905,10 @@ def bulk_insert(
             elif truncate:
                 cur.execute(f"TRUNCATE TABLE {table_name}")
             psycopg2.extras.execute_values(
-                cur, insert_sql, rows, page_size=page_size,
+                cur,
+                insert_sql,
+                rows,
+                page_size=page_size,
             )
         conn.commit()
         logger.info(f"bulk_insert: {len(rows):,} rows → {table_name}")

@@ -275,3 +275,5 @@ logging:
   format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
   file: ./logs/forecasting.log
   console: true
+segmentation:
+  max_enum_distinct: 200

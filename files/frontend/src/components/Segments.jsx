@@ -38,7 +38,7 @@ function buildFieldsFromApi(fieldsData) {
   // ── Item table columns ──
   if (fieldsData.item_columns?.length) {
     for (const c of fieldsData.item_columns) {
-      result.push({ key: `item.${c.column}`, label: `Item ${colLabel(c.column)}`, type: c.type, options: c.options });
+      result.push({ key: `item.${c.column}`, label: `Item ${colLabel(c.column)}`, type: c.type, options: c.options, optionsById: c.options_by_id });
     }
   } else {
     // Fallback if API hasn't returned column info yet
@@ -52,24 +52,23 @@ function buildFieldsFromApi(fieldsData) {
   // ── Item JSONB attributes ──
   if (fieldsData.item_attr_info?.length) {
     for (const a of fieldsData.item_attr_info) {
-      const hasOpts = a.options && a.options.length > 0;
       result.push({
         key: `item.attributes.${a.key}`,
         label: `Item: ${colLabel(a.key)}`,
-        type: hasOpts ? 'enum' : 'string',
-        ...(hasOpts ? { options: a.options } : {}),
+        type: 'enum',
+        ...(a.options?.length ? { options: a.options } : {}),
       });
     }
   } else {
     for (const k of (fieldsData.item || [])) {
-      result.push({ key: `item.attributes.${k}`, label: `Item: ${colLabel(k)}`, type: 'string' });
+      result.push({ key: `item.attributes.${k}`, label: `Item: ${colLabel(k)}`, type: 'enum' });
     }
   }
 
   // ── Site table columns ──
   if (fieldsData.site_columns?.length) {
     for (const c of fieldsData.site_columns) {
-      result.push({ key: `site.${c.column}`, label: `Site ${colLabel(c.column)}`, type: c.type, options: c.options });
+      result.push({ key: `site.${c.column}`, label: `Site ${colLabel(c.column)}`, type: c.type, options: c.options, optionsById: c.options_by_id });
     }
   } else {
     result.push(
@@ -82,17 +81,16 @@ function buildFieldsFromApi(fieldsData) {
   // ── Site JSONB attributes ──
   if (fieldsData.site_attr_info?.length) {
     for (const a of fieldsData.site_attr_info) {
-      const hasOpts = a.options && a.options.length > 0;
       result.push({
         key: `site.attributes.${a.key}`,
         label: `Site: ${colLabel(a.key)}`,
-        type: hasOpts ? 'enum' : 'string',
-        ...(hasOpts ? { options: a.options } : {}),
+        type: 'enum',
+        ...(a.options?.length ? { options: a.options } : {}),
       });
     }
   } else {
     for (const k of (fieldsData.site || [])) {
-      result.push({ key: `site.attributes.${k}`, label: `Site: ${colLabel(k)}`, type: 'string' });
+      result.push({ key: `site.attributes.${k}`, label: `Site: ${colLabel(k)}`, type: 'enum' });
     }
   }
 
@@ -214,19 +212,39 @@ function CriteriaCondition({ node, onChange, onRemove, allFields }) {
                 type="text"
                 placeholder="A, B, C"
                 value={Array.isArray(node.value) ? node.value.join(', ') : node.value}
-                onChange={e => update({ value: e.target.value.split(',').map(s => s.trim()) })}
+                onChange={e => {
+                  const names = e.target.value.split(',').map(s => s.trim());
+                  // For type_id fields with optionsById, convert names to IDs
+                  const vals = field.optionsById
+                    ? names.map(n => field.optionsById[n]).filter(v => v != null)
+                    : names;
+                  update({ value: vals });
+                }}
                 className="text-xs border border-gray-300 dark:border-gray-600 rounded
                            px-2 py-1 w-28 bg-white dark:bg-gray-700 dark:text-gray-100"
               />
-            : <select
-                value={node.value}
-                onChange={e => update({ value: e.target.value })}
-                className="text-xs border border-gray-300 dark:border-gray-600 rounded
-                           px-2 py-1 bg-white dark:bg-gray-700 dark:text-gray-100"
-              >
-                <option value="">—</option>
-                {field.options.map(o => <option key={o} value={o}>{o}</option>)}
-              </select>
+            : field.options?.length
+              ? <select
+                  value={node.value}
+                  onChange={e => {
+                    // For type_id fields with optionsById, convert name to ID
+                    const val = field.optionsById ? field.optionsById[e.target.value] : e.target.value;
+                    update({ value: val ?? e.target.value });
+                  }}
+                  className="text-xs border border-gray-300 dark:border-gray-600 rounded
+                             px-2 py-1 bg-white dark:bg-gray-700 dark:text-gray-100"
+                >
+                  <option value="">—</option>
+                  {field.options.map(o => <option key={o} value={o}>{o}</option>)}
+                </select>
+              : <input
+                  type="text"
+                  value={node.value ?? ''}
+                  onChange={e => update({ value: e.target.value })}
+                  placeholder="value"
+                  className="text-xs border border-gray-300 dark:border-gray-600 rounded
+                             px-2 py-1 w-28 bg-white dark:bg-gray-700 dark:text-gray-100"
+                />
           : <input
               type={field?.type === 'number' ? 'number' : 'text'}
               value={node.value ?? ''}

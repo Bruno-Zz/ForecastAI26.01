@@ -35,6 +35,7 @@ if str(_files_dir) not in sys.path:
 
 try:
     from db.db import get_conn, init_schema as _init_db_schema, get_schema, load_table
+
     _DB_AVAILABLE = True
 except Exception as _db_import_err:
     _DB_AVAILABLE = False
@@ -42,10 +43,12 @@ except Exception as _db_import_err:
 
 try:
     import dask.dataframe as dd
+
     _DASK_AVAILABLE = True
 except ImportError:
     _DASK_AVAILABLE = False
     logging.warning("Dask not available; data_cache will use pandas DataFrames")
+
 
 def _api_config_path() -> str:
     """Return the path to config.yaml as a string."""
@@ -57,7 +60,7 @@ def _api_config_path() -> str:
 app = FastAPI(
     title="Time Series Forecasting API",
     description="API for accessing forecasts, demand analytics, and MEIO data",
-    version="1.1.0"  # bump when routes change — used to verify the right server is running
+    version="1.1.0",  # bump when routes change — used to verify the right server is running
 )
 
 # ── Authentication ──
@@ -69,11 +72,15 @@ app.include_router(auth_router)
 # Configure CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],  # React dev servers
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ],  # React dev servers
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # JWT auth middleware (added AFTER CORS so preflight passes)
 def _get_jwt_secret():
@@ -84,6 +91,7 @@ def _get_jwt_secret():
         return cfg.get("auth", {}).get("jwt_secret", "CHANGE-ME")
     except Exception:
         return "CHANGE-ME"
+
 
 app.add_middleware(
     JWTAuthMiddleware,
@@ -98,33 +106,85 @@ logger = logging.getLogger(__name__)
 
 # ── Parameter registry: order + display metadata ──
 PARAMETER_REGISTRY = [
-    {"parameter_type": "data_source",       "label": "Data Source",        "description": "Source database connection and ETL table mappings"},
-    {"parameter_type": "etl",               "label": "ETL",                "description": "Extract-Transform-Load parameters"},
-    {"parameter_type": "outlier_detection",  "label": "Outlier Detection",  "description": "Outlier detection and correction settings"},
-    {"parameter_type": "characterization",   "label": "Characterization",   "description": "Time-series characterization thresholds"},
-    {"parameter_type": "forecasting",        "label": "Forecasting",        "description": "Forecast horizon, methods, and backtesting"},
-    {"parameter_type": "hierarchical",       "label": "Hierarchical",       "description": "Hierarchical reconciliation settings"},
-    {"parameter_type": "evaluation",         "label": "Evaluation",         "description": "Metric weights and scoring"},
-    {"parameter_type": "best_method",        "label": "Best Method",        "description": "Composite scoring weights"},
-    {"parameter_type": "meio",               "label": "MEIO",               "description": "Inventory optimization distributions"},
-    {"parameter_type": "parallel",           "label": "Parallel",           "description": "Dask / parallel execution settings"},
-    {"parameter_type": "output",             "label": "Output",             "description": "Output format and save flags"},
-    {"parameter_type": "auth",               "label": "Auth",               "description": "Authentication and JWT settings"},
-    {"parameter_type": "logging",            "label": "Logging",            "description": "Log level and file settings"},
+    {
+        "parameter_type": "data_source",
+        "label": "Data Source",
+        "description": "Source database connection and ETL table mappings",
+    },
+    {
+        "parameter_type": "etl",
+        "label": "ETL",
+        "description": "Extract-Transform-Load parameters",
+    },
+    {
+        "parameter_type": "outlier_detection",
+        "label": "Outlier Detection",
+        "description": "Outlier detection and correction settings",
+    },
+    {
+        "parameter_type": "characterization",
+        "label": "Characterization",
+        "description": "Time-series characterization thresholds",
+    },
+    {
+        "parameter_type": "forecasting",
+        "label": "Forecasting",
+        "description": "Forecast horizon, methods, and backtesting",
+    },
+    {
+        "parameter_type": "hierarchical",
+        "label": "Hierarchical",
+        "description": "Hierarchical reconciliation settings",
+    },
+    {
+        "parameter_type": "evaluation",
+        "label": "Evaluation",
+        "description": "Metric weights and scoring",
+    },
+    {
+        "parameter_type": "best_method",
+        "label": "Best Method",
+        "description": "Composite scoring weights",
+    },
+    {
+        "parameter_type": "meio",
+        "label": "MEIO",
+        "description": "Inventory optimization distributions",
+    },
+    {
+        "parameter_type": "parallel",
+        "label": "Parallel",
+        "description": "Dask / parallel execution settings",
+    },
+    {
+        "parameter_type": "output",
+        "label": "Output",
+        "description": "Output format and save flags",
+    },
+    {
+        "parameter_type": "auth",
+        "label": "Auth",
+        "description": "Authentication and JWT settings",
+    },
+    {
+        "parameter_type": "logging",
+        "label": "Logging",
+        "description": "Log level and file settings",
+    },
 ]
 
 # Data cache
 data_cache = {
-    'time_series': None,
-    'time_series_original': None,
-    'characteristics': None,
-    'forecasts': None,
-    'distributions': None,
-    'metrics': None,
-    'best_methods': None,
-    'forecasts_by_origin': None,
-    'outliers': None,
-    'config': None,
+    "time_series": None,
+    "time_series_original": None,
+    "characteristics": None,
+    "forecasts": None,
+    "distributions": None,
+    "metrics": None,
+    "best_methods": None,
+    "forecasts_by_origin": None,
+    "outliers": None,
+    "config": None,
 }
 
 
@@ -163,8 +223,8 @@ class MetricsData(BaseModel):
 
 
 class RunForecastRequest(BaseModel):
-    series: List[str]           # e.g., ["63530_517", "63531_518"]
-    all_methods: bool = True    # run ALL methods (not just recommended)
+    series: List[str]  # e.g., ["63530_517", "63531_518"]
+    all_methods: bool = True  # run ALL methods (not just recommended)
 
 
 # ── Helper: wrap a pandas DataFrame into a Dask DataFrame when available ──
@@ -176,9 +236,13 @@ class RunForecastRequest(BaseModel):
 # flat-column tables should be Dask-wrapped.
 #
 _DASK_SAFE_TABLES = {
-    "time_series", "time_series_original", "metrics",
-    "forecasts_by_origin", "outliers",
+    "time_series",
+    "time_series_original",
+    "metrics",
+    "forecasts_by_origin",
+    "outliers",
 }
+
 
 def _to_dask(pdf: pd.DataFrame, name: str = "") -> "pd.DataFrame | dd.DataFrame":
     """Convert a pandas DataFrame to a Dask DataFrame when Dask is available.
@@ -192,7 +256,7 @@ def _to_dask(pdf: pd.DataFrame, name: str = "") -> "pd.DataFrame | dd.DataFrame"
 
 def _compute(df_or_ddf):
     """Call .compute() on Dask DataFrames; return pandas DataFrames as-is."""
-    if _DASK_AVAILABLE and hasattr(df_or_ddf, 'compute'):
+    if _DASK_AVAILABLE and hasattr(df_or_ddf, "compute"):
         return df_or_ddf.compute()
     return df_or_ddf
 
@@ -211,174 +275,242 @@ def load_data():
         conn = get_conn(cfg_path)
 
         # ── time_series (corrected values, used for charts) ──
-        if data_cache['time_series'] is None:
+        if data_cache["time_series"] is None:
             pdf = pd.read_sql(
                 f"SELECT unique_id, date, COALESCE(corrected_qty, qty) AS y "
                 f"FROM {schema}.demand_actuals ORDER BY unique_id, date",
                 conn,
             )
-            pdf['date'] = pd.to_datetime(pdf['date'])
-            data_cache['time_series'] = _to_dask(pdf, "time_series")
+            pdf["date"] = pd.to_datetime(pdf["date"])
+            data_cache["time_series"] = _to_dask(pdf, "time_series")
             logger.info(f"Loaded time_series from DB: {len(pdf)} rows")
 
         # ── time_series_original (raw qty, for outlier comparison) ──
-        if data_cache['time_series_original'] is None:
+        if data_cache["time_series_original"] is None:
             pdf = pd.read_sql(
                 f"SELECT unique_id, date, qty AS y "
                 f"FROM {schema}.demand_actuals ORDER BY unique_id, date",
                 conn,
             )
-            pdf['date'] = pd.to_datetime(pdf['date'])
-            data_cache['time_series_original'] = _to_dask(pdf, "time_series_original")
+            pdf["date"] = pd.to_datetime(pdf["date"])
+            data_cache["time_series_original"] = _to_dask(pdf, "time_series_original")
             logger.info(f"Loaded time_series_original from DB: {len(pdf)} rows")
 
         # ── Backfill missing series from source DB ──
         # When demand_actuals has fewer series than forecast_results (e.g. after
         # a partial ETL re-run), load the missing actuals from the source DB.
         try:
-            ts_df = _compute(data_cache['time_series'])
-            local_uids = set(ts_df['unique_id'].unique())
+            ts_df = _compute(data_cache["time_series"])
+            local_uids = set(ts_df["unique_id"].unique())
             fc_df = None
-            if data_cache.get('forecasts') is not None:
-                fc_df = _compute(data_cache['forecasts'])
+            if data_cache.get("forecasts") is not None:
+                fc_df = _compute(data_cache["forecasts"])
             elif True:
-                fc_df = pd.read_sql(f"SELECT DISTINCT unique_id FROM {schema}.forecast_results", conn)
+                fc_df = pd.read_sql(
+                    f"SELECT DISTINCT unique_id FROM {schema}.forecast_results", conn
+                )
             if fc_df is not None:
-                forecast_uids = set(fc_df['unique_id'].unique())
+                forecast_uids = set(fc_df["unique_id"].unique())
                 missing = forecast_uids - local_uids
                 if missing:
-                    logger.info(f"Backfill: {len(missing)} series in forecasts but not in demand_actuals — querying source DB…")
+                    logger.info(
+                        f"Backfill: {len(missing)} series in forecasts but not in demand_actuals — querying source DB…"
+                    )
                     # Read config directly from file (data_cache['config'] isn't loaded yet)
-                    _bf_cfg_path = Path(cfg_path) if not isinstance(cfg_path, Path) else cfg_path
-                    with open(_bf_cfg_path, 'r') as _bf_fh:
+                    _bf_cfg_path = (
+                        Path(cfg_path) if not isinstance(cfg_path, Path) else cfg_path
+                    )
+                    with open(_bf_cfg_path, "r") as _bf_fh:
                         cfg = yaml.safe_load(_bf_fh)
-                    src = cfg.get('data_source', {}).get('source_db', {})
-                    if src.get('host'):
+                    src = cfg.get("data_source", {}).get("source_db", {})
+                    if src.get("host"):
                         import psycopg2
+
                         src_conn = psycopg2.connect(
-                            host=src['host'], port=src.get('port', 5432),
-                            dbname=src.get('database', 'postgres'),
-                            user=src.get('user'), password=src.get('password'),
-                            sslmode=src.get('sslmode', 'require'),
+                            host=src["host"],
+                            port=src.get("port", 5432),
+                            dbname=src.get("database", "postgres"),
+                            user=src.get("user"),
+                            password=src.get("password"),
+                            sslmode=src.get("sslmode", "require"),
                         )
-                        cols = src.get('columns', {})
-                        item_col = cols.get('item_id', 'item_id')
-                        site_col = cols.get('site_id', 'site_id')
-                        date_col = cols.get('date', 'date')
-                        qty_col  = cols.get('qty', 'qty')
-                        table    = src.get('demand_table', 'dp_plan.calc_dp_actual')
-                        agg_freq = cfg.get('etl', {}).get('aggregation', {}).get('frequency', 'W')
+                        cols = src.get("columns", {})
+                        item_col = cols.get("item_id", "item_id")
+                        site_col = cols.get("site_id", "site_id")
+                        date_col = cols.get("date", "date")
+                        qty_col = cols.get("qty", "qty")
+                        table = src.get("demand_table", "dp_plan.calc_dp_actual")
+                        agg_freq = (
+                            cfg.get("etl", {})
+                            .get("aggregation", {})
+                            .get("frequency", "W")
+                        )
                         # Build a list of (item, site) pairs to query
-                        pairs = [(uid.split('_', 1)[0], uid.split('_', 1)[1]) for uid in missing if '_' in uid]
+                        pairs = [
+                            (uid.split("_", 1)[0], uid.split("_", 1)[1])
+                            for uid in missing
+                            if "_" in uid
+                        ]
                         if pairs:
                             # Query source in batches
                             batch_size = 200
                             src_frames = []
                             for i in range(0, len(pairs), batch_size):
-                                batch = pairs[i:i+batch_size]
+                                batch = pairs[i : i + batch_size]
                                 where_clauses = " OR ".join(
-                                    [f"({item_col}='{it}' AND {site_col}='{si}')" for it, si in batch]
+                                    [
+                                        f"({item_col}='{it}' AND {site_col}='{si}')"
+                                        for it, si in batch
+                                    ]
                                 )
-                                q = (f"SELECT {item_col} || '_' || {site_col} AS unique_id, "
-                                     f"{date_col} AS date, {qty_col} AS y "
-                                     f"FROM {table} WHERE {where_clauses} "
-                                     f"ORDER BY unique_id, date")
+                                q = (
+                                    f"SELECT {item_col} || '_' || {site_col} AS unique_id, "
+                                    f"{date_col} AS date, {qty_col} AS y "
+                                    f"FROM {table} WHERE {where_clauses} "
+                                    f"ORDER BY unique_id, date"
+                                )
                                 batch_df = pd.read_sql(q, src_conn)
                                 if not batch_df.empty:
                                     src_frames.append(batch_df)
                             src_conn.close()
                             if src_frames:
                                 src_pdf = pd.concat(src_frames, ignore_index=True)
-                                src_pdf['date'] = pd.to_datetime(src_pdf['date'])
+                                src_pdf["date"] = pd.to_datetime(src_pdf["date"])
                                 # Aggregate to the same frequency as ETL config
                                 if agg_freq:
-                                    src_pdf = (src_pdf.groupby('unique_id')
-                                               .apply(lambda g: g.set_index('date').resample(agg_freq)['y'].sum().reset_index(), include_groups=False)
-                                               .reset_index(level=0))
+                                    src_pdf = (
+                                        src_pdf.groupby("unique_id")
+                                        .apply(
+                                            lambda g: g.set_index("date")
+                                            .resample(agg_freq)["y"]
+                                            .sum()
+                                            .reset_index(),
+                                            include_groups=False,
+                                        )
+                                        .reset_index(level=0)
+                                    )
                                 # Merge with existing time_series
-                                ts_merged = pd.concat([ts_df, src_pdf], ignore_index=True)
-                                data_cache['time_series'] = _to_dask(ts_merged, "time_series")
+                                ts_merged = pd.concat(
+                                    [ts_df, src_pdf], ignore_index=True
+                                )
+                                data_cache["time_series"] = _to_dask(
+                                    ts_merged, "time_series"
+                                )
                                 # Also update time_series_original
-                                orig_df = _compute(data_cache['time_series_original'])
-                                orig_merged = pd.concat([orig_df, src_pdf], ignore_index=True)
-                                data_cache['time_series_original'] = _to_dask(orig_merged, "time_series_original")
-                                logger.info(f"Backfill: added {len(src_pdf)} rows for {src_pdf['unique_id'].nunique()} series from source DB")
+                                orig_df = _compute(data_cache["time_series_original"])
+                                orig_merged = pd.concat(
+                                    [orig_df, src_pdf], ignore_index=True
+                                )
+                                data_cache["time_series_original"] = _to_dask(
+                                    orig_merged, "time_series_original"
+                                )
+                                logger.info(
+                                    f"Backfill: added {len(src_pdf)} rows for {src_pdf['unique_id'].nunique()} series from source DB"
+                                )
                             else:
-                                logger.warning("Backfill: source DB returned no data for missing series")
+                                logger.warning(
+                                    "Backfill: source DB returned no data for missing series"
+                                )
                     else:
-                        logger.warning("Backfill: no source_db config — cannot load missing series")
+                        logger.warning(
+                            "Backfill: no source_db config — cannot load missing series"
+                        )
         except Exception as backfill_err:
-            logger.warning(f"Backfill from source DB failed (non-fatal): {backfill_err}")
+            logger.warning(
+                f"Backfill from source DB failed (non-fatal): {backfill_err}"
+            )
 
         # ── characteristics ──
-        if data_cache['characteristics'] is None:
-            pdf = pd.read_sql(f"SELECT * FROM {schema}.time_series_characteristics", conn)
+        if data_cache["characteristics"] is None:
+            pdf = pd.read_sql(
+                f"SELECT * FROM {schema}.time_series_characteristics", conn
+            )
             # JSONB columns are auto-deserialized by psycopg2
-            for col in ('seasonal_periods', 'recommended_methods'):
+            for col in ("seasonal_periods", "recommended_methods"):
                 if col in pdf.columns:
-                    pdf[col] = pdf[col].apply(lambda x: x if isinstance(x, list) else [])
-            data_cache['characteristics'] = _to_dask(pdf, "characteristics")
+                    pdf[col] = pdf[col].apply(
+                        lambda x: x if isinstance(x, list) else []
+                    )
+            data_cache["characteristics"] = _to_dask(pdf, "characteristics")
             logger.info(f"Loaded characteristics from DB: {len(pdf)} series")
 
         # ── forecasts ──
-        if data_cache['forecasts'] is None:
+        if data_cache["forecasts"] is None:
             pdf = pd.read_sql(f"SELECT * FROM {schema}.forecast_results", conn)
-            data_cache['forecasts'] = _to_dask(pdf, "forecasts")
+            data_cache["forecasts"] = _to_dask(pdf, "forecasts")
             logger.info(f"Loaded forecasts from DB: {len(pdf)} rows")
 
         # ── distributions ──
-        if data_cache['distributions'] is None:
+        if data_cache["distributions"] is None:
             pdf = pd.read_sql(f"SELECT * FROM {schema}.fitted_distributions", conn)
-            data_cache['distributions'] = _to_dask(pdf, "distributions") if not pdf.empty else None
+            data_cache["distributions"] = (
+                _to_dask(pdf, "distributions") if not pdf.empty else None
+            )
             if not pdf.empty:
                 logger.info(f"Loaded distributions from DB: {len(pdf)} rows")
 
         # ── metrics ──
-        if data_cache['metrics'] is None:
+        if data_cache["metrics"] is None:
             pdf = pd.read_sql(f"SELECT * FROM {schema}.backtest_metrics", conn)
             # Coerce metric columns to numeric (DB NULLs can cause object dtype)
-            for mc in ['mae', 'rmse', 'mape', 'smape', 'mase', 'bias',
-                       'crps', 'winkler_score',
-                       'coverage_50', 'coverage_80', 'coverage_90', 'coverage_95',
-                       'quantile_loss', 'aic', 'bic', 'aicc']:
+            for mc in [
+                "mae",
+                "rmse",
+                "mape",
+                "smape",
+                "mase",
+                "bias",
+                "crps",
+                "winkler_score",
+                "coverage_50",
+                "coverage_80",
+                "coverage_90",
+                "coverage_95",
+                "quantile_loss",
+                "aic",
+                "bic",
+                "aicc",
+            ]:
                 if mc in pdf.columns:
-                    pdf[mc] = pd.to_numeric(pdf[mc], errors='coerce')
-            data_cache['metrics'] = _to_dask(pdf, "metrics")
+                    pdf[mc] = pd.to_numeric(pdf[mc], errors="coerce")
+            data_cache["metrics"] = _to_dask(pdf, "metrics")
             logger.info(f"Loaded metrics from DB: {len(pdf)} rows")
 
         # ── best_methods ──
-        if data_cache['best_methods'] is None:
+        if data_cache["best_methods"] is None:
             pdf = pd.read_sql(f"SELECT * FROM {schema}.best_method_per_series", conn)
-            data_cache['best_methods'] = _to_dask(pdf, "best_methods")
+            data_cache["best_methods"] = _to_dask(pdf, "best_methods")
             logger.info(f"Loaded best_methods from DB: {len(pdf)} rows")
 
         # ── forecasts_by_origin ──
-        if data_cache['forecasts_by_origin'] is None:
+        if data_cache["forecasts_by_origin"] is None:
             pdf = pd.read_sql(f"SELECT * FROM {schema}.forecasts_by_origin", conn)
-            for col in ['forecast_origin', 'origin', 'origin_date']:
+            for col in ["forecast_origin", "origin", "origin_date"]:
                 if col in pdf.columns:
                     pdf[col] = pd.to_datetime(pdf[col])
-            data_cache['forecasts_by_origin'] = _to_dask(pdf, "forecasts_by_origin")
+            data_cache["forecasts_by_origin"] = _to_dask(pdf, "forecasts_by_origin")
             logger.info(f"Loaded forecasts_by_origin from DB: {len(pdf)} rows")
 
         # ── outliers ──
-        if data_cache['outliers'] is None:
+        if data_cache["outliers"] is None:
             pdf = pd.read_sql(f"SELECT * FROM {schema}.detected_outliers", conn)
-            if not pdf.empty and 'date' in pdf.columns:
-                pdf['date'] = pd.to_datetime(pdf['date'])
-            data_cache['outliers'] = _to_dask(pdf, "outliers") if not pdf.empty else None
+            if not pdf.empty and "date" in pdf.columns:
+                pdf["date"] = pd.to_datetime(pdf["date"])
+            data_cache["outliers"] = (
+                _to_dask(pdf, "outliers") if not pdf.empty else None
+            )
             if not pdf.empty:
                 logger.info(f"Loaded outliers from DB: {len(pdf)} rows")
 
         conn.close()
 
         # ── config (YAML, not DB) ──
-        if data_cache['config'] is None:
+        if data_cache["config"] is None:
             # Use absolute path derived from __file__ so it works regardless of cwd
             config_path = Path(_api_config_path())
             if config_path.exists():
-                with open(config_path, 'r') as fh:
-                    data_cache['config'] = yaml.safe_load(fh)
+                with open(config_path, "r") as fh:
+                    data_cache["config"] = yaml.safe_load(fh)
                 logger.info(f"Loaded config.yaml from {config_path}")
 
     except Exception as e:
@@ -387,7 +519,7 @@ def load_data():
 
 def _get_config():
     """Get config from cache with defaults."""
-    return data_cache.get('config') or {}
+    return data_cache.get("config") or {}
 
 
 def seed_parameters(config_path: str) -> None:
@@ -409,7 +541,12 @@ def seed_parameters(config_path: str) -> None:
                         (parameter_type, name, label, parameters_set, description, is_default, sort_order)
                     VALUES (%s, 'Default', %s, %s::jsonb, %s, TRUE, 9999)
                     ON CONFLICT (parameter_type, name) DO NOTHING""",
-                    (param_type, meta["label"], json.dumps(param_data, default=str), meta.get("description")),
+                    (
+                        param_type,
+                        meta["label"],
+                        json.dumps(param_data, default=str),
+                        meta.get("description"),
+                    ),
                 )
         conn.commit()
         logger.info(f"Seeded default parameter sets into DB")
@@ -453,8 +590,11 @@ async def reload_data():
     for key in data_cache:
         data_cache[key] = None
     load_data()
-    sizes = {k: (len(_compute(v)) if v is not None and hasattr(v, '__len__') else 0)
-             for k, v in data_cache.items() if k != 'config'}
+    sizes = {
+        k: (len(_compute(v)) if v is not None and hasattr(v, "__len__") else 0)
+        for k, v in data_cache.items()
+        if k != "config"
+    }
     return {"status": "reloaded", "cache_sizes": sizes}
 
 
@@ -469,14 +609,18 @@ async def get_config():
             conn = get_conn(_api_config_path())
             try:
                 with conn.cursor() as cur:
-                    cur.execute(f"SELECT parameter_type, parameters_set FROM {schema}.parameters WHERE is_default = TRUE ORDER BY id")
+                    cur.execute(
+                        f"SELECT parameter_type, parameters_set FROM {schema}.parameters WHERE is_default = TRUE ORDER BY id"
+                    )
                     rows = cur.fetchall()
             finally:
                 conn.close()
             if rows:
                 config = {}
                 for section_key, cfg_val in rows:
-                    config[section_key] = cfg_val if isinstance(cfg_val, dict) else json.loads(cfg_val)
+                    config[section_key] = (
+                        cfg_val if isinstance(cfg_val, dict) else json.loads(cfg_val)
+                    )
         except Exception:
             pass
     if not config:
@@ -485,14 +629,17 @@ async def get_config():
         raise HTTPException(status_code=404, detail="Config not loaded")
 
     import copy
+
     safe = copy.deepcopy(config)
 
     # Redact sensitive fields
-    def _redact(d, keys=('password', 'account_key', 'secret', 'token', 'connection_string')):
+    def _redact(
+        d, keys=("password", "account_key", "secret", "token", "connection_string")
+    ):
         if isinstance(d, dict):
             for k, v in d.items():
                 if any(s in k.lower() for s in keys) and isinstance(v, str):
-                    d[k] = '********'
+                    d[k] = "********"
                 else:
                     _redact(v, keys)
         elif isinstance(d, list):
@@ -522,25 +669,32 @@ async def update_config(body: dict = Body(...)):
         raise HTTPException(status_code=404, detail="config.yaml not found")
 
     # Load current config
-    with open(config_path, 'r') as fh:
+    with open(config_path, "r") as fh:
         config = yaml.safe_load(fh)
 
     # Build list of updates
-    updates = body.get('updates', [])
-    if 'path' in body and 'value' in body:
-        updates = [{'path': body['path'], 'value': body['value']}]
+    updates = body.get("updates", [])
+    if "path" in body and "value" in body:
+        updates = [{"path": body["path"], "value": body["value"]}]
 
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
 
     # Sensitive keys that cannot be written via API
-    BLOCKED_KEYS = {'password', 'secret', 'token', 'account_key', 'connection_string', 'sslmode'}
+    BLOCKED_KEYS = {
+        "password",
+        "secret",
+        "token",
+        "account_key",
+        "connection_string",
+        "sslmode",
+    }
 
     applied = []
     for upd in updates:
-        key_path = upd.get('path', '')
-        value = upd.get('value')
-        parts = key_path.split('.')
+        key_path = upd.get("path", "")
+        value = upd.get("value")
+        parts = key_path.split(".")
 
         if not parts or not key_path:
             continue
@@ -561,17 +715,19 @@ async def update_config(body: dict = Body(...)):
         if node is not None and isinstance(node, dict):
             old_val = node.get(parts[-1])
             node[parts[-1]] = value
-            applied.append({'path': key_path, 'old': old_val, 'new': value})
+            applied.append({"path": key_path, "old": old_val, "new": value})
 
     if not applied:
         raise HTTPException(status_code=400, detail="No valid updates applied")
 
     # Write back
-    with open(config_path, 'w') as fh:
-        yaml.dump(config, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    with open(config_path, "w") as fh:
+        yaml.dump(
+            config, fh, default_flow_style=False, sort_keys=False, allow_unicode=True
+        )
 
     # Refresh in-memory cache
-    data_cache['config'] = config
+    data_cache["config"] = config
 
     # Sync changed sections to parameters DB table
     if _DB_AVAILABLE:
@@ -579,7 +735,7 @@ async def update_config(body: dict = Body(...)):
             schema = get_schema(str(config_path))
             conn = get_conn(str(config_path))
             try:
-                changed_sections = set(a['path'].split('.')[0] for a in applied)
+                changed_sections = set(a["path"].split(".")[0] for a in applied)
                 with conn.cursor() as cur:
                     for sect_key in changed_sections:
                         section_data = config.get(sect_key, {})
@@ -603,6 +759,7 @@ async def update_config(body: dict = Body(...)):
 # PARAMETERS endpoints (DB-backed config with versioning)
 # ===========================================================================
 
+
 class ParameterCreate(BaseModel):
     parameter_type: str
     name: str
@@ -610,19 +767,30 @@ class ParameterCreate(BaseModel):
     parameters_set: Optional[Dict[str, Any]] = None
     clone_from_id: Optional[int] = None
 
+
 class ParameterUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     parameters_set: Optional[Dict[str, Any]] = None
 
+
 class ParameterSegmentUpdate(BaseModel):
     segment_ids: List[int]
+
 
 class ParameterReorder(BaseModel):
     parameter_type: str
     ordered_ids: List[int]
 
-_PARAM_BLOCKED_KEYS = {'password', 'secret', 'token', 'account_key', 'connection_string', 'sslmode'}
+
+_PARAM_BLOCKED_KEYS = {
+    "password",
+    "secret",
+    "token",
+    "account_key",
+    "connection_string",
+    "sslmode",
+}
 
 
 def _param_row_to_dict(cols, row):
@@ -636,17 +804,29 @@ def _param_row_to_dict(cols, row):
     return entry
 
 
-def _audit_log(cur, schema: str, entity_type: str, entity_id, action: str,
-               old_value=None, new_value=None, changed_by: str = "system"):
+def _audit_log(
+    cur,
+    schema: str,
+    entity_type: str,
+    entity_id,
+    action: str,
+    old_value=None,
+    new_value=None,
+    changed_by: str = "system",
+):
     """Insert an audit log row inside an existing transaction cursor."""
     cur.execute(
         f"INSERT INTO {schema}.audit_log "
         f"(entity_type, entity_id, action, old_value, new_value, changed_by) "
         f"VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s)",
-        (entity_type, entity_id, action,
-         json.dumps(old_value, default=str) if old_value else None,
-         json.dumps(new_value, default=str) if new_value else None,
-         changed_by),
+        (
+            entity_type,
+            entity_id,
+            action,
+            json.dumps(old_value, default=str) if old_value else None,
+            json.dumps(new_value, default=str) if new_value else None,
+            changed_by,
+        ),
     )
 
 
@@ -668,7 +848,9 @@ async def list_parameters():
             rows = cur.fetchall()
 
             # Fetch all segment associations in one query
-            cur.execute(f"SELECT parameter_id, segment_id FROM {schema}.parameter_segment")
+            cur.execute(
+                f"SELECT parameter_id, segment_id FROM {schema}.parameter_segment"
+            )
             seg_map: dict[int, list[int]] = {}
             for pid, sid in cur.fetchall():
                 seg_map.setdefault(pid, []).append(sid)
@@ -720,11 +902,21 @@ async def reorder_parameters(body: ParameterReorder):
                 )
             # Audit the reorder as a single entry
             new_order = {pid: idx for idx, pid in enumerate(body.ordered_ids)}
-            _audit_log(cur, schema, "parameter", None, "reorder",
-                       old_value={"parameter_type": body.parameter_type, "order": old_order},
-                       new_value={"parameter_type": body.parameter_type, "order": new_order})
+            _audit_log(
+                cur,
+                schema,
+                "parameter",
+                None,
+                "reorder",
+                old_value={"parameter_type": body.parameter_type, "order": old_order},
+                new_value={"parameter_type": body.parameter_type, "order": new_order},
+            )
         conn.commit()
-        return {"status": "ok", "parameter_type": body.parameter_type, "order": body.ordered_ids}
+        return {
+            "status": "ok",
+            "parameter_type": body.parameter_type,
+            "order": body.ordered_ids,
+        }
     except HTTPException:
         conn.rollback()
         raise
@@ -743,6 +935,7 @@ async def resolve_parameters():
     config_path = _api_config_path()
     try:
         from segmentation.segmentation import SegmentationEngine
+
         engine = SegmentationEngine(config_path)
         count = engine.resolve_parameter_assignments()
         return {"status": "ok", "resolved_series": count}
@@ -791,7 +984,10 @@ async def create_parameter(body: ParameterCreate):
 
     valid_types = {m["parameter_type"] for m in PARAMETER_REGISTRY}
     if body.parameter_type not in valid_types:
-        raise HTTPException(status_code=400, detail=f"Invalid parameter_type. Must be one of: {sorted(valid_types)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid parameter_type. Must be one of: {sorted(valid_types)}",
+        )
     if not body.name or not body.name.strip():
         raise HTTPException(status_code=400, detail="Name is required")
 
@@ -809,12 +1005,27 @@ async def create_parameter(body: ParameterCreate):
                 )
                 source = cur.fetchone()
                 if source is None:
-                    raise HTTPException(status_code=404, detail=f"Source parameter id={body.clone_from_id} not found")
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Source parameter id={body.clone_from_id} not found",
+                    )
                 if source[1] != body.parameter_type:
-                    raise HTTPException(status_code=400, detail="Cannot clone from a different parameter_type")
-                params_set = source[0] if isinstance(source[0], dict) else json.loads(source[0])
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Cannot clone from a different parameter_type",
+                    )
+                params_set = (
+                    source[0] if isinstance(source[0], dict) else json.loads(source[0])
+                )
 
-        label = next((m["label"] for m in PARAMETER_REGISTRY if m["parameter_type"] == body.parameter_type), body.parameter_type)
+        label = next(
+            (
+                m["label"]
+                for m in PARAMETER_REGISTRY
+                if m["parameter_type"] == body.parameter_type
+            ),
+            body.parameter_type,
+        )
 
         with conn.cursor() as cur:
             # Auto-assign sort_order: max non-default sort_order + 1 (before default)
@@ -830,14 +1041,21 @@ async def create_parameter(body: ParameterCreate):
                     (parameter_type, name, label, parameters_set, description, is_default, sort_order)
                 VALUES (%s, %s, %s, %s::jsonb, %s, FALSE, %s)
                 RETURNING id, parameter_type, name, label, parameters_set, description, is_default, sort_order, updated_at, created_at""",
-                (body.parameter_type, body.name.strip(), label,
-                 json.dumps(params_set, default=str), body.description, next_sort),
+                (
+                    body.parameter_type,
+                    body.name.strip(),
+                    label,
+                    json.dumps(params_set, default=str),
+                    body.description,
+                    next_sort,
+                ),
             )
             cols = [d[0] for d in cur.description]
             row = cur.fetchone()
             new_entry = _param_row_to_dict(cols, row)
-            _audit_log(cur, schema, "parameter", new_entry["id"], "create",
-                       new_value=new_entry)
+            _audit_log(
+                cur, schema, "parameter", new_entry["id"], "create", new_value=new_entry
+            )
         conn.commit()
 
         new_entry["segment_ids"] = []
@@ -848,8 +1066,14 @@ async def create_parameter(body: ParameterCreate):
         raise
     except Exception as exc:
         conn.rollback()
-        if "duplicate key" in str(exc).lower() or "unique constraint" in str(exc).lower():
-            raise HTTPException(status_code=409, detail=f"A version named '{body.name}' already exists for {body.parameter_type}")
+        if (
+            "duplicate key" in str(exc).lower()
+            or "unique constraint" in str(exc).lower()
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=f"A version named '{body.name}' already exists for {body.parameter_type}",
+            )
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         conn.close()
@@ -884,8 +1108,10 @@ async def update_parameter(param_id: int, body: ParameterUpdate):
             is_default_row = old_snapshot["is_default"]
 
             # Prevent renaming default version
-            if body.name is not None and is_default_row and body.name != 'Default':
-                raise HTTPException(status_code=400, detail="Cannot rename the default version")
+            if body.name is not None and is_default_row and body.name != "Default":
+                raise HTTPException(
+                    status_code=400, detail="Cannot rename the default version"
+                )
 
             # Build SET clause dynamically
             updates = []
@@ -897,8 +1123,11 @@ async def update_parameter(param_id: int, body: ParameterUpdate):
                 updates.append("description = %s")
                 values.append(body.description)
             if body.parameters_set is not None:
-                safe_config = {k: v for k, v in body.parameters_set.items()
-                               if not any(bk in k.lower() for bk in _PARAM_BLOCKED_KEYS)}
+                safe_config = {
+                    k: v
+                    for k, v in body.parameters_set.items()
+                    if not any(bk in k.lower() for bk in _PARAM_BLOCKED_KEYS)
+                }
                 updates.append("parameters_set = %s::jsonb")
                 values.append(json.dumps(safe_config, default=str))
 
@@ -922,16 +1151,29 @@ async def update_parameter(param_id: int, body: ParameterUpdate):
             )
             new_row = cur.fetchone()
             new_snapshot = _param_row_to_dict([d[0] for d in cur.description], new_row)
-            _audit_log(cur, schema, "parameter", param_id, "update",
-                       old_value=old_snapshot, new_value=new_snapshot)
+            _audit_log(
+                cur,
+                schema,
+                "parameter",
+                param_id,
+                "update",
+                old_value=old_snapshot,
+                new_value=new_snapshot,
+            )
         conn.commit()
     except HTTPException:
         conn.rollback()
         raise
     except Exception as exc:
         conn.rollback()
-        if "duplicate key" in str(exc).lower() or "unique constraint" in str(exc).lower():
-            raise HTTPException(status_code=409, detail=f"A version with that name already exists for this parameter type")
+        if (
+            "duplicate key" in str(exc).lower()
+            or "unique constraint" in str(exc).lower()
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=f"A version with that name already exists for this parameter type",
+            )
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         conn.close()
@@ -968,9 +1210,17 @@ async def update_parameter(param_id: int, body: ParameterUpdate):
 
             full_cfg[param_type] = _deep_merge(body.parameters_set, sensitive)
             with open(config_path, "w") as fh:
-                yaml.dump(full_cfg, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+                yaml.dump(
+                    full_cfg,
+                    fh,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                )
             data_cache["config"] = full_cfg
-            logger.info(f"Parameter '{param_type}' (id={param_id}) saved to DB and YAML")
+            logger.info(
+                f"Parameter '{param_type}' (id={param_id}) saved to DB and YAML"
+            )
         except Exception as exc:
             logger.warning(f"YAML write-back failed (DB already updated): {exc}")
 
@@ -999,10 +1249,14 @@ async def delete_parameter(param_id: int):
             old_cols = [d[0] for d in cur.description]
             old_snapshot = _param_row_to_dict(old_cols, old_row)
             if old_snapshot.get("is_default"):
-                raise HTTPException(status_code=400, detail="Cannot delete the default parameter version")
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot delete the default parameter version",
+                )
             cur.execute(f"DELETE FROM {schema}.parameters WHERE id = %s", (param_id,))
-            _audit_log(cur, schema, "parameter", param_id, "delete",
-                       old_value=old_snapshot)
+            _audit_log(
+                cur, schema, "parameter", param_id, "delete", old_value=old_snapshot
+            )
         conn.commit()
         return {"status": "ok", "deleted": param_id}
     except HTTPException:
@@ -1043,7 +1297,9 @@ async def set_parameter_segments(param_id: int, body: ParameterSegmentUpdate):
     conn = get_conn(_api_config_path())
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT id FROM {schema}.parameters WHERE id = %s", (param_id,))
+            cur.execute(
+                f"SELECT id FROM {schema}.parameters WHERE id = %s", (param_id,)
+            )
             if cur.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Parameter set not found")
             # Capture old segment associations for audit
@@ -1062,9 +1318,18 @@ async def set_parameter_segments(param_id: int, body: ParameterSegmentUpdate):
                     f"VALUES (%s, %s) ON CONFLICT DO NOTHING",
                     (param_id, sid),
                 )
-            _audit_log(cur, schema, "parameter_segment", param_id, "update",
-                       old_value={"parameter_id": param_id, "segment_ids": old_segment_ids},
-                       new_value={"parameter_id": param_id, "segment_ids": sorted(body.segment_ids)})
+            _audit_log(
+                cur,
+                schema,
+                "parameter_segment",
+                param_id,
+                "update",
+                old_value={"parameter_id": param_id, "segment_ids": old_segment_ids},
+                new_value={
+                    "parameter_id": param_id,
+                    "segment_ids": sorted(body.segment_ids),
+                },
+            )
         conn.commit()
         return {"parameter_id": param_id, "segment_ids": body.segment_ids}
     except HTTPException:
@@ -1078,6 +1343,7 @@ async def set_parameter_segments(param_id: int, body: ParameterSegmentUpdate):
 
 
 # API Endpoints
+
 
 @app.get("/")
 async def root():
@@ -1094,8 +1360,8 @@ async def root():
             "series_best_method": "/api/series/{unique_id}/best-method",
             "forecast_origins": "/api/forecasts/{unique_id}/origins",
             "forecast_at_origin": "/api/forecasts/{unique_id}/origins/{origin_date}",
-            "forecast_evolution": "/api/series/{unique_id}/forecast-evolution"
-        }
+            "forecast_evolution": "/api/series/{unique_id}/forecast-evolution",
+        },
     }
 
 
@@ -1105,7 +1371,7 @@ async def get_series_list(
     limit: int = Query(100, ge=1, le=50000),
     search: Optional[str] = None,
     complexity: Optional[str] = None,
-    intermittent: Optional[bool] = None
+    intermittent: Optional[bool] = None,
 ):
     """
     Get list of time series with filtering and pagination.
@@ -1117,70 +1383,74 @@ async def get_series_list(
         complexity: Filter by complexity level (low, medium, high)
         intermittent: Filter by intermittency status
     """
-    if data_cache['characteristics'] is None:
+    if data_cache["characteristics"] is None:
         raise HTTPException(status_code=503, detail="Data not loaded")
 
-    df = _compute(data_cache['characteristics']).copy()
+    df = _compute(data_cache["characteristics"]).copy()
 
     # Apply filters
     if search:
-        df = df[df['unique_id'].str.contains(search, case=False, na=False)]
+        df = df[df["unique_id"].str.contains(search, case=False, na=False)]
 
     if complexity:
-        df = df[df['complexity_level'] == complexity]
+        df = df[df["complexity_level"] == complexity]
 
     if intermittent is not None:
-        df = df[df['is_intermittent'] == intermittent]
+        df = df[df["is_intermittent"] == intermittent]
 
     # Pagination
     total = len(df)
-    df = df.iloc[skip:skip + limit]
+    df = df.iloc[skip : skip + limit]
 
     # Build outlier lookup
     outlier_counts = {}
-    if data_cache['outliers'] is not None:
-        outlier_counts = _compute(data_cache['outliers']).groupby('unique_id').size().to_dict()
+    if data_cache["outliers"] is not None:
+        outlier_counts = (
+            _compute(data_cache["outliers"]).groupby("unique_id").size().to_dict()
+        )
 
     # Build best-method lookup: backtested results take priority over recommendations
     backtested_map = {}
-    if data_cache['best_methods'] is not None:
-        for _, bm_row in _compute(data_cache['best_methods']).iterrows():
-            backtested_map[bm_row['unique_id']] = str(bm_row['best_method'])
+    if data_cache["best_methods"] is not None:
+        for _, bm_row in _compute(data_cache["best_methods"]).iterrows():
+            backtested_map[bm_row["unique_id"]] = str(bm_row["best_method"])
 
     # Convert to response model
     series_list = []
     for _, row in df.iterrows():
-        uid = row['unique_id']
+        uid = row["unique_id"]
         n_out = outlier_counts.get(uid, 0)
 
         # Determine best method + source
         if uid in backtested_map:
             best_method_val = backtested_map[uid]
-            best_method_source_val = 'backtested'
+            best_method_source_val = "backtested"
         else:
-            rec = row.get('recommended_methods', None)
+            rec = row.get("recommended_methods", None)
             if rec is not None and len(rec) > 0:
                 best_method_val = str(rec[0])
-                best_method_source_val = 'recommended'
+                best_method_source_val = "recommended"
             else:
                 best_method_val = None
                 best_method_source_val = None
 
-        series_list.append(TimeSeriesInfo(
-            unique_id=uid,
-            n_observations=int(row['n_observations']),
-            date_range_start=str(row['date_range_start']),
-            date_range_end=str(row['date_range_end']),
-            mean=float(row['mean']),
-            is_intermittent=bool(row['is_intermittent']),
-            has_seasonality=bool(row['has_seasonality']),
-            has_trend=bool(row['has_trend']),
-            complexity_level=str(row['complexity_level']),
-            has_outlier_corrections=n_out > 0,
-            n_outliers=n_out,
-            best_method=best_method_val,
-            best_method_source=best_method_source_val,
-        ))
+        series_list.append(
+            TimeSeriesInfo(
+                unique_id=uid,
+                n_observations=int(row["n_observations"]),
+                date_range_start=str(row["date_range_start"]),
+                date_range_end=str(row["date_range_end"]),
+                mean=float(row["mean"]),
+                is_intermittent=bool(row["is_intermittent"]),
+                has_seasonality=bool(row["has_seasonality"]),
+                has_trend=bool(row["has_trend"]),
+                complexity_level=str(row["complexity_level"]),
+                has_outlier_corrections=n_out > 0,
+                n_outliers=n_out,
+                best_method=best_method_val,
+                best_method_source=best_method_source_val,
+            )
+        )
 
     return series_list
 
@@ -1192,56 +1462,53 @@ async def get_series_data(unique_id: str):
 
     Returns data in format ready for Vega visualization.
     """
-    if data_cache['time_series'] is None:
+    if data_cache["time_series"] is None:
         raise HTTPException(status_code=503, detail="Data not loaded")
 
-    df = _compute(data_cache['time_series'])
-    series_df = df[df['unique_id'] == unique_id].sort_values('date')
+    df = _compute(data_cache["time_series"])
+    series_df = df[df["unique_id"] == unique_id].sort_values("date")
 
     if series_df.empty:
         raise HTTPException(status_code=404, detail=f"Series {unique_id} not found")
 
     # Convert to Vega-ready format (corrected values)
     data = {
-        'date': series_df['date'].dt.strftime('%Y-%m-%d').tolist(),
-        'value': series_df['y'].tolist()
+        "date": series_df["date"].dt.strftime("%Y-%m-%d").tolist(),
+        "value": series_df["y"].tolist(),
     }
 
     result = {
-        'unique_id': unique_id,
-        'data': data,
-        'n_points': len(series_df),
-        'has_outlier_corrections': False,
-        'n_outliers': 0,
+        "unique_id": unique_id,
+        "data": data,
+        "n_points": len(series_df),
+        "has_outlier_corrections": False,
+        "n_outliers": 0,
     }
 
     # Include original data if outlier corrections exist
-    if data_cache.get('time_series_original') is not None:
-        orig_df = _compute(data_cache['time_series_original'])
-        orig_series = orig_df[orig_df['unique_id'] == unique_id].sort_values('date')
+    if data_cache.get("time_series_original") is not None:
+        orig_df = _compute(data_cache["time_series_original"])
+        orig_series = orig_df[orig_df["unique_id"] == unique_id].sort_values("date")
         if not orig_series.empty:
             orig_data = {
-                'date': orig_series['date'].dt.strftime('%Y-%m-%d').tolist(),
-                'value': orig_series['y'].tolist()
+                "date": orig_series["date"].dt.strftime("%Y-%m-%d").tolist(),
+                "value": orig_series["y"].tolist(),
             }
-            result['original_data'] = orig_data
+            result["original_data"] = orig_data
 
             # Check if there are actual differences
-            if data_cache.get('outliers') is not None:
-                outliers_pdf = _compute(data_cache['outliers'])
-                uid_outliers = outliers_pdf[outliers_pdf['unique_id'] == unique_id]
+            if data_cache.get("outliers") is not None:
+                outliers_pdf = _compute(data_cache["outliers"])
+                uid_outliers = outliers_pdf[outliers_pdf["unique_id"] == unique_id]
                 if not uid_outliers.empty:
-                    result['has_outlier_corrections'] = True
-                    result['n_outliers'] = len(uid_outliers)
+                    result["has_outlier_corrections"] = True
+                    result["n_outliers"] = len(uid_outliers)
 
     return result
 
 
 @app.get("/api/forecasts/{unique_id}")
-async def get_forecasts(
-    unique_id: str,
-    methods: Optional[List[str]] = Query(None)
-):
+async def get_forecasts(unique_id: str, methods: Optional[List[str]] = Query(None)):
     """
     Get all forecasts for a specific time series.
 
@@ -1249,26 +1516,27 @@ async def get_forecasts(
         unique_id: Time series identifier
         methods: Optional list of methods to filter by
     """
-    if data_cache['forecasts'] is None:
+    if data_cache["forecasts"] is None:
         raise HTTPException(status_code=503, detail="Forecasts not loaded")
 
-    df = _compute(data_cache['forecasts'])
-    forecasts_df = df[df['unique_id'] == unique_id]
+    df = _compute(data_cache["forecasts"])
+    forecasts_df = df[df["unique_id"] == unique_id]
 
     if forecasts_df.empty:
         raise HTTPException(status_code=404, detail=f"No forecasts for {unique_id}")
 
     # Filter by methods if specified
     if methods:
-        forecasts_df = forecasts_df[forecasts_df['method'].isin(methods)]
+        forecasts_df = forecasts_df[forecasts_df["method"].isin(methods)]
 
     # Convert to response format
     forecasts = []
     for _, row in forecasts_df.iterrows():
         # Parse quantiles if string
-        quantiles = row['quantiles']
+        quantiles = row["quantiles"]
         if isinstance(quantiles, str):
             import json
+
             quantiles = json.loads(quantiles.replace("'", '"'))
 
         # Convert quantile arrays to lists
@@ -1280,7 +1548,7 @@ async def get_forecasts(
                 quantiles_dict[str(q)] = [float(values)]
 
         # Parse hyperparameters if available
-        hyperparams = row.get('hyperparameters')
+        hyperparams = row.get("hyperparameters")
         if hyperparams is not None:
             if isinstance(hyperparams, str):
                 try:
@@ -1288,47 +1556,53 @@ async def get_forecasts(
                 except (json.JSONDecodeError, ValueError):
                     hyperparams = None
 
-        forecasts.append({
-            'method': row['method'],
-            'point_forecast': [float(v) for v in row['point_forecast']],
-            'quantiles': quantiles_dict,
-            'hyperparameters': hyperparams,
-            'training_time': float(row['training_time']) if pd.notna(row.get('training_time')) else None
-        })
+        forecasts.append(
+            {
+                "method": row["method"],
+                "point_forecast": [float(v) for v in row["point_forecast"]],
+                "quantiles": quantiles_dict,
+                "hyperparameters": hyperparams,
+                "training_time": float(row["training_time"])
+                if pd.notna(row.get("training_time"))
+                else None,
+            }
+        )
 
     # Include date_range_end from characteristics so the frontend can compute
     # forecast dates even when historical demand_actuals data is unavailable.
     date_range_end = None
     frequency = None
-    if data_cache.get('characteristics') is not None:
-        chars_df = _compute(data_cache['characteristics'])
-        char_row = chars_df[chars_df['unique_id'] == unique_id]
+    if data_cache.get("characteristics") is not None:
+        chars_df = _compute(data_cache["characteristics"])
+        char_row = chars_df[chars_df["unique_id"] == unique_id]
         if not char_row.empty:
-            dre = char_row.iloc[0].get('date_range_end')
+            dre = char_row.iloc[0].get("date_range_end")
             if pd.notna(dre):
-                date_range_end = pd.Timestamp(dre).strftime('%Y-%m-%d')
-            freq = char_row.iloc[0].get('frequency') or char_row.iloc[0].get('obs_per_year')
+                date_range_end = pd.Timestamp(dre).strftime("%Y-%m-%d")
+            freq = char_row.iloc[0].get("frequency") or char_row.iloc[0].get(
+                "obs_per_year"
+            )
             if freq is not None:
                 frequency = str(freq)
 
     # Also include lightweight historical data inline when available so
     # the frontend doesn't need a separate /series/{uid}/data call.
     historical = None
-    if data_cache.get('time_series') is not None:
-        ts_df = _compute(data_cache['time_series'])
-        series_ts = ts_df[ts_df['unique_id'] == unique_id].sort_values('date')
+    if data_cache.get("time_series") is not None:
+        ts_df = _compute(data_cache["time_series"])
+        series_ts = ts_df[ts_df["unique_id"] == unique_id].sort_values("date")
         if not series_ts.empty:
             historical = {
-                'date': series_ts['date'].dt.strftime('%Y-%m-%d').tolist(),
-                'value': series_ts['y'].tolist(),
+                "date": series_ts["date"].dt.strftime("%Y-%m-%d").tolist(),
+                "value": series_ts["y"].tolist(),
             }
 
     return {
-        'unique_id': unique_id,
-        'forecasts': forecasts,
-        'date_range_end': date_range_end,
-        'frequency': frequency,
-        'historical': historical,
+        "unique_id": unique_id,
+        "forecasts": forecasts,
+        "date_range_end": date_range_end,
+        "frequency": frequency,
+        "historical": historical,
     }
 
 
@@ -1341,22 +1615,22 @@ def _compute_metrics_from_origin(unique_id: str) -> list:
     min(horizon, n_obs//3) actual observations vs the forecast that was produced.
     This gives a meaningful accuracy estimate even for short series.
     """
-    ts_ddf = data_cache.get('time_series')
+    ts_ddf = data_cache.get("time_series")
     if ts_ddf is None:
         return []
 
     ts_df = _compute(ts_ddf)
-    actuals_df = ts_df[ts_df['unique_id'] == unique_id].sort_values('date')
+    actuals_df = ts_df[ts_df["unique_id"] == unique_id].sort_values("date")
     if actuals_df.empty:
         return []
 
-    actuals_vals = actuals_df['y'].values
+    actuals_vals = actuals_df["y"].values
     n_obs = len(actuals_vals)
 
     # ── Strategy A: forecasts_by_origin ──────────────────────────────────────
-    if data_cache.get('forecasts_by_origin') is not None:
-        origin_df = _compute(data_cache['forecasts_by_origin'])
-        for col in ['forecast_origin', 'origin', 'origin_date']:
+    if data_cache.get("forecasts_by_origin") is not None:
+        origin_df = _compute(data_cache["forecasts_by_origin"])
+        for col in ["forecast_origin", "origin", "origin_date"]:
             if col in origin_df.columns:
                 origin_col = col
                 break
@@ -1364,17 +1638,28 @@ def _compute_metrics_from_origin(unique_id: str) -> list:
             origin_col = None
 
         if origin_col:
-            series_origins = origin_df[origin_df['unique_id'] == unique_id]
+            series_origins = origin_df[origin_df["unique_id"] == unique_id]
             if not series_origins.empty:
-                actual_col = next((c for c in ['actual_value', 'actual'] if c in series_origins.columns), None)
+                actual_col = next(
+                    (
+                        c
+                        for c in ["actual_value", "actual"]
+                        if c in series_origins.columns
+                    ),
+                    None,
+                )
                 method_pairs: dict = {}
-                for method, grp in series_origins.groupby('method'):
+                for method, grp in series_origins.groupby("method"):
                     pairs = []
                     for _, row in grp.iterrows():
-                        pf = row.get('point_forecast', None)
+                        pf = row.get("point_forecast", None)
                         if pf is None:
                             continue
-                        pred = float(pf) if not isinstance(pf, (list, np.ndarray)) else float(np.array(pf).ravel()[0])
+                        pred = (
+                            float(pf)
+                            if not isinstance(pf, (list, np.ndarray))
+                            else float(np.array(pf).ravel()[0])
+                        )
                         act = None
                         if actual_col and pd.notna(row.get(actual_col)):
                             act = float(row[actual_col])
@@ -1387,12 +1672,12 @@ def _compute_metrics_from_origin(unique_id: str) -> list:
                     return _pairs_to_metrics(method_pairs)
 
     # ── Strategy B: pseudo-holdout from final forecast vs last actuals ────────
-    fc_ddf = data_cache.get('forecasts')
+    fc_ddf = data_cache.get("forecasts")
     if fc_ddf is None:
         return []
 
     fc_df = _compute(fc_ddf)
-    uid_fc = fc_df[fc_df['unique_id'] == unique_id]
+    uid_fc = fc_df[fc_df["unique_id"] == unique_id]
     if uid_fc.empty:
         return []
 
@@ -1402,8 +1687,8 @@ def _compute_metrics_from_origin(unique_id: str) -> list:
 
     method_pairs = {}
     for _, row in uid_fc.iterrows():
-        method = row['method']
-        pf = row['point_forecast']
+        method = row["method"]
+        pf = row["point_forecast"]
         if isinstance(pf, (list, np.ndarray)):
             pf_arr = np.array(pf, dtype=float)
         else:
@@ -1431,32 +1716,38 @@ def _pairs_to_metrics(method_pairs: dict) -> list:
         abs_errors = np.abs(errors)
 
         mae = float(np.mean(abs_errors))
-        rmse = float(np.sqrt(np.mean(errors ** 2)))
+        rmse = float(np.sqrt(np.mean(errors**2)))
         bias = float(np.mean(errors))
         nonzero = acts != 0
-        mape = float(np.mean(abs_errors[nonzero] / np.abs(acts[nonzero])) * 100) if nonzero.any() else None
+        mape = (
+            float(np.mean(abs_errors[nonzero] / np.abs(acts[nonzero])) * 100)
+            if nonzero.any()
+            else None
+        )
         smape_vals = 2 * abs_errors / (np.abs(preds) + np.abs(acts) + 1e-8)
         smape = float(np.mean(smape_vals) * 100)
         naive = np.abs(np.diff(acts)) if len(acts) > 1 else np.array([1.0])
         mase = float(mae / np.mean(naive)) if np.mean(naive) > 0 else None
 
-        results.append({
-            'method': method,
-            'n_windows': len(pairs),
-            'mae': mae,
-            'rmse': rmse,
-            'bias': bias,
-            'mape': mape,
-            'smape': smape,
-            'mase': mase,
-            'crps': None,
-            'winkler_score': None,
-            'coverage_50': None,
-            'coverage_80': None,
-            'coverage_90': None,
-            'coverage_95': None,
-            'quantile_loss': None,
-        })
+        results.append(
+            {
+                "method": method,
+                "n_windows": len(pairs),
+                "mae": mae,
+                "rmse": rmse,
+                "bias": bias,
+                "mape": mape,
+                "smape": smape,
+                "mase": mase,
+                "crps": None,
+                "winkler_score": None,
+                "coverage_50": None,
+                "coverage_80": None,
+                "coverage_90": None,
+                "coverage_95": None,
+                "quantile_loss": None,
+            }
+        )
 
     return results
 
@@ -1467,14 +1758,14 @@ def _compute_composite_ranking(metrics_by_method: list, weights: dict) -> dict:
         return {}
 
     # Collect values per metric key
-    metric_keys = ['mae', 'rmse', 'bias', 'coverage_90', 'mase']
+    metric_keys = ["mae", "rmse", "bias", "coverage_90", "mase"]
     values = {k: [] for k in metric_keys}
     for m in metrics_by_method:
         for k in metric_keys:
             v = m.get(k)
-            if k == 'bias' and v is not None:
+            if k == "bias" and v is not None:
                 v = abs(v)
-            if k == 'coverage_90' and v is not None:
+            if k == "coverage_90" and v is not None:
                 v = abs(v - 0.90)  # Distance from target
             values[k].append(v)
 
@@ -1486,9 +1777,9 @@ def _compute_composite_ranking(metrics_by_method: list, weights: dict) -> dict:
         for k in metric_keys:
             w = weights.get(k, 0)
             v = m.get(k)
-            if k == 'bias' and v is not None:
+            if k == "bias" and v is not None:
                 v = abs(v)
-            if k == 'coverage_90' and v is not None:
+            if k == "coverage_90" and v is not None:
                 v = abs(v - 0.90)
             col_vals = [x for x in values[k] if x is not None]
             if v is None or not col_vals:
@@ -1497,7 +1788,7 @@ def _compute_composite_ranking(metrics_by_method: list, weights: dict) -> dict:
             norm = (v - col_min) / (col_max - col_min) if col_max > col_min else 0.0
             score += w * norm
             total_w += w
-        ranking[m['method']] = round(score / total_w, 6) if total_w > 0 else None
+        ranking[m["method"]] = round(score / total_w, 6) if total_w > 0 else None
 
     return ranking
 
@@ -1507,22 +1798,33 @@ async def get_metrics(unique_id: str):
     """Get evaluation metrics for a specific time series with full metric set and composite ranking.
     Falls back to on-the-fly computation from forecasts_by_origin if backtest table has no data."""
 
-    metric_cols = ['mae', 'rmse', 'bias', 'mape', 'smape', 'mase',
-                   'crps', 'winkler_score',
-                   'coverage_50', 'coverage_80', 'coverage_90', 'coverage_95',
-                   'quantile_loss']
+    metric_cols = [
+        "mae",
+        "rmse",
+        "bias",
+        "mape",
+        "smape",
+        "mase",
+        "crps",
+        "winkler_score",
+        "coverage_50",
+        "coverage_80",
+        "coverage_90",
+        "coverage_95",
+        "quantile_loss",
+    ]
 
     metrics_by_method = []
-    source = 'database'
+    source = "database"
 
     # Try database cache first
-    if data_cache['metrics'] is not None:
-        df = _compute(data_cache['metrics'])
-        metrics_df = df[df['unique_id'] == unique_id]
+    if data_cache["metrics"] is not None:
+        df = _compute(data_cache["metrics"])
+        metrics_df = df[df["unique_id"] == unique_id]
         if not metrics_df.empty:
-            for method in metrics_df['method'].unique():
-                method_df = metrics_df[metrics_df['method'] == method]
-                entry = {'method': method, 'n_windows': len(method_df)}
+            for method in metrics_df["method"].unique():
+                method_df = metrics_df[metrics_df["method"] == method]
+                entry = {"method": method, "n_windows": len(method_df)}
                 for col in metric_cols:
                     if col in method_df.columns:
                         val = method_df[col].mean()
@@ -1534,27 +1836,34 @@ async def get_metrics(unique_id: str):
     # Fallback: compute on-the-fly from origins + actuals
     if not metrics_by_method:
         metrics_by_method = _compute_metrics_from_origin(unique_id)
-        source = 'computed'
+        source = "computed"
 
     if not metrics_by_method:
-        raise HTTPException(status_code=404, detail=f"No metrics for {unique_id} — series may have insufficient history for backtesting")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No metrics for {unique_id} — series may have insufficient history for backtesting",
+        )
 
     config = _get_config()
-    weights = config.get('best_method', {}).get('weights', {
-        'mae': 0.40, 'rmse': 0.20, 'bias': 0.15, 'coverage_90': 0.15, 'mase': 0.10
-    })
+    weights = config.get("best_method", {}).get(
+        "weights",
+        {"mae": 0.40, "rmse": 0.20, "bias": 0.15, "coverage_90": 0.15, "mase": 0.10},
+    )
 
     # Include composite ranking from best_methods if available
     ranking = None
-    if data_cache['best_methods'] is not None:
-        best_df = _compute(data_cache['best_methods'])
-        row_df = best_df[best_df['unique_id'] == unique_id]
+    if data_cache["best_methods"] is not None:
+        best_df = _compute(data_cache["best_methods"])
+        row_df = best_df[best_df["unique_id"] == unique_id]
         if not row_df.empty:
             row = row_df.iloc[0]
-            all_rankings = row.get('all_rankings', {})
+            all_rankings = row.get("all_rankings", {})
             if isinstance(all_rankings, str):
                 all_rankings = json.loads(all_rankings.replace("'", '"'))
-            ranking = {str(k): float(v) if pd.notna(v) else None for k, v in all_rankings.items()}
+            ranking = {
+                str(k): float(v) if pd.notna(v) else None
+                for k, v in all_rankings.items()
+            }
 
     # If ranking not in DB, compute it on-the-fly
     if ranking is None and metrics_by_method:
@@ -1563,27 +1872,30 @@ async def get_metrics(unique_id: str):
     # Inject composite ranking into each method's entry for convenience
     if ranking:
         for entry in metrics_by_method:
-            entry['composite_score'] = ranking.get(entry['method'])
+            entry["composite_score"] = ranking.get(entry["method"])
 
     # Derive best method from ranking if not in DB
     best_method_name = None
     if ranking:
-        best_method_name = min(ranking, key=lambda k: ranking[k] if ranking[k] is not None else float('inf'))
+        best_method_name = min(
+            ranking,
+            key=lambda k: ranking[k] if ranking[k] is not None else float("inf"),
+        )
 
     # Expose backtesting config defaults for frontend sliders
-    bt_config = config.get('forecasting', {}).get('backtesting', {})
+    bt_config = config.get("forecasting", {}).get("backtesting", {})
 
     return {
-        'unique_id': unique_id,
-        'metrics': metrics_by_method,
-        'composite_ranking': ranking,
-        'composite_weights': weights,
-        'best_method': best_method_name,
-        'source': source,
-        'backtesting_config': {
-            'backtest_horizon': bt_config.get('backtest_horizon', 60),
-            'window_size': bt_config.get('window_size', 8),
-            'n_tests': bt_config.get('n_tests', 4),
+        "unique_id": unique_id,
+        "metrics": metrics_by_method,
+        "composite_ranking": ranking,
+        "composite_weights": weights,
+        "best_method": best_method_name,
+        "source": source,
+        "backtesting_config": {
+            "backtest_horizon": bt_config.get("backtest_horizon", 60),
+            "window_size": bt_config.get("window_size", 8),
+            "n_tests": bt_config.get("n_tests", 4),
         },
     }
 
@@ -1595,48 +1907,50 @@ async def get_analytics():
 
     Returns summary statistics for dashboard.
     """
-    if data_cache['characteristics'] is None:
+    if data_cache["characteristics"] is None:
         raise HTTPException(status_code=503, detail="Data not loaded")
 
-    chars_df = _compute(data_cache['characteristics'])
+    chars_df = _compute(data_cache["characteristics"])
 
     analytics = {
-        'total_series': len(chars_df),
-        'intermittent_count': int(chars_df['is_intermittent'].sum()),
-        'seasonal_count': int(chars_df['has_seasonality'].sum()),
-        'trending_count': int(chars_df['has_trend'].sum()),
-        'complexity_distribution': chars_df['complexity_level'].value_counts().to_dict(),
-        'avg_observations': float(chars_df['n_observations'].mean()),
-        'methods_summary': {}
+        "total_series": len(chars_df),
+        "intermittent_count": int(chars_df["is_intermittent"].sum()),
+        "seasonal_count": int(chars_df["has_seasonality"].sum()),
+        "trending_count": int(chars_df["has_trend"].sum()),
+        "complexity_distribution": chars_df["complexity_level"]
+        .value_counts()
+        .to_dict(),
+        "avg_observations": float(chars_df["n_observations"].mean()),
+        "methods_summary": {},
     }
 
     # Method recommendations summary
-    if data_cache['forecasts'] is not None:
-        forecasts_df = _compute(data_cache['forecasts'])
-        method_counts = forecasts_df['method'].value_counts().to_dict()
-        analytics['methods_summary'] = method_counts
+    if data_cache["forecasts"] is not None:
+        forecasts_df = _compute(data_cache["forecasts"])
+        method_counts = forecasts_df["method"].value_counts().to_dict()
+        analytics["methods_summary"] = method_counts
 
     # Distribution types summary
-    if data_cache['distributions'] is not None:
-        dist_df = _compute(data_cache['distributions'])
-        dist_types = dist_df['distribution_type'].value_counts().to_dict()
-        analytics['distribution_types'] = dist_types
+    if data_cache["distributions"] is not None:
+        dist_df = _compute(data_cache["distributions"])
+        dist_types = dist_df["distribution_type"].value_counts().to_dict()
+        analytics["distribution_types"] = dist_types
 
     # Best method distribution
-    if data_cache['best_methods'] is not None:
-        best_df = _compute(data_cache['best_methods'])
-        best_method_counts = best_df['best_method'].value_counts().to_dict()
-        analytics['best_method_distribution'] = best_method_counts
-        analytics['best_method_total_series'] = len(best_df)
+    if data_cache["best_methods"] is not None:
+        best_df = _compute(data_cache["best_methods"])
+        best_method_counts = best_df["best_method"].value_counts().to_dict()
+        analytics["best_method_distribution"] = best_method_counts
+        analytics["best_method_total_series"] = len(best_df)
 
     # Outlier summary
-    if data_cache['outliers'] is not None:
-        outlier_df = _compute(data_cache['outliers'])
-        analytics['outlier_adjusted_count'] = int(outlier_df['unique_id'].nunique())
-        analytics['outlier_total_count'] = int(len(outlier_df))
+    if data_cache["outliers"] is not None:
+        outlier_df = _compute(data_cache["outliers"])
+        analytics["outlier_adjusted_count"] = int(outlier_df["unique_id"].nunique())
+        analytics["outlier_total_count"] = int(len(outlier_df))
     else:
-        analytics['outlier_adjusted_count'] = 0
-        analytics['outlier_total_count'] = 0
+        analytics["outlier_adjusted_count"] = 0
+        analytics["outlier_total_count"] = 0
 
     return analytics
 
@@ -1648,18 +1962,22 @@ async def get_best_methods():
 
     Returns list of {unique_id, best_method, best_score, runner_up_method}.
     """
-    if data_cache['best_methods'] is None:
+    if data_cache["best_methods"] is None:
         raise HTTPException(status_code=503, detail="Best methods data not loaded")
 
-    df = _compute(data_cache['best_methods'])
+    df = _compute(data_cache["best_methods"])
 
     results = []
     for _, row in df.iterrows():
         entry = {
-            'unique_id': str(row['unique_id']),
-            'best_method': str(row['best_method']),
-            'best_score': float(row['best_score']) if 'best_score' in row.index and pd.notna(row.get('best_score')) else None,
-            'runner_up_method': str(row['runner_up_method']) if 'runner_up_method' in row.index and pd.notna(row.get('runner_up_method')) else None
+            "unique_id": str(row["unique_id"]),
+            "best_method": str(row["best_method"]),
+            "best_score": float(row["best_score"])
+            if "best_score" in row.index and pd.notna(row.get("best_score"))
+            else None,
+            "runner_up_method": str(row["runner_up_method"])
+            if "runner_up_method" in row.index and pd.notna(row.get("runner_up_method"))
+            else None,
         }
         results.append(entry)
 
@@ -1673,39 +1991,51 @@ async def get_series_best_method(unique_id: str):
     Falls back to on-the-fly computation if not in database.
     """
     # Try database cache first
-    if data_cache['best_methods'] is not None:
-        df = _compute(data_cache['best_methods'])
-        row_df = df[df['unique_id'] == unique_id]
+    if data_cache["best_methods"] is not None:
+        df = _compute(data_cache["best_methods"])
+        row_df = df[df["unique_id"] == unique_id]
         if not row_df.empty:
             row = row_df.iloc[0]
             return {
-                'unique_id': str(row['unique_id']),
-                'best_method': str(row['best_method']),
-                'best_score': float(row['best_score']) if 'best_score' in row.index and pd.notna(row.get('best_score')) else None,
-                'runner_up_method': str(row['runner_up_method']) if 'runner_up_method' in row.index and pd.notna(row.get('runner_up_method')) else None
+                "unique_id": str(row["unique_id"]),
+                "best_method": str(row["best_method"]),
+                "best_score": float(row["best_score"])
+                if "best_score" in row.index and pd.notna(row.get("best_score"))
+                else None,
+                "runner_up_method": str(row["runner_up_method"])
+                if "runner_up_method" in row.index
+                and pd.notna(row.get("runner_up_method"))
+                else None,
             }
 
     # Fallback: compute from origin data
     metrics_list = _compute_metrics_from_origin(unique_id)
     if not metrics_list:
-        raise HTTPException(status_code=404, detail=f"No best method data for {unique_id}")
+        raise HTTPException(
+            status_code=404, detail=f"No best method data for {unique_id}"
+        )
 
     config = _get_config()
-    weights = config.get('best_method', {}).get('weights', {
-        'mae': 0.40, 'rmse': 0.20, 'bias': 0.15, 'coverage_90': 0.15, 'mase': 0.10
-    })
+    weights = config.get("best_method", {}).get(
+        "weights",
+        {"mae": 0.40, "rmse": 0.20, "bias": 0.15, "coverage_90": 0.15, "mase": 0.10},
+    )
     ranking = _compute_composite_ranking(metrics_list, weights)
     if not ranking:
-        raise HTTPException(status_code=404, detail=f"Could not compute best method for {unique_id}")
+        raise HTTPException(
+            status_code=404, detail=f"Could not compute best method for {unique_id}"
+        )
 
-    sorted_methods = sorted(ranking, key=lambda k: ranking[k] if ranking[k] is not None else float('inf'))
+    sorted_methods = sorted(
+        ranking, key=lambda k: ranking[k] if ranking[k] is not None else float("inf")
+    )
     best = sorted_methods[0]
     runner_up = sorted_methods[1] if len(sorted_methods) > 1 else None
     return {
-        'unique_id': unique_id,
-        'best_method': best,
-        'best_score': ranking.get(best),
-        'runner_up_method': runner_up,
+        "unique_id": unique_id,
+        "best_method": best,
+        "best_score": ranking.get(best),
+        "runner_up_method": runner_up,
     }
 
 
@@ -1716,44 +2046,48 @@ async def get_series_outliers(unique_id: str):
 
     Returns detected outliers with original vs corrected values.
     """
-    if data_cache['outliers'] is None:
+    if data_cache["outliers"] is None:
         return {
-            'unique_id': unique_id,
-            'n_outliers': 0,
-            'detection_method': None,
-            'correction_method': None,
-            'outliers': []
+            "unique_id": unique_id,
+            "n_outliers": 0,
+            "detection_method": None,
+            "correction_method": None,
+            "outliers": [],
         }
 
-    df = _compute(data_cache['outliers'])
-    series_outliers = df[df['unique_id'] == unique_id]
+    df = _compute(data_cache["outliers"])
+    series_outliers = df[df["unique_id"] == unique_id]
 
     if series_outliers.empty:
         return {
-            'unique_id': unique_id,
-            'n_outliers': 0,
-            'detection_method': None,
-            'correction_method': None,
-            'outliers': []
+            "unique_id": unique_id,
+            "n_outliers": 0,
+            "detection_method": None,
+            "correction_method": None,
+            "outliers": [],
         }
 
     outlier_list = []
     for _, row in series_outliers.iterrows():
-        outlier_list.append({
-            'date': pd.Timestamp(row['date']).strftime('%Y-%m-%d') if pd.notna(row['date']) else str(row['date']),
-            'original_value': float(row['original_value']),
-            'corrected_value': float(row['corrected_value']),
-            'z_score': float(row['z_score']),
-            'lower_bound': float(row['lower_bound']),
-            'upper_bound': float(row['upper_bound']),
-        })
+        outlier_list.append(
+            {
+                "date": pd.Timestamp(row["date"]).strftime("%Y-%m-%d")
+                if pd.notna(row["date"])
+                else str(row["date"]),
+                "original_value": float(row["original_value"]),
+                "corrected_value": float(row["corrected_value"]),
+                "z_score": float(row["z_score"]),
+                "lower_bound": float(row["lower_bound"]),
+                "upper_bound": float(row["upper_bound"]),
+            }
+        )
 
     return {
-        'unique_id': unique_id,
-        'n_outliers': len(outlier_list),
-        'detection_method': str(series_outliers.iloc[0]['detection_method']),
-        'correction_method': str(series_outliers.iloc[0]['correction_method']),
-        'outliers': outlier_list
+        "unique_id": unique_id,
+        "n_outliers": len(outlier_list),
+        "detection_method": str(series_outliers.iloc[0]["detection_method"]),
+        "correction_method": str(series_outliers.iloc[0]["correction_method"]),
+        "outliers": outlier_list,
     }
 
 
@@ -1764,22 +2098,26 @@ async def get_forecast_origins(unique_id: str):
 
     Returns {unique_id, origins: [list of date strings]}.
     """
-    if data_cache['forecasts_by_origin'] is None:
-        raise HTTPException(status_code=503, detail="Forecasts by origin data not loaded")
+    if data_cache["forecasts_by_origin"] is None:
+        raise HTTPException(
+            status_code=503, detail="Forecasts by origin data not loaded"
+        )
 
-    df = _compute(data_cache['forecasts_by_origin'])
-    series_df = df[df['unique_id'] == unique_id]
+    df = _compute(data_cache["forecasts_by_origin"])
+    series_df = df[df["unique_id"] == unique_id]
 
     if series_df.empty:
-        raise HTTPException(status_code=404, detail=f"No forecast origins for {unique_id}")
+        raise HTTPException(
+            status_code=404, detail=f"No forecast origins for {unique_id}"
+        )
 
     # Extract unique origin dates
-    if 'forecast_origin' in series_df.columns:
-        origin_col = 'forecast_origin'
-    elif 'origin' in series_df.columns:
-        origin_col = 'origin'
-    elif 'origin_date' in series_df.columns:
-        origin_col = 'origin_date'
+    if "forecast_origin" in series_df.columns:
+        origin_col = "forecast_origin"
+    elif "origin" in series_df.columns:
+        origin_col = "origin"
+    elif "origin_date" in series_df.columns:
+        origin_col = "origin_date"
     else:
         raise HTTPException(status_code=500, detail="Origin column not found in data")
 
@@ -1787,14 +2125,11 @@ async def get_forecast_origins(unique_id: str):
 
     # Convert to string dates
     if pd.api.types.is_datetime64_any_dtype(origins):
-        origin_strings = origins.dt.strftime('%Y-%m-%d').tolist()
+        origin_strings = origins.dt.strftime("%Y-%m-%d").tolist()
     else:
         origin_strings = [str(o) for o in origins.tolist()]
 
-    return {
-        'unique_id': unique_id,
-        'origins': origin_strings
-    }
+    return {"unique_id": unique_id, "origins": origin_strings}
 
 
 @app.get("/api/forecasts/{unique_id}/origins/{origin_date}")
@@ -1804,68 +2139,77 @@ async def get_forecasts_at_origin(unique_id: str, origin_date: str):
 
     Returns {unique_id, origin: date, forecasts: [{method, point_forecast: [values], actual: [values]}]}.
     """
-    if data_cache['forecasts_by_origin'] is None:
-        raise HTTPException(status_code=503, detail="Forecasts by origin data not loaded")
+    if data_cache["forecasts_by_origin"] is None:
+        raise HTTPException(
+            status_code=503, detail="Forecasts by origin data not loaded"
+        )
 
-    df = _compute(data_cache['forecasts_by_origin'])
+    df = _compute(data_cache["forecasts_by_origin"])
 
     # Determine origin column name
-    if 'forecast_origin' in df.columns:
-        origin_col = 'forecast_origin'
-    elif 'origin' in df.columns:
-        origin_col = 'origin'
-    elif 'origin_date' in df.columns:
-        origin_col = 'origin_date'
+    if "forecast_origin" in df.columns:
+        origin_col = "forecast_origin"
+    elif "origin" in df.columns:
+        origin_col = "origin"
+    elif "origin_date" in df.columns:
+        origin_col = "origin_date"
     else:
         raise HTTPException(status_code=500, detail="Origin column not found in data")
 
     # Filter by unique_id
-    series_df = df[df['unique_id'] == unique_id]
+    series_df = df[df["unique_id"] == unique_id]
     if series_df.empty:
-        raise HTTPException(status_code=404, detail=f"No forecast origins for {unique_id}")
+        raise HTTPException(
+            status_code=404, detail=f"No forecast origins for {unique_id}"
+        )
 
     # Filter by origin date - handle both datetime and string columns
     if pd.api.types.is_datetime64_any_dtype(series_df[origin_col]):
         try:
             origin_dt = pd.Timestamp(origin_date)
         except Exception:
-            raise HTTPException(status_code=400, detail=f"Invalid date format: {origin_date}")
+            raise HTTPException(
+                status_code=400, detail=f"Invalid date format: {origin_date}"
+            )
         origin_df = series_df[series_df[origin_col] == origin_dt]
     else:
         origin_df = series_df[series_df[origin_col].astype(str) == origin_date]
 
     if origin_df.empty:
-        raise HTTPException(status_code=404, detail=f"No forecasts at origin {origin_date} for {unique_id}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No forecasts at origin {origin_date} for {unique_id}",
+        )
 
     # Group by method, aggregate horizon steps into arrays
     forecasts = []
-    has_horizon = 'horizon_step' in origin_df.columns
-    actual_col = 'actual_value' if 'actual_value' in origin_df.columns else 'actual'
+    has_horizon = "horizon_step" in origin_df.columns
+    actual_col = "actual_value" if "actual_value" in origin_df.columns else "actual"
 
-    for method, group in origin_df.sort_values('horizon_step' if has_horizon else 'method').groupby('method'):
+    for method, group in origin_df.sort_values(
+        "horizon_step" if has_horizon else "method"
+    ).groupby("method"):
         if has_horizon:
-            group = group.sort_values('horizon_step')
+            group = group.sort_values("horizon_step")
 
         pf_values = []
         act_values = []
         for _, row in group.iterrows():
-            if 'point_forecast' in row.index:
-                pf = row['point_forecast']
-                pf_values.append(float(pf) if not isinstance(pf, (list, np.ndarray)) else float(pf[0]))
+            if "point_forecast" in row.index:
+                pf = row["point_forecast"]
+                pf_values.append(
+                    float(pf)
+                    if not isinstance(pf, (list, np.ndarray))
+                    else float(pf[0])
+                )
             if actual_col in row.index and pd.notna(row[actual_col]):
                 act_values.append(float(row[actual_col]))
 
-        forecasts.append({
-            'method': str(method),
-            'point_forecast': pf_values,
-            'actual': act_values
-        })
+        forecasts.append(
+            {"method": str(method), "point_forecast": pf_values, "actual": act_values}
+        )
 
-    return {
-        'unique_id': unique_id,
-        'origin': origin_date,
-        'forecasts': forecasts
-    }
+    return {"unique_id": unique_id, "origin": origin_date, "forecasts": forecasts}
 
 
 @app.get("/api/series/{unique_id}/forecast-evolution")
@@ -1875,25 +2219,29 @@ async def get_forecast_evolution(unique_id: str):
 
     Returns {unique_id, evolution: [{origin, forecasts: [{method, point_forecast, actual}]}]}.
     """
-    if data_cache['forecasts_by_origin'] is None:
-        raise HTTPException(status_code=503, detail="Forecasts by origin data not loaded")
+    if data_cache["forecasts_by_origin"] is None:
+        raise HTTPException(
+            status_code=503, detail="Forecasts by origin data not loaded"
+        )
 
-    df = _compute(data_cache['forecasts_by_origin'])
+    df = _compute(data_cache["forecasts_by_origin"])
 
     # Determine origin column name
-    if 'forecast_origin' in df.columns:
-        origin_col = 'forecast_origin'
-    elif 'origin' in df.columns:
-        origin_col = 'origin'
-    elif 'origin_date' in df.columns:
-        origin_col = 'origin_date'
+    if "forecast_origin" in df.columns:
+        origin_col = "forecast_origin"
+    elif "origin" in df.columns:
+        origin_col = "origin"
+    elif "origin_date" in df.columns:
+        origin_col = "origin_date"
     else:
         raise HTTPException(status_code=500, detail="Origin column not found in data")
 
-    series_df = df[df['unique_id'] == unique_id]
+    series_df = df[df["unique_id"] == unique_id]
 
     if series_df.empty:
-        raise HTTPException(status_code=404, detail=f"No forecast evolution data for {unique_id}")
+        raise HTTPException(
+            status_code=404, detail=f"No forecast evolution data for {unique_id}"
+        )
 
     # Group by origin and build evolution list
     evolution = []
@@ -1902,41 +2250,45 @@ async def get_forecast_evolution(unique_id: str):
     for origin_val in origins_sorted:
         if pd.api.types.is_datetime64_any_dtype(series_df[origin_col]):
             origin_rows = series_df[series_df[origin_col] == origin_val]
-            origin_str = origin_val.strftime('%Y-%m-%d')
+            origin_str = origin_val.strftime("%Y-%m-%d")
         else:
             origin_rows = series_df[series_df[origin_col] == origin_val]
             origin_str = str(origin_val)
 
-        has_horizon = 'horizon_step' in origin_rows.columns
-        actual_col = 'actual_value' if 'actual_value' in origin_rows.columns else 'actual'
+        has_horizon = "horizon_step" in origin_rows.columns
+        actual_col = (
+            "actual_value" if "actual_value" in origin_rows.columns else "actual"
+        )
 
         forecasts = []
-        for method, group in origin_rows.sort_values('horizon_step' if has_horizon else 'method').groupby('method'):
+        for method, group in origin_rows.sort_values(
+            "horizon_step" if has_horizon else "method"
+        ).groupby("method"):
             if has_horizon:
-                group = group.sort_values('horizon_step')
+                group = group.sort_values("horizon_step")
             pf_values = []
             act_values = []
             for _, row in group.iterrows():
-                if 'point_forecast' in row.index:
-                    pf = row['point_forecast']
-                    pf_values.append(float(pf) if not isinstance(pf, (list, np.ndarray)) else float(pf[0]))
+                if "point_forecast" in row.index:
+                    pf = row["point_forecast"]
+                    pf_values.append(
+                        float(pf)
+                        if not isinstance(pf, (list, np.ndarray))
+                        else float(pf[0])
+                    )
                 if actual_col in row.index and pd.notna(row[actual_col]):
                     act_values.append(float(row[actual_col]))
-            forecasts.append({
-                'method': str(method),
-                'point_forecast': pf_values,
-                'actual': act_values
-            })
+            forecasts.append(
+                {
+                    "method": str(method),
+                    "point_forecast": pf_values,
+                    "actual": act_values,
+                }
+            )
 
-        evolution.append({
-            'origin': origin_str,
-            'forecasts': forecasts
-        })
+        evolution.append({"origin": origin_str, "forecasts": forecasts})
 
-    return {
-        'unique_id': unique_id,
-        'evolution': evolution
-    }
+    return {"unique_id": unique_id, "evolution": evolution}
 
 
 @app.get("/api/series/{unique_id}/forecast-convergence")
@@ -1973,31 +2325,35 @@ async def get_forecast_convergence(unique_id: str, method: Optional[str] = None)
           ]
         }
     """
-    if data_cache['forecasts_by_origin'] is None:
-        raise HTTPException(status_code=503, detail="Forecasts by origin data not loaded")
+    if data_cache["forecasts_by_origin"] is None:
+        raise HTTPException(
+            status_code=503, detail="Forecasts by origin data not loaded"
+        )
 
-    df = _compute(data_cache['forecasts_by_origin'])
+    df = _compute(data_cache["forecasts_by_origin"])
 
     # Determine column names
-    if 'forecast_origin' in df.columns:
-        origin_col = 'forecast_origin'
-    elif 'origin' in df.columns:
-        origin_col = 'origin'
-    elif 'origin_date' in df.columns:
-        origin_col = 'origin_date'
+    if "forecast_origin" in df.columns:
+        origin_col = "forecast_origin"
+    elif "origin" in df.columns:
+        origin_col = "origin"
+    elif "origin_date" in df.columns:
+        origin_col = "origin_date"
     else:
         raise HTTPException(status_code=500, detail="Origin column not found in data")
 
-    actual_col = 'actual_value' if 'actual_value' in df.columns else 'actual'
-    has_horizon = 'horizon_step' in df.columns
+    actual_col = "actual_value" if "actual_value" in df.columns else "actual"
+    has_horizon = "horizon_step" in df.columns
 
-    series_df = df[df['unique_id'] == unique_id].copy()
+    series_df = df[df["unique_id"] == unique_id].copy()
     if series_df.empty:
-        raise HTTPException(status_code=404, detail=f"No forecast convergence data for {unique_id}")
+        raise HTTPException(
+            status_code=404, detail=f"No forecast convergence data for {unique_id}"
+        )
 
     # Filter by method if requested
     if method:
-        series_df = series_df[series_df['method'] == method]
+        series_df = series_df[series_df["method"] == method]
         if series_df.empty:
             raise HTTPException(status_code=404, detail=f"No data for method {method}")
 
@@ -2007,29 +2363,37 @@ async def get_forecast_convergence(unique_id: str, method: Optional[str] = None)
 
     # Compute target_date = origin + horizon_step months
     if has_horizon:
+
         def _add_months(origin_ts, steps):
             try:
-                return (origin_ts + pd.DateOffset(months=int(steps))).strftime('%Y-%m-%d')
+                return (origin_ts + pd.DateOffset(months=int(steps))).strftime(
+                    "%Y-%m-%d"
+                )
             except Exception:
                 return None
-        series_df['target_date'] = series_df.apply(
-            lambda r: _add_months(r[origin_col], r['horizon_step']), axis=1
+
+        series_df["target_date"] = series_df.apply(
+            lambda r: _add_months(r[origin_col], r["horizon_step"]), axis=1
         )
-        series_df = series_df.dropna(subset=['target_date'])
+        series_df = series_df.dropna(subset=["target_date"])
     else:
         # Without horizon_step, we can't compute target dates
-        raise HTTPException(status_code=500, detail="horizon_step column required for convergence view")
+        raise HTTPException(
+            status_code=500, detail="horizon_step column required for convergence view"
+        )
 
     if series_df.empty:
-        raise HTTPException(status_code=404, detail=f"No convergence data after target_date computation for {unique_id}")
+        raise HTTPException(
+            status_code=404,
+            detail=f"No convergence data after target_date computation for {unique_id}",
+        )
 
     # Get unique methods present
-    methods_list = sorted(series_df['method'].unique().tolist())
+    methods_list = sorted(series_df["method"].unique().tolist())
 
     # Group by target_date (string, so groupby is reliable)
     targets = []
-    for target_str, tgroup in series_df.groupby('target_date'):
-
+    for target_str, tgroup in series_df.groupby("target_date"):
         # Get actual value (should be same across all rows for same target)
         actual_val = None
         if actual_col in tgroup.columns:
@@ -2040,45 +2404,45 @@ async def get_forecast_convergence(unique_id: str, method: Optional[str] = None)
         # Group by origin within this target_date
         origin_entries = []
         for origin_val, ogroup in tgroup.groupby(origin_col):
-            origin_str = origin_val.strftime('%Y-%m-%d') if hasattr(origin_val, 'strftime') else str(origin_val)
+            origin_str = (
+                origin_val.strftime("%Y-%m-%d")
+                if hasattr(origin_val, "strftime")
+                else str(origin_val)
+            )
 
             # Calculate months ahead
-            months_ahead = int(ogroup['horizon_step'].iloc[0]) if has_horizon else None
+            months_ahead = int(ogroup["horizon_step"].iloc[0]) if has_horizon else None
 
             # Collect forecast values per method
             method_forecasts = {}
             for _, row in ogroup.iterrows():
-                m = str(row['method'])
-                pf = row.get('point_forecast', None)
+                m = str(row["method"])
+                pf = row.get("point_forecast", None)
                 if pf is not None:
                     if isinstance(pf, (list, np.ndarray)):
                         method_forecasts[m] = float(pf[0])
                     else:
                         method_forecasts[m] = float(pf)
 
-            origin_entries.append({
-                'origin': origin_str,
-                'months_ahead': months_ahead,
-                'forecasts': method_forecasts
-            })
+            origin_entries.append(
+                {
+                    "origin": origin_str,
+                    "months_ahead": months_ahead,
+                    "forecasts": method_forecasts,
+                }
+            )
 
         # Sort origins chronologically
-        origin_entries.sort(key=lambda e: e['origin'])
+        origin_entries.sort(key=lambda e: e["origin"])
 
-        targets.append({
-            'target_date': target_str,
-            'actual': actual_val,
-            'origins': origin_entries
-        })
+        targets.append(
+            {"target_date": target_str, "actual": actual_val, "origins": origin_entries}
+        )
 
     # Sort targets chronologically
-    targets.sort(key=lambda t: t['target_date'])
+    targets.sort(key=lambda t: t["target_date"])
 
-    return {
-        'unique_id': unique_id,
-        'methods': methods_list,
-        'targets': targets
-    }
+    return {"unique_id": unique_id, "methods": methods_list, "targets": targets}
 
 
 @app.get("/api/series/{unique_id}/vega-spec")
@@ -2089,11 +2453,11 @@ async def get_vega_spec(unique_id: str):
     This returns a complete Vega spec ready to render in React.
     """
     # Get historical data
-    if data_cache['time_series'] is None:
+    if data_cache["time_series"] is None:
         raise HTTPException(status_code=503, detail="Data not loaded")
 
-    df = _compute(data_cache['time_series'])
-    series_df = df[df['unique_id'] == unique_id].sort_values('date')
+    df = _compute(data_cache["time_series"])
+    series_df = df[df["unique_id"] == unique_id].sort_values("date")
 
     if series_df.empty:
         raise HTTPException(status_code=404, detail=f"Series {unique_id} not found")
@@ -2101,34 +2465,42 @@ async def get_vega_spec(unique_id: str):
     # Prepare historical data
     historical_data = []
     for _, row in series_df.iterrows():
-        historical_data.append({
-            'date': row['date'].strftime('%Y-%m-%d'),
-            'value': float(row['y']),
-            'type': 'actual'
-        })
+        historical_data.append(
+            {
+                "date": row["date"].strftime("%Y-%m-%d"),
+                "value": float(row["y"]),
+                "type": "actual",
+            }
+        )
 
     # Get forecasts
     forecast_data = []
-    if data_cache['forecasts'] is not None:
-        forecasts_df = _compute(data_cache['forecasts'])
-        series_forecasts = forecasts_df[forecasts_df['unique_id'] == unique_id]
+    if data_cache["forecasts"] is not None:
+        forecasts_df = _compute(data_cache["forecasts"])
+        series_forecasts = forecasts_df[forecasts_df["unique_id"] == unique_id]
 
         if not series_forecasts.empty:
             # Add forecast horizon dates
-            last_date = series_df['date'].max()
-            forecast_dates = pd.date_range(start=last_date, periods=len(series_forecasts.iloc[0]['point_forecast']) + 1, freq='ME')[1:]
+            last_date = series_df["date"].max()
+            forecast_dates = pd.date_range(
+                start=last_date,
+                periods=len(series_forecasts.iloc[0]["point_forecast"]) + 1,
+                freq="ME",
+            )[1:]
 
             for _, forecast_row in series_forecasts.iterrows():
-                method = forecast_row['method']
-                point_forecast = forecast_row['point_forecast']
+                method = forecast_row["method"]
+                point_forecast = forecast_row["point_forecast"]
 
                 for i, (date, value) in enumerate(zip(forecast_dates, point_forecast)):
-                    forecast_data.append({
-                        'date': date.strftime('%Y-%m-%d'),
-                        'value': float(value),
-                        'type': 'forecast',
-                        'method': method
-                    })
+                    forecast_data.append(
+                        {
+                            "date": date.strftime("%Y-%m-%d"),
+                            "value": float(value),
+                            "type": "forecast",
+                            "method": method,
+                        }
+                    )
 
     # Vega-Lite specification
     vega_spec = {
@@ -2136,41 +2508,25 @@ async def get_vega_spec(unique_id: str):
         "title": f"Time Series: {unique_id}",
         "width": 800,
         "height": 400,
-        "data": {
-            "values": historical_data + forecast_data
-        },
-        "mark": {
-            "type": "line",
-            "point": True
-        },
+        "data": {"values": historical_data + forecast_data},
+        "mark": {"type": "line", "point": True},
         "encoding": {
-            "x": {
-                "field": "date",
-                "type": "temporal",
-                "title": "Date"
-            },
-            "y": {
-                "field": "value",
-                "type": "quantitative",
-                "title": "Value"
-            },
+            "x": {"field": "date", "type": "temporal", "title": "Date"},
+            "y": {"field": "value", "type": "quantitative", "title": "Value"},
             "color": {
                 "field": "type",
                 "type": "nominal",
                 "scale": {
                     "domain": ["actual", "forecast"],
-                    "range": ["#1f77b4", "#ff7f0e"]
-                }
+                    "range": ["#1f77b4", "#ff7f0e"],
+                },
             },
             "strokeDash": {
                 "field": "type",
                 "type": "nominal",
-                "scale": {
-                    "domain": ["actual", "forecast"],
-                    "range": [[1, 0], [5, 5]]
-                }
-            }
-        }
+                "scale": {"domain": ["actual", "forecast"], "range": [[1, 0], [5, 5]]},
+            },
+        },
     }
 
     return vega_spec
@@ -2187,29 +2543,46 @@ async def get_sparklines(unique_ids: List[str] = Body(...)):
     Get lightweight sparkline data for a batch of series.
     Returns last 12 historical values + first 12 forecast values (best method).
     """
-    if data_cache['time_series'] is None:
+    if data_cache["time_series"] is None:
         raise HTTPException(status_code=503, detail="Data not loaded")
 
-    ts_df = _compute(data_cache['time_series'])
-    forecasts_df = _compute(data_cache['forecasts']) if data_cache.get('forecasts') is not None else None
-    best_df = _compute(data_cache['best_methods']) if data_cache.get('best_methods') is not None else None
+    ts_df = _compute(data_cache["time_series"])
+    forecasts_df = (
+        _compute(data_cache["forecasts"])
+        if data_cache.get("forecasts") is not None
+        else None
+    )
+    best_df = (
+        _compute(data_cache["best_methods"])
+        if data_cache.get("best_methods") is not None
+        else None
+    )
 
     # Build best-method lookup
     best_method_map = {}
     if best_df is not None:
         for _, row in best_df.iterrows():
-            best_method_map[row['unique_id']] = str(row['best_method'])
+            best_method_map[row["unique_id"]] = str(row["best_method"])
 
     def monthly_to_weekly(dates, values, n_months=12):
         """Interpolate monthly values to weekly resolution for smoother sparklines."""
         import numpy as np
+
         if len(dates) == 0 or len(values) == 0:
             return []
         # Take last n_months
         dates = dates[-n_months:]
         values = values[-n_months:]
         # Convert dates to ordinal for interpolation
-        ordinals = np.array([d.toordinal() if hasattr(d, 'toordinal') else pd.Timestamp(d).toordinal() for d in dates], dtype=float)
+        ordinals = np.array(
+            [
+                d.toordinal()
+                if hasattr(d, "toordinal")
+                else pd.Timestamp(d).toordinal()
+                for d in dates
+            ],
+            dtype=float,
+        )
         vals = np.array(values, dtype=float)
         # Build weekly grid from first to last date
         start_ord = int(ordinals[0])
@@ -2223,6 +2596,7 @@ async def get_sparklines(unique_ids: List[str] = Body(...)):
     def forecast_to_weekly(last_date, fc_values, n_months=12):
         """Spread monthly forecast values to weekly resolution."""
         import numpy as np
+
         if not fc_values:
             return []
         fc_values = fc_values[:n_months]
@@ -2233,7 +2607,9 @@ async def get_sparklines(unique_ids: List[str] = Body(...)):
             fc_dates.append((last_ts + pd.DateOffset(months=i + 1)).toordinal())
         start_ord = last_ts.toordinal()
         end_ord = fc_dates[-1]
-        weekly_ords = np.arange(start_ord, end_ord + 1, 7)[1:]  # skip first (belongs to historical)
+        weekly_ords = np.arange(start_ord, end_ord + 1, 7)[
+            1:
+        ]  # skip first (belongs to historical)
         if len(weekly_ords) == 0:
             return [float(v) for v in fc_values]
         # Include last historical ordinal as anchor at fc_values[0] entry
@@ -2245,35 +2621,37 @@ async def get_sparklines(unique_ids: List[str] = Body(...)):
     result = {}
     for uid in unique_ids:
         # Historical: last 12 months → interpolated to weekly
-        series_rows = ts_df[ts_df['unique_id'] == uid].sort_values('date')
+        series_rows = ts_df[ts_df["unique_id"] == uid].sort_values("date")
         if series_rows.empty:
             continue
-        hist_dates = series_rows['date'].tolist()
-        hist_values = series_rows['y'].tolist()
+        hist_dates = series_rows["date"].tolist()
+        hist_values = series_rows["y"].tolist()
         hist_weekly = monthly_to_weekly(hist_dates, hist_values, n_months=12)
 
         # Forecast: first 12 months from best method → interpolated to weekly
         fc_weekly = []
         if forecasts_df is not None:
-            uid_forecasts = forecasts_df[forecasts_df['unique_id'] == uid]
+            uid_forecasts = forecasts_df[forecasts_df["unique_id"] == uid]
             if not uid_forecasts.empty:
                 best = best_method_map.get(uid)
                 if best:
-                    method_fc = uid_forecasts[uid_forecasts['method'] == best]
+                    method_fc = uid_forecasts[uid_forecasts["method"] == best]
                     if method_fc.empty:
                         method_fc = uid_forecasts.iloc[[0]]
                 else:
                     method_fc = uid_forecasts.iloc[[0]]
 
-                pf = method_fc.iloc[0]['point_forecast']
+                pf = method_fc.iloc[0]["point_forecast"]
                 if isinstance(pf, (list, np.ndarray)):
                     last_date = hist_dates[-1] if hist_dates else None
                     if last_date is not None:
-                        fc_weekly = forecast_to_weekly(last_date, [float(v) for v in pf[:12]])
+                        fc_weekly = forecast_to_weekly(
+                            last_date, [float(v) for v in pf[:12]]
+                        )
 
         result[uid] = {
-            'historical': hist_weekly,
-            'forecast': fc_weekly,
+            "historical": hist_weekly,
+            "forecast": fc_weekly,
         }
 
     return result
@@ -2284,26 +2662,28 @@ async def get_method_explanation(unique_id: str):
     """
     Explain why each candidate method was included or excluded for this series.
     """
-    if data_cache['characteristics'] is None:
+    if data_cache["characteristics"] is None:
         raise HTTPException(status_code=503, detail="Characteristics not loaded")
 
-    chars_df = _compute(data_cache['characteristics'])
-    char_row = chars_df[chars_df['unique_id'] == unique_id]
+    chars_df = _compute(data_cache["characteristics"])
+    char_row = chars_df[chars_df["unique_id"] == unique_id]
     if char_row.empty:
-        raise HTTPException(status_code=404, detail=f"No characteristics for {unique_id}")
+        raise HTTPException(
+            status_code=404, detail=f"No characteristics for {unique_id}"
+        )
 
     char = char_row.iloc[0]
     config = _get_config()
-    method_sel = config.get('forecasting', {}).get('method_selection', {})
-    sufficiency = config.get('characterization', {}).get('data_sufficiency', {})
+    method_sel = config.get("forecasting", {}).get("method_selection", {})
+    sufficiency = config.get("characterization", {}).get("data_sufficiency", {})
 
-    n_obs = int(char.get('n_observations', 0))
-    is_intermittent = bool(char.get('is_intermittent', False))
-    has_seasonality = bool(char.get('has_seasonality', False))
-    complexity_level = str(char.get('complexity_level', 'low'))
-    sparse_obs_per_year = sufficiency.get('sparse_obs_per_year', 5)
-    min_for_ml = sufficiency.get('min_for_ml', 100)
-    min_for_dl = sufficiency.get('min_for_deep_learning', 200)
+    n_obs = int(char.get("n_observations", 0))
+    is_intermittent = bool(char.get("is_intermittent", False))
+    has_seasonality = bool(char.get("has_seasonality", False))
+    complexity_level = str(char.get("complexity_level", "low"))
+    sparse_obs_per_year = sufficiency.get("sparse_obs_per_year", 5)
+    min_for_ml = sufficiency.get("min_for_ml", 100)
+    min_for_dl = sufficiency.get("min_for_deep_learning", 200)
     # Compute dynamically from current config so UI stays correct even before
     # the user re-runs characterisation (which updates the stored DB booleans).
     sufficient_ml = n_obs >= min_for_ml
@@ -2311,8 +2691,8 @@ async def get_method_explanation(unique_id: str):
 
     # Sparse: fewer than sparse_obs_per_year observations per year on average
     try:
-        date_start = pd.Timestamp(str(char.get('date_range_start', '')))
-        date_end   = pd.Timestamp(str(char.get('date_range_end', '')))
+        date_start = pd.Timestamp(str(char.get("date_range_start", "")))
+        date_end = pd.Timestamp(str(char.get("date_range_end", "")))
         span_years = max((date_end - date_start).days / 365.25, 1 / 12)
         obs_per_year = n_obs / span_years
         is_sparse = obs_per_year < sparse_obs_per_year
@@ -2321,56 +2701,56 @@ async def get_method_explanation(unique_id: str):
 
     # Determine which selection category was used
     if is_sparse:
-        category = 'sparse_data'
+        category = "sparse_data"
         category_reason = (
             f"Series has only {obs_per_year:.1f} observations/year "
             f"(threshold: < {sparse_obs_per_year} obs/year)"
         )
     elif is_intermittent:
-        category = 'intermittent'
+        category = "intermittent"
         category_reason = f"Series classified as intermittent (zero_ratio={char.get('zero_ratio', 0):.2f}, ADI={char.get('adi', 0):.2f})"
-    elif complexity_level == 'high':
-        category = 'complex'
+    elif complexity_level == "high":
+        category = "complex"
         category_reason = f"Series classified as high complexity (score={char.get('complexity_score', 0):.2f})"
     elif has_seasonality:
-        category = 'seasonal'
+        category = "seasonal"
         category_reason = f"Series has detected seasonality (strength={char.get('seasonal_strength', 0):.2f})"
     else:
-        category = 'standard'
+        category = "standard"
         category_reason = "Standard non-seasonal, non-intermittent series"
 
     # Get candidate methods from the category
     candidate_methods = list(method_sel.get(category, []))
 
     # All possible methods in the system
-    ml_methods = {'LightGBM', 'XGBoost'}
-    dl_methods = {'NHITS', 'NBEATS', 'PatchTST', 'TFT', 'DeepAR'}
-    all_stat = set(config.get('forecasting', {}).get('statsforecast_models', []))
-    all_neural = set(config.get('forecasting', {}).get('neuralforecast_models', []))
-    all_ml = set(config.get('forecasting', {}).get('ml_models', []))
-    all_methods = all_stat | all_neural | all_ml | {'TimesFM'}
+    ml_methods = {"LightGBM", "XGBoost"}
+    dl_methods = {"NHITS", "NBEATS", "PatchTST", "TFT", "DeepAR"}
+    all_stat = set(config.get("forecasting", {}).get("statsforecast_models", []))
+    all_neural = set(config.get("forecasting", {}).get("neuralforecast_models", []))
+    all_ml = set(config.get("forecasting", {}).get("ml_models", []))
+    all_methods = all_stat | all_neural | all_ml | {"TimesFM"}
 
     # Methods that were actually forecasted
     forecasted_methods = set()
-    if data_cache['forecasts'] is not None:
-        fc_pdf = _compute(data_cache['forecasts'])
-        uid_fc = fc_pdf[fc_pdf['unique_id'] == unique_id]
-        forecasted_methods = set(uid_fc['method'].unique())
+    if data_cache["forecasts"] is not None:
+        fc_pdf = _compute(data_cache["forecasts"])
+        uid_fc = fc_pdf[fc_pdf["unique_id"] == unique_id]
+        forecasted_methods = set(uid_fc["method"].unique())
 
     # Check which methods have valid (non-null) backtest metrics
     methods_with_valid_metrics = set()
     methods_with_null_metrics = set()
-    if data_cache['metrics'] is not None:
-        met_pdf = _compute(data_cache['metrics'])
-        uid_met = met_pdf[met_pdf['unique_id'] == unique_id]
-        for meth_name, grp in uid_met.groupby('method'):
+    if data_cache["metrics"] is not None:
+        met_pdf = _compute(data_cache["metrics"])
+        uid_met = met_pdf[met_pdf["unique_id"] == unique_id]
+        for meth_name, grp in uid_met.groupby("method"):
             # Check if at least one row has non-null MAE
-            if grp['mae'].notna().any():
+            if grp["mae"].notna().any():
                 methods_with_valid_metrics.add(meth_name)
             else:
                 methods_with_null_metrics.add(meth_name)
 
-    horizon = config.get('forecasting', {}).get('horizon', 52)
+    horizon = config.get("forecasting", {}).get("horizon", 52)
 
     included = []
     excluded = []
@@ -2381,31 +2761,34 @@ async def get_method_explanation(unique_id: str):
         if not in_candidate:
             # Method not in the selected category
             reason = f"Not in '{category}' method pool — {category_reason}"
-            excluded.append({'method': method, 'reason': reason})
+            excluded.append({"method": method, "reason": reason})
             continue
 
         # Check data sufficiency filters
         if method in dl_methods and not sufficient_dl:
             reason = f"Requires >= {min_for_dl} observations for deep learning, series has {n_obs}"
-            excluded.append({'method': method, 'reason': reason})
+            excluded.append({"method": method, "reason": reason})
             continue
 
         if method in ml_methods and not sufficient_ml:
             reason = f"Requires >= {min_for_ml} observations for ML, series has {n_obs}"
-            excluded.append({'method': method, 'reason': reason})
+            excluded.append({"method": method, "reason": reason})
             continue
 
         # Method passed all filters
         was_run = method in forecasted_methods
         if was_run:
             entry = {
-                'method': method,
-                'reason': f"Selected from '{category}' pool — {category_reason}",
-                'status': 'forecasted',
+                "method": method,
+                "reason": f"Selected from '{category}' pool — {category_reason}",
+                "status": "forecasted",
             }
             # Check backtest metric quality and source
-            if method in methods_with_null_metrics and method not in methods_with_valid_metrics:
-                entry['backtest_note'] = (
+            if (
+                method in methods_with_null_metrics
+                and method not in methods_with_valid_metrics
+            ):
+                entry["backtest_note"] = (
                     f"Forecast produced but backtest metrics are empty — "
                     f"not enough data ({n_obs} obs) to train ML model "
                     f"within rolling backtest windows at horizon {horizon}. "
@@ -2413,26 +2796,34 @@ async def get_method_explanation(unique_id: str):
                 )
             elif method in methods_with_valid_metrics:
                 # Check if metrics came from internal ML validation
-                method_metrics = uid_met[uid_met['method'] == method]
-                if 'metric_source' in method_metrics.columns:
-                    sources = set(method_metrics['metric_source'].dropna().unique())
-                    if sources == {'internal_validation'}:
-                        entry['backtest_note'] = (
+                method_metrics = uid_met[uid_met["method"] == method]
+                if "metric_source" in method_metrics.columns:
+                    sources = set(method_metrics["metric_source"].dropna().unique())
+                    if sources == {"internal_validation"}:
+                        entry["backtest_note"] = (
                             "Metrics from ML model's internal 80/20 train/validation "
                             "split (not rolling-window backtest). Included in method comparison."
                         )
-                    elif 'internal_validation' in sources and 'rolling_window' in sources:
-                        entry['backtest_note'] = (
+                    elif (
+                        "internal_validation" in sources and "rolling_window" in sources
+                    ):
+                        entry["backtest_note"] = (
                             "Metrics from rolling-window backtest supplemented with "
                             "internal validation results."
                         )
                     else:
-                        entry['backtest_note'] = None
+                        entry["backtest_note"] = None
                 else:
-                    entry['backtest_note'] = None
+                    entry["backtest_note"] = None
             included.append(entry)
         else:
-            included.append({'method': method, 'reason': f"Eligible from '{category}' pool but no forecast produced (model may have failed)", 'status': 'eligible_no_result'})
+            included.append(
+                {
+                    "method": method,
+                    "reason": f"Eligible from '{category}' pool but no forecast produced (model may have failed)",
+                    "status": "eligible_no_result",
+                }
+            )
 
     # ---- ACF / PACF ----
     acf_values = []
@@ -2444,82 +2835,97 @@ async def get_method_explanation(unique_id: str):
     try:
         from statsmodels.tsa.stattools import acf as sm_acf, pacf as sm_pacf
 
-        ts_ddf = data_cache.get('time_series')
+        ts_ddf = data_cache.get("time_series")
         if ts_ddf is not None:
             ts_pdf = _compute(ts_ddf)
-            uid_ts = ts_pdf[ts_pdf['unique_id'] == unique_id].sort_values('date')
-            y_vals = uid_ts['y'].values.astype(float)
+            uid_ts = ts_pdf[ts_pdf["unique_id"] == unique_id].sort_values("date")
+            y_vals = uid_ts["y"].values.astype(float)
 
             if len(y_vals) >= 6:
                 n_lags = min(24, len(y_vals) // 2 - 1)
                 # ACF with confidence interval
-                acf_out, confint = sm_acf(y_vals, nlags=n_lags, fft=True,
-                                          alpha=0.05, missing='conservative')
-                acf_values = [round(float(v), 4) for v in acf_out[1:]]   # skip lag-0
+                acf_out, confint = sm_acf(
+                    y_vals, nlags=n_lags, fft=True, alpha=0.05, missing="conservative"
+                )
+                acf_values = [round(float(v), 4) for v in acf_out[1:]]  # skip lag-0
                 acf_lags = list(range(1, len(acf_values) + 1))
-                acf_ci_upper = [round(float(confint[i+1][1] - acf_out[i+1]), 4) for i in range(len(acf_values))]
-                acf_ci_lower = [round(float(acf_out[i+1] - confint[i+1][0]), 4) for i in range(len(acf_values))]
+                acf_ci_upper = [
+                    round(float(confint[i + 1][1] - acf_out[i + 1]), 4)
+                    for i in range(len(acf_values))
+                ]
+                acf_ci_lower = [
+                    round(float(acf_out[i + 1] - confint[i + 1][0]), 4)
+                    for i in range(len(acf_values))
+                ]
 
                 # PACF
                 n_lags_pacf = min(n_lags, (len(y_vals) - 1) // 2)
-                pacf_out = sm_pacf(y_vals, nlags=n_lags_pacf, method='ywm')
+                pacf_out = sm_pacf(y_vals, nlags=n_lags_pacf, method="ywm")
                 pacf_values = [round(float(v), 4) for v in pacf_out[1:]]
     except Exception as exc:
         logger.debug(f"ACF/PACF computation failed for {unique_id}: {exc}")
 
     return {
-        'unique_id': unique_id,
-        'selection_category': category,
-        'selection_reason': category_reason,
-        'n_observations': n_obs,
-        'included': included,
-        'excluded': excluded,
-        'acf': {
-            'lags': acf_lags,
-            'values': acf_values,
-            'ci_upper': acf_ci_upper,
-            'ci_lower': acf_ci_lower,
+        "unique_id": unique_id,
+        "selection_category": category,
+        "selection_reason": category_reason,
+        "n_observations": n_obs,
+        "included": included,
+        "excluded": excluded,
+        "acf": {
+            "lags": acf_lags,
+            "values": acf_values,
+            "ci_upper": acf_ci_upper,
+            "ci_lower": acf_ci_lower,
         },
-        'pacf': {
-            'lags': acf_lags[:len(pacf_values)],
-            'values': pacf_values,
+        "pacf": {
+            "lags": acf_lags[: len(pacf_values)],
+            "values": pacf_values,
         },
-        'characteristics': {
+        "characteristics": {
             # Identity / size
-            'n_observations': n_obs,
-            'date_range_start': str(char.get('date_range_start', '')),
-            'date_range_end': str(char.get('date_range_end', '')),
+            "n_observations": n_obs,
+            "date_range_start": str(char.get("date_range_start", "")),
+            "date_range_end": str(char.get("date_range_end", "")),
             # Basic stats
-            'mean': float(char.get('mean', 0) or 0),
-            'std': float(char.get('std', 0) or 0),
+            "mean": float(char.get("mean", 0) or 0),
+            "std": float(char.get("std", 0) or 0),
             # Seasonality
-            'has_seasonality': has_seasonality,
-            'seasonal_strength': float(char.get('seasonal_strength', 0) or 0),
-            'seasonal_periods': char.get('seasonal_periods', []),
+            "has_seasonality": has_seasonality,
+            "seasonal_strength": float(char.get("seasonal_strength", 0) or 0),
+            "seasonal_periods": char.get("seasonal_periods", []),
             # Trend
-            'has_trend': bool(char.get('has_trend', False)),
-            'trend_direction': str(char.get('trend_direction', 'none')),
-            'trend_strength': float(char.get('trend_strength', 0) or 0),
+            "has_trend": bool(char.get("has_trend", False)),
+            "trend_direction": str(char.get("trend_direction", "none")),
+            "trend_strength": float(char.get("trend_strength", 0) or 0),
             # Intermittency
-            'is_intermittent': is_intermittent,
-            'zero_ratio': float(char.get('zero_ratio', 0) or 0),
-            'adi': float(char.get('adi', 0) or 0),
-            'cov': float(char.get('cov', 0) or 0),
+            "is_intermittent": is_intermittent,
+            "zero_ratio": float(char.get("zero_ratio", 0) or 0),
+            "adi": float(char.get("adi", 0) or 0),
+            "cov": float(char.get("cov", 0) or 0),
             # Stationarity
-            'is_stationary': bool(char.get('is_stationary', False)),
-            'adf_pvalue': float(char.get('adf_pvalue', 1.0) if char.get('adf_pvalue') is not None and not (isinstance(char.get('adf_pvalue'), float) and np.isnan(char.get('adf_pvalue'))) else 1.0),
+            "is_stationary": bool(char.get("is_stationary", False)),
+            "adf_pvalue": float(
+                char.get("adf_pvalue", 1.0)
+                if char.get("adf_pvalue") is not None
+                and not (
+                    isinstance(char.get("adf_pvalue"), float)
+                    and np.isnan(char.get("adf_pvalue"))
+                )
+                else 1.0
+            ),
             # Complexity
-            'complexity_level': complexity_level,
-            'complexity_score': float(char.get('complexity_score', 0) or 0),
+            "complexity_level": complexity_level,
+            "complexity_score": float(char.get("complexity_score", 0) or 0),
             # Data sufficiency (booleans + thresholds from current config)
-            'sufficient_for_ml': sufficient_ml,
-            'sufficient_for_deep_learning': sufficient_dl,
-            'min_for_ml': min_for_ml,
-            'min_for_dl': min_for_dl,
+            "sufficient_for_ml": sufficient_ml,
+            "sufficient_for_deep_learning": sufficient_dl,
+            "min_for_ml": min_for_ml,
+            "min_for_dl": min_for_dl,
             # Sparse check
-            'obs_per_year': round(obs_per_year, 2),
-            'sparse_obs_per_year_threshold': sparse_obs_per_year,
-            'is_sparse': is_sparse,
+            "obs_per_year": round(obs_per_year, 2),
+            "sparse_obs_per_year_threshold": sparse_obs_per_year,
+            "is_sparse": is_sparse,
         },
     }
 
@@ -2531,34 +2937,34 @@ async def get_series_distributions(unique_id: str):
     Returns per-horizon density curves from fitted distributions or bootstrap fallback.
     """
     # Get forecasts for this series to extract quantiles
-    if data_cache['forecasts'] is None:
+    if data_cache["forecasts"] is None:
         raise HTTPException(status_code=503, detail="Forecasts not loaded")
 
-    fc_df = _compute(data_cache['forecasts'])
-    uid_fc = fc_df[fc_df['unique_id'] == unique_id]
+    fc_df = _compute(data_cache["forecasts"])
+    uid_fc = fc_df[fc_df["unique_id"] == unique_id]
     if uid_fc.empty:
         raise HTTPException(status_code=404, detail=f"No forecasts for {unique_id}")
 
     # Use best method's forecast
     best_method_name = None
-    if data_cache['best_methods'] is not None:
-        best_df = _compute(data_cache['best_methods'])
-        best_row = best_df[best_df['unique_id'] == unique_id]
+    if data_cache["best_methods"] is not None:
+        best_df = _compute(data_cache["best_methods"])
+        best_row = best_df[best_df["unique_id"] == unique_id]
         if not best_row.empty:
-            best_method_name = str(best_row.iloc[0]['best_method'])
+            best_method_name = str(best_row.iloc[0]["best_method"])
 
     if best_method_name:
-        method_fc = uid_fc[uid_fc['method'] == best_method_name]
+        method_fc = uid_fc[uid_fc["method"] == best_method_name]
         if method_fc.empty:
             method_fc = uid_fc.iloc[[0]]
     else:
         method_fc = uid_fc.iloc[[0]]
 
     row = method_fc.iloc[0]
-    method_name = row['method']
+    method_name = row["method"]
 
     # Parse quantiles
-    quantiles = row['quantiles']
+    quantiles = row["quantiles"]
     if isinstance(quantiles, str):
         quantiles = json.loads(quantiles.replace("'", '"'))
     quantiles_dict = {}
@@ -2568,16 +2974,18 @@ async def get_series_distributions(unique_id: str):
         else:
             quantiles_dict[float(q)] = [float(vals)]
 
-    point_forecast = [float(v) for v in row['point_forecast']]
+    point_forecast = [float(v) for v in row["point_forecast"]]
     n_horizon = len(point_forecast)
 
     # Check if we have fitted distributions
-    dist_ddf = data_cache.get('distributions')
+    dist_ddf = data_cache.get("distributions")
     has_fitted = False
     fitted_rows = None
     if dist_ddf is not None:
         dist_df = _compute(dist_ddf)
-        fitted_rows = dist_df[(dist_df['unique_id'] == unique_id) & (dist_df['method'] == method_name)]
+        fitted_rows = dist_df[
+            (dist_df["unique_id"] == unique_id) & (dist_df["method"] == method_name)
+        ]
         if not fitted_rows.empty:
             has_fitted = True
 
@@ -2603,50 +3011,62 @@ async def get_series_distributions(unique_id: str):
 
         density_points = []
         is_bootstrap = True
-        dist_type = 'bootstrap'
+        dist_type = "bootstrap"
 
         # Try parametric distribution first
         if has_fitted and fitted_rows is not None:
             fit_row = fitted_rows.iloc[0]
-            ks_pvalue = fit_row.get('ks_pvalue', None)
+            ks_pvalue = fit_row.get("ks_pvalue", None)
             fit_ok = ks_pvalue is None or (pd.notna(ks_pvalue) and ks_pvalue >= 0.05)
 
             if fit_ok:
-                dist_type_name = str(fit_row['distribution_type'])
-                params = fit_row['params']
+                dist_type_name = str(fit_row["distribution_type"])
+                params = fit_row["params"]
                 if isinstance(params, str):
                     params = json.loads(params.replace("'", '"'))
 
                 try:
                     xs = np.linspace(x_lo, x_hi, 80)
-                    if dist_type_name == 'normal':
-                        ys = scipy_stats.norm.pdf(xs, loc=params.get('loc', fit_row['mean']), scale=params.get('scale', fit_row['std']))
-                    elif dist_type_name == 'gamma':
-                        ys = scipy_stats.gamma.pdf(xs, a=params['shape'], scale=params['scale'])
-                    elif dist_type_name == 'lognormal':
-                        ys = scipy_stats.lognorm.pdf(xs, s=params['s'], scale=params['scale'])
-                    elif dist_type_name == 'negative_binomial':
+                    if dist_type_name == "normal":
+                        ys = scipy_stats.norm.pdf(
+                            xs,
+                            loc=params.get("loc", fit_row["mean"]),
+                            scale=params.get("scale", fit_row["std"]),
+                        )
+                    elif dist_type_name == "gamma":
+                        ys = scipy_stats.gamma.pdf(
+                            xs, a=params["shape"], scale=params["scale"]
+                        )
+                    elif dist_type_name == "lognormal":
+                        ys = scipy_stats.lognorm.pdf(
+                            xs, s=params["s"], scale=params["scale"]
+                        )
+                    elif dist_type_name == "negative_binomial":
                         xs_int = np.round(xs).astype(int)
                         xs_int = np.clip(xs_int, 0, None)
-                        ys = scipy_stats.nbinom.pmf(xs_int, n=params['n'], p=params['p'])
+                        ys = scipy_stats.nbinom.pmf(
+                            xs_int, n=params["n"], p=params["p"]
+                        )
                         xs = xs_int.astype(float)
                     else:
                         raise ValueError(f"Unknown dist: {dist_type_name}")
 
                     # Scale density by horizon std variation
                     h_mean = point_forecast[h]
-                    h_std = fit_row['std']
+                    h_std = fit_row["std"]
                     if h > 0 and h_std > 0:
                         # Widen distribution for further horizons
                         growth = 1.0 + 0.03 * h
-                        xs = h_mean + (xs - fit_row['mean']) * growth
+                        xs = h_mean + (xs - fit_row["mean"]) * growth
                         ys = ys / growth
 
                     ys = np.nan_to_num(ys, 0.0)
                     if np.max(ys) > 0:
                         ys = ys / np.max(ys)  # Normalize to [0, 1]
 
-                    density_points = [{'x': float(xs[i]), 'y': float(ys[i])} for i in range(len(xs))]
+                    density_points = [
+                        {"x": float(xs[i]), "y": float(ys[i])} for i in range(len(xs))
+                    ]
                     is_bootstrap = False
                     dist_type = dist_type_name
                 except Exception:
@@ -2670,26 +3090,32 @@ async def get_series_distributions(unique_id: str):
                 ys = np.nan_to_num(ys, 0.0)
                 if np.max(ys) > 0:
                     ys = ys / np.max(ys)
-                density_points = [{'x': float(xs[i]), 'y': float(ys[i])} for i in range(len(xs))]
+                density_points = [
+                    {"x": float(xs[i]), "y": float(ys[i])} for i in range(len(xs))
+                ]
             except Exception:
                 # Last resort: uniform between quantile extremes
                 xs = np.linspace(x_lo, x_hi, 80)
                 ys = np.ones_like(xs) / len(xs)
-                density_points = [{'x': float(xs[i]), 'y': float(ys[i])} for i in range(len(xs))]
+                density_points = [
+                    {"x": float(xs[i]), "y": float(ys[i])} for i in range(len(xs))
+                ]
 
-        horizons.append({
-            'horizon_month': h + 1,
-            'mean': point_forecast[h],
-            'distribution_type': dist_type,
-            'is_bootstrap': is_bootstrap,
-            'density_points': density_points,
-        })
+        horizons.append(
+            {
+                "horizon_month": h + 1,
+                "mean": point_forecast[h],
+                "distribution_type": dist_type,
+                "is_bootstrap": is_bootstrap,
+                "density_points": density_points,
+            }
+        )
 
     return {
-        'unique_id': unique_id,
-        'method': method_name,
-        'n_horizons': len(horizons),
-        'horizons': horizons,
+        "unique_id": unique_id,
+        "method": method_name,
+        "n_horizons": len(horizons),
+        "horizons": horizons,
     }
 
 
@@ -2723,7 +3149,9 @@ def _cleanup_stale_jobs():
                 if sys.platform == "win32":
                     result = subprocess.run(
                         ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-                        capture_output=True, text=True, timeout=5
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
                     )
                     process_alive = str(pid) in result.stdout
                 else:
@@ -2737,9 +3165,13 @@ def _cleanup_stale_jobs():
         if not process_alive:
             job["status"] = "error"
             job["ended_at"] = now.isoformat()
-            job["log_lines"].append("[STALE] Process no longer running — marked as failed")
+            job["log_lines"].append(
+                "[STALE] Process no longer running — marked as failed"
+            )
             job["exit_code"] = -2
-            logger.warning(f"Stale job {job['job_id']} (pid={pid}) marked as error — process not alive")
+            logger.warning(
+                f"Stale job {job['job_id']} (pid={pid}) marked as error — process not alive"
+            )
             continue
 
         # Check timeout
@@ -2755,7 +3187,9 @@ def _cleanup_stale_jobs():
                         f"[TIMEOUT] Job exceeded {_STALE_JOB_TIMEOUT_SEC}s — marked as stale"
                     )
                     job["exit_code"] = -3
-                    logger.warning(f"Stale job {job['job_id']} timed out after {elapsed:.0f}s")
+                    logger.warning(
+                        f"Stale job {job['job_id']} timed out after {elapsed:.0f}s"
+                    )
             except Exception:
                 pass
 
@@ -2798,20 +3232,58 @@ def _mark_stale_db_steps():
 
 
 PIPELINE_STEPS = {
-    "etl":               {"label": "ETL",               "arg": "etl",               "desc": "Extract data from the source database into demand_actuals"},
-    "outlier-detection": {"label": "Outlier Detection",  "arg": "outlier-detection", "desc": "Detect and correct outliers in the time series"},
-    "segmentation":      {"label": "Segmentation",       "arg": "segmentation",      "desc": "Compute ABC classification and assign series to segments"},
-    "characterization":  {"label": "Characterization",   "arg": "characterize",      "desc": "Analyze time series characteristics (seasonality, trend, complexity)"},
-    "forecast":          {"label": "Forecast",           "arg": "forecast",          "desc": "Run all forecasting models (statistical, ML, neural, foundation)"},
-    "backtest":          {"label": "Backtest",           "arg": "backtest",          "desc": "Rolling-window backtesting and metric computation"},
-    "best-method":       {"label": "Best Method",        "arg": "best-method",       "desc": "Select the best method per series using composite scoring"},
-    "distributions":     {"label": "Distributions",      "arg": "distributions",     "desc": "Fit forecast distributions for MEIO safety-stock computation"},
+    "etl": {
+        "label": "ETL",
+        "arg": "etl",
+        "desc": "Extract data from the source database into demand_actuals",
+    },
+    "outlier-detection": {
+        "label": "Outlier Detection",
+        "arg": "outlier-detection",
+        "desc": "Detect and correct outliers in the time series",
+    },
+    "segmentation": {
+        "label": "Segmentation",
+        "arg": "segmentation",
+        "desc": "Compute ABC classification and assign series to segments",
+    },
+    "characterization": {
+        "label": "Characterization",
+        "arg": "characterize",
+        "desc": "Analyze time series characteristics (seasonality, trend, complexity)",
+    },
+    "forecast": {
+        "label": "Forecast",
+        "arg": "forecast",
+        "desc": "Run all forecasting models (statistical, ML, neural, foundation)",
+    },
+    "backtest": {
+        "label": "Backtest",
+        "arg": "backtest",
+        "desc": "Rolling-window backtesting and metric computation",
+    },
+    "best-method": {
+        "label": "Best Method",
+        "arg": "best-method",
+        "desc": "Select the best method per series using composite scoring",
+    },
+    "distributions": {
+        "label": "Distributions",
+        "arg": "distributions",
+        "desc": "Fit forecast distributions for MEIO safety-stock computation",
+    },
 }
 
 
 PIPELINE_STEP_ORDER = [
-    "etl", "outlier-detection", "segmentation",
-    "characterization", "forecast", "backtest", "best-method", "distributions"
+    "etl",
+    "outlier-detection",
+    "segmentation",
+    "characterization",
+    "forecast",
+    "backtest",
+    "best-method",
+    "distributions",
 ]
 
 
@@ -2846,7 +3318,10 @@ def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = Non
             line = line.rstrip("\n")
             with _pipeline_lock:
                 # If job was killed externally, stop reading stdout
-                if _pipeline_jobs[job_id].get("status") == "error" and _pipeline_jobs[job_id].get("exit_code") == -1:
+                if (
+                    _pipeline_jobs[job_id].get("status") == "error"
+                    and _pipeline_jobs[job_id].get("exit_code") == -1
+                ):
                     proc.kill()
                     break
                 _pipeline_jobs[job_id]["log_lines"].append(line)
@@ -2858,7 +3333,9 @@ def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = Non
             # Don't overwrite status if already marked as killed
             if _pipeline_jobs[job_id].get("exit_code") != -1:
                 _pipeline_jobs[job_id]["exit_code"] = exit_code
-                _pipeline_jobs[job_id]["status"] = "success" if exit_code == 0 else "error"
+                _pipeline_jobs[job_id]["status"] = (
+                    "success" if exit_code == 0 else "error"
+                )
                 _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
 
     except Exception as exc:
@@ -2882,16 +3359,23 @@ def _run_full_pipeline_thread(job_id: str):
         _pipeline_jobs[job_id]["started_at"] = datetime.utcnow().isoformat()
 
     for step_id in PIPELINE_STEP_ORDER:
-        step_arg  = PIPELINE_STEPS[step_id]["arg"]
+        step_arg = PIPELINE_STEPS[step_id]["arg"]
         step_label = PIPELINE_STEPS[step_id]["label"]
 
         with _pipeline_lock:
             _pipeline_jobs[job_id]["current_step"] = step_id
             _pipeline_jobs[job_id]["log_lines"].append(
-                f"\n{'='*60}\n▶ Starting: {step_label}\n{'='*60}"
+                f"\n{'=' * 60}\n▶ Starting: {step_label}\n{'=' * 60}"
             )
 
-        cmd = [sys.executable, "run_pipeline.py", "--only", step_arg, "--log-level", "INFO"]
+        cmd = [
+            sys.executable,
+            "run_pipeline.py",
+            "--only",
+            step_arg,
+            "--log-level",
+            "INFO",
+        ]
         popen_kwargs = dict(
             cwd=str(files_dir),
             stdout=subprocess.PIPE,
@@ -2942,7 +3426,7 @@ def _run_full_pipeline_thread(job_id: str):
     # All steps succeeded
     with _pipeline_lock:
         _pipeline_jobs[job_id]["log_lines"].append(
-            f"\n{'='*60}\n✓ Full pipeline complete!\n{'='*60}"
+            f"\n{'=' * 60}\n✓ Full pipeline complete!\n{'=' * 60}"
         )
         _pipeline_jobs[job_id]["exit_code"] = 0
         _pipeline_jobs[job_id]["status"] = "success"
@@ -2960,7 +3444,7 @@ async def run_full_pipeline():
             if job.get("status") == "running":
                 raise HTTPException(
                     status_code=409,
-                    detail=f"A pipeline job is already running (job {job['job_id']})"
+                    detail=f"A pipeline job is already running (job {job['job_id']})",
                 )
 
     job_id = str(uuid.uuid4())[:8]
@@ -2995,21 +3479,29 @@ class RunStepRequest(BaseModel):
 
 
 @app.post("/api/pipeline/run/{step}")
-async def run_pipeline_step(step: str, body: RunStepRequest = Body(default=RunStepRequest())):
+async def run_pipeline_step(
+    step: str, body: RunStepRequest = Body(default=RunStepRequest())
+):
     """Launch a pipeline step as a background subprocess. Returns a job_id.
 
     Optional body: { "segment_id": <int> } to scope forecast/backtest/characterization
     to a specific segment.
     """
     if step not in PIPELINE_STEPS:
-        raise HTTPException(status_code=400, detail=f"Unknown step '{step}'. Valid: {list(PIPELINE_STEPS)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown step '{step}'. Valid: {list(PIPELINE_STEPS)}",
+        )
 
     # Clean up stale jobs first, then reject if same step is genuinely running
     with _pipeline_lock:
         _cleanup_stale_jobs()
         for job in _pipeline_jobs.values():
             if job.get("step") == step and job.get("status") == "running":
-                raise HTTPException(status_code=409, detail=f"Step '{step}' is already running (job {job['job_id']})")
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Step '{step}' is already running (job {job['job_id']})",
+                )
 
     extra_args = []
     if body.segment_id is not None:
@@ -3061,7 +3553,7 @@ async def run_forecast_for_series(req: RunForecastRequest):
             if job.get("step") == "forecast-series" and job.get("status") == "running":
                 raise HTTPException(
                     status_code=409,
-                    detail=f"A series forecast job is already running (job {job['job_id']})"
+                    detail=f"A series forecast job is already running (job {job['job_id']})",
                 )
 
     job_id = str(uuid.uuid4())[:8]
@@ -3120,6 +3612,7 @@ async def run_forecast_for_series(req: RunForecastRequest):
 # Hyperparameter overrides CRUD
 # ══════════════════════════════════════════════════════════════════════
 
+
 class HyperparamOverridesRequest(BaseModel):
     overrides: Dict[str, Dict[str, Any]]  # {method: {param: value, ...}, ...}
 
@@ -3169,7 +3662,11 @@ async def put_hyperparams(unique_id: str, req: HyperparamOverridesRequest):
                 )
         conn.commit()
         conn.close()
-        return {"status": "ok", "unique_id": unique_id, "methods_updated": list(req.overrides.keys())}
+        return {
+            "status": "ok",
+            "unique_id": unique_id,
+            "methods_updated": list(req.overrides.keys()),
+        }
     except Exception as exc:
         logger.error(f"Failed to save hyperparameter overrides: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -3235,7 +3732,11 @@ def _extract_progress(log_lines: list) -> dict:
         if "Backtesting complete" in line:
             progress["current_step"] = "best-method"
             break
-        if "[BACKTEST_PROGRESS]" in line or "Chaining: Backtest" in line or "STEP 4" in line:
+        if (
+            "[BACKTEST_PROGRESS]" in line
+            or "Chaining: Backtest" in line
+            or "STEP 4" in line
+        ):
             progress["current_step"] = "backtest"
             break
         if "Forecasting complete" in line:
@@ -3262,7 +3763,9 @@ def _extract_progress(log_lines: list) -> dict:
                             progress[k] = v
                 total = progress.get("total", 0)
                 completed = progress.get("completed", 0)
-                progress["pct"] = round(100.0 * completed / total, 1) if total > 0 else 0
+                progress["pct"] = (
+                    round(100.0 * completed / total, 1) if total > 0 else 0
+                )
                 break
         else:
             continue
@@ -3307,16 +3810,25 @@ async def kill_pipeline_job(job_id: str):
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     if job.get("status") != "running":
-        raise HTTPException(status_code=409, detail=f"Job {job_id} is not running (status: {job.get('status')})")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job {job_id} is not running (status: {job.get('status')})",
+        )
 
     pid = job.get("pid")
     if not pid:
-        raise HTTPException(status_code=409, detail="Job has no PID yet — it may still be starting")
+        raise HTTPException(
+            status_code=409, detail="Job has no PID yet — it may still be starting"
+        )
 
     try:
         if sys.platform == "win32":
             # On Windows use taskkill to kill the process tree
-            subprocess.call(["taskkill", "/F", "/T", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.call(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         else:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
     except Exception as exc:
@@ -3326,7 +3838,9 @@ async def kill_pipeline_job(job_id: str):
     with _pipeline_lock:
         _pipeline_jobs[job_id]["status"] = "error"
         _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
-        _pipeline_jobs[job_id]["log_lines"].append("[INTERRUPTED] Process killed by user")
+        _pipeline_jobs[job_id]["log_lines"].append(
+            "[INTERRUPTED] Process killed by user"
+        )
         _pipeline_jobs[job_id]["exit_code"] = -1
 
     return {"job_id": job_id, "status": "error", "message": "Job interrupted"}
@@ -3394,13 +3908,17 @@ async def stream_pipeline_logs(job_id: str):
 
             await asyncio.sleep(0.3)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ===========================================================================
 # PROCESS LOG endpoints
 # ===========================================================================
+
 
 def _require_db():
     if not _DB_AVAILABLE:
@@ -3466,8 +3984,10 @@ async def get_process_log(
 
         # Also get total count
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM zcube.process_log {where_sql}",
-                        params[:-2] if params else [])
+            cur.execute(
+                f"SELECT COUNT(*) FROM zcube.process_log {where_sql}",
+                params[:-2] if params else [],
+            )
             total = cur.fetchone()[0]
 
         return {"total": total, "offset": offset, "limit": limit, "items": result}
@@ -3592,6 +4112,7 @@ async def get_step_log_tail(step_id: int):
 # SEGMENTS endpoints
 # ===========================================================================
 
+
 class SegmentIn(BaseModel):
     name: str
     description: Optional[str] = None
@@ -3663,8 +4184,9 @@ async def create_segment(body: SegmentIn):
             cols = [d[0] for d in cur.description]
             row = cur.fetchone()
             new_entry = _segment_row_to_dict(row, cols)
-            _audit_log(cur, schema, "segment", new_entry["id"], "create",
-                       new_value=new_entry)
+            _audit_log(
+                cur, schema, "segment", new_entry["id"], "create", new_value=new_entry
+            )
         conn.commit()
         return new_entry
     except Exception as exc:
@@ -3682,22 +4204,36 @@ def _pg_type_to_field_type(pg_type: str) -> str:
     pg_type = pg_type.lower()
     if pg_type in ("boolean",):
         return "boolean"
-    if pg_type in ("integer", "bigint", "smallint", "serial",
-                    "numeric", "real", "double precision"):
+    if pg_type in (
+        "integer",
+        "bigint",
+        "smallint",
+        "serial",
+        "numeric",
+        "real",
+        "double precision",
+    ):
         return "number"
     return "string"
 
 
 # Columns to skip when auto-discovering fields for the criteria builder
-_SKIP_ITEM_COLS = {"id", "attributes"}
-_SKIP_SITE_COLS = {"id", "attributes"}
-_SKIP_TSC_COLS  = {"id", "unique_id", "seasonal_periods", "recommended_methods"}
+_SKIP_ITEM_COLS = {"id", "attributes", "type_id"}
+_SKIP_SITE_COLS = {"id", "attributes", "type_id"}
+_SKIP_TSC_COLS = {"id", "unique_id", "seasonal_periods", "recommended_methods"}
 
 # Known enum fields in time_series_characteristics (detected via DISTINCT queries below)
 _ENUM_FIELDS = {"abc_class", "complexity_level", "trend_direction"}
 
-# Maximum distinct count for auto-detecting enum-like columns in item/site tables
-_MAX_ENUM_DISTINCT = 50
+
+def _get_max_enum_distinct() -> int:
+    """Get max_enum_distinct from config, default to 200."""
+    try:
+        with open(_api_config_path()) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get("segmentation", {}).get("max_enum_distinct", 200)
+    except Exception:
+        return 200
 
 
 @app.get("/api/segments/fields")
@@ -3709,6 +4245,7 @@ async def get_segment_fields():
     time_series_characteristics tables, including JSONB attribute keys.
     """
     _require_db()
+    _MAX_ENUM_DISTINCT = _get_max_enum_distinct()
     conn = get_conn(_api_config_path())
     schema = get_schema(_api_config_path())
     try:
@@ -3745,7 +4282,7 @@ async def get_segment_fields():
                     demand_actuals_extra.append({"column": col, "type": ftype})
 
             # ── 2. Detect JSONB attribute keys + their distinct values ────
-            item_attr_info = []   # list of {key, options?}
+            item_attr_info = []  # list of {key, options?}
             site_attr_info = []
 
             for dim, attr_list in [("item", item_attr_info), ("site", site_attr_info)]:
@@ -3764,28 +4301,21 @@ async def get_segment_fields():
 
                 for akey in attr_keys:
                     info = {"key": akey}
-                    # Count distinct first to avoid fetching thousands of values
+                    # Always load a sample of options for dropdown (up to 1000)
                     try:
                         cur.execute(
                             f"""
-                            SELECT COUNT(DISTINCT attributes->>%s)
+                            SELECT DISTINCT attributes->>%s AS v
                             FROM {schema}.{dim}
                             WHERE attributes->>%s IS NOT NULL
+                            ORDER BY 1
+                            LIMIT 1000
                             """,
                             (akey, akey),
                         )
-                        n_distinct = cur.fetchone()[0]
-                        if 0 < n_distinct <= _MAX_ENUM_DISTINCT:
-                            cur.execute(
-                                f"""
-                                SELECT DISTINCT attributes->>%s AS v
-                                FROM {schema}.{dim}
-                                WHERE attributes->>%s IS NOT NULL
-                                ORDER BY 1
-                                """,
-                                (akey, akey),
-                            )
-                            info["options"] = [r[0] for r in cur.fetchall()]
+                        options = [r[0] for r in cur.fetchall()]
+                        if options:
+                            info["options"] = options
                     except Exception:
                         pass
                     attr_list.append(info)
@@ -3877,6 +4407,48 @@ async def get_segment_fields():
                 dc["type"] = "enum"
                 dc["options"] = enum_options[dc["column"]]
 
+        # ── 6. Detect site_type options and patch site.type_id ──────────────
+        site_type_options = []
+        try:
+            cur.execute(
+                f"""
+                SELECT id, name
+                FROM {schema}.site_type
+                ORDER BY name
+                """
+            )
+            site_type_options = [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
+        except Exception:
+            pass  # table may not exist yet
+
+        # Patch site.type_id with site_type options if available
+        for sc in site_cols:
+            if sc["column"] == "type_id" and site_type_options:
+                sc["type"] = "enum"
+                sc["options"] = [st["name"] for st in site_type_options]
+                sc["options_by_id"] = {st["name"]: st["id"] for st in site_type_options}
+
+        # ── 7. Detect item_type options and patch item.type_id ──────────────
+        item_type_options = []
+        try:
+            cur.execute(
+                f"""
+                SELECT id, name
+                FROM {schema}.item_type
+                ORDER BY name
+                """
+            )
+            item_type_options = [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
+        except Exception:
+            pass  # table may not exist yet
+
+        # Patch item.type_id with item_type options if available
+        for ic in item_cols:
+            if ic["column"] == "type_id" and item_type_options:
+                ic["type"] = "enum"
+                ic["options"] = [it["name"] for it in item_type_options]
+                ic["options_by_id"] = {it["name"]: it["id"] for it in item_type_options}
+
         return {
             # Backward compat (JSONB attribute key lists)
             "item": item_attrs,
@@ -3888,6 +4460,10 @@ async def get_segment_fields():
             # Attribute detail (keys + options when finite)
             "item_attr_info": item_attr_info,
             "site_attr_info": site_attr_info,
+            # Site type options for type_id dropdown
+            "site_type_options": site_type_options,
+            # Item type options for type_id dropdown
+            "item_type_options": item_type_options,
         }
     except Exception as exc:
         logger.error(f"get_segment_fields failed: {exc}")
@@ -3912,11 +4488,15 @@ async def update_segment(segment_id: int, body: SegmentIn):
             )
             old_row = cur.fetchone()
             if old_row is None:
-                raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+                raise HTTPException(
+                    status_code=404, detail=f"Segment {segment_id} not found"
+                )
             old_cols = [d[0] for d in cur.description]
             old_snapshot = _segment_row_to_dict(old_row, old_cols)
             if old_snapshot.get("is_default"):
-                raise HTTPException(status_code=400, detail="Cannot modify the default 'All' segment")
+                raise HTTPException(
+                    status_code=400, detail="Cannot modify the default 'All' segment"
+                )
 
             criteria_json = json.dumps(body.criteria or {})
             cur.execute(
@@ -3931,8 +4511,15 @@ async def update_segment(segment_id: int, body: SegmentIn):
             cols = [d[0] for d in cur.description]
             updated = cur.fetchone()
             new_snapshot = _segment_row_to_dict(updated, cols)
-            _audit_log(cur, schema, "segment", segment_id, "update",
-                       old_value=old_snapshot, new_value=new_snapshot)
+            _audit_log(
+                cur,
+                schema,
+                "segment",
+                segment_id,
+                "update",
+                old_value=old_snapshot,
+                new_value=new_snapshot,
+            )
         conn.commit()
         return new_snapshot
     except HTTPException:
@@ -3961,14 +4548,19 @@ async def delete_segment(segment_id: int):
             )
             old_row = cur.fetchone()
             if old_row is None:
-                raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+                raise HTTPException(
+                    status_code=404, detail=f"Segment {segment_id} not found"
+                )
             old_cols = [d[0] for d in cur.description]
             old_snapshot = _segment_row_to_dict(old_row, old_cols)
             if old_snapshot.get("is_default"):
-                raise HTTPException(status_code=400, detail="Cannot delete the default 'All' segment")
+                raise HTTPException(
+                    status_code=400, detail="Cannot delete the default 'All' segment"
+                )
             cur.execute(f"DELETE FROM {schema}.segment WHERE id = %s", (segment_id,))
-            _audit_log(cur, schema, "segment", segment_id, "delete",
-                       old_value=old_snapshot)
+            _audit_log(
+                cur, schema, "segment", segment_id, "delete", old_value=old_snapshot
+            )
         conn.commit()
         return {"status": "ok", "deleted": segment_id}
     except HTTPException:
@@ -4078,7 +4670,9 @@ async def get_segment_details(segment_id: int, limit: int = 200, offset: int = 0
             )
             seg_row = cur.fetchone()
             if seg_row is None:
-                raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+                raise HTTPException(
+                    status_code=404, detail=f"Segment {segment_id} not found"
+                )
             seg_name, seg_desc, seg_criteria = seg_row
 
             # Total count
@@ -4115,15 +4709,17 @@ async def get_segment_details(segment_id: int, limit: int = 200, offset: int = 0
 
         members = []
         for uid, ic, iname, iattr, sc, sname, sattr in rows:
-            members.append({
-                "unique_id": uid,
-                "item_code": ic,
-                "item_name": iname,
-                "item_attributes": iattr or {},
-                "site_code": sc,
-                "site_name": sname,
-                "site_attributes": sattr or {},
-            })
+            members.append(
+                {
+                    "unique_id": uid,
+                    "item_code": ic,
+                    "item_name": iname,
+                    "item_attributes": iattr or {},
+                    "site_code": sc,
+                    "site_name": sname,
+                    "site_attributes": sattr or {},
+                }
+            )
 
         return {
             "segment_id": segment_id,
@@ -4157,7 +4753,9 @@ async def preview_segment(segment_id: int):
             )
             row = cur.fetchone()
         if row is None:
-            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+            raise HTTPException(
+                status_code=404, detail=f"Segment {segment_id} not found"
+            )
         criteria = row[0] or {}
         if isinstance(criteria, str):
             criteria = json.loads(criteria)
@@ -4166,6 +4764,7 @@ async def preview_segment(segment_id: int):
 
     try:
         from segmentation.segmentation import SegmentationEngine
+
         engine = SegmentationEngine(_api_config_path())
         matched = engine.evaluate_criteria(criteria)
         return {"count": len(matched), "sample": matched[:20]}
@@ -4183,11 +4782,14 @@ async def assign_segment(segment_id: int):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT criteria, is_default FROM {schema}.segment WHERE id = %s", (segment_id,)
+                f"SELECT criteria, is_default FROM {schema}.segment WHERE id = %s",
+                (segment_id,),
             )
             row = cur.fetchone()
         if row is None:
-            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+            raise HTTPException(
+                status_code=404, detail=f"Segment {segment_id} not found"
+            )
         criteria, is_default = row
         if isinstance(criteria, str):
             criteria = json.loads(criteria)
@@ -4196,6 +4798,7 @@ async def assign_segment(segment_id: int):
 
     try:
         from segmentation.segmentation import SegmentationEngine
+
         engine = SegmentationEngine(_api_config_path())
         if is_default:
             # Fast path: assign all series
@@ -4213,9 +4816,10 @@ async def assign_segment(segment_id: int):
 # ADJUSTMENTS endpoints
 # ===========================================================================
 
+
 class AdjustmentIn(BaseModel):
-    forecast_date: str          # "YYYY-MM-DD"
-    adjustment_type: str        # "adjustment" | "override"
+    forecast_date: str  # "YYYY-MM-DD"
+    adjustment_type: str  # "adjustment" | "override"
     value: float
     note: Optional[str] = None
     created_by: Optional[str] = "planner"
@@ -4246,7 +4850,11 @@ async def get_adjustments(unique_id: str):
             entry = dict(zip(cols, row))
             for k in ("forecast_date", "created_at", "updated_at"):
                 if entry.get(k) is not None:
-                    entry[k] = entry[k].isoformat() if hasattr(entry[k], 'isoformat') else str(entry[k])
+                    entry[k] = (
+                        entry[k].isoformat()
+                        if hasattr(entry[k], "isoformat")
+                        else str(entry[k])
+                    )
             entry["value"] = float(entry["value"])
             result.append(entry)
         return result
@@ -4262,7 +4870,9 @@ async def upsert_adjustment(unique_id: str, body: AdjustmentIn):
     """
     _require_db()
     if body.adjustment_type not in ("adjustment", "override"):
-        raise HTTPException(status_code=400, detail="adjustment_type must be 'adjustment' or 'override'")
+        raise HTTPException(
+            status_code=400, detail="adjustment_type must be 'adjustment' or 'override'"
+        )
 
     conn = get_conn(_api_config_path())
     try:
@@ -4294,11 +4904,15 @@ async def upsert_adjustment(unique_id: str, body: AdjustmentIn):
         return {
             "id": row[0],
             "unique_id": unique_id,
-            "forecast_date": row[1].isoformat() if hasattr(row[1], 'isoformat') else str(row[1]),
+            "forecast_date": row[1].isoformat()
+            if hasattr(row[1], "isoformat")
+            else str(row[1]),
             "adjustment_type": row[2],
             "value": float(row[3]),
             "note": row[4],
-            "updated_at": row[5].isoformat() if hasattr(row[5], 'isoformat') else str(row[5]),
+            "updated_at": row[5].isoformat()
+            if hasattr(row[5], "isoformat")
+            else str(row[5]),
         }
     except Exception as exc:
         conn.rollback()
@@ -4307,7 +4921,9 @@ async def upsert_adjustment(unique_id: str, body: AdjustmentIn):
         conn.close()
 
 
-@app.delete("/api/adjustments/{unique_id}/{forecast_date}/{adjustment_type}", status_code=204)
+@app.delete(
+    "/api/adjustments/{unique_id}/{forecast_date}/{adjustment_type}", status_code=204
+)
 async def delete_adjustment(unique_id: str, forecast_date: str, adjustment_type: str):
     """Delete a single adjustment row."""
     _require_db()
@@ -4357,4 +4973,5 @@ async def delete_all_adjustments(unique_id: str):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
