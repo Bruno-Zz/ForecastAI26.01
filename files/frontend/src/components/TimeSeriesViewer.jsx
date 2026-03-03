@@ -16,6 +16,7 @@ import { useLocale } from '../contexts/LocaleContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { formatNumber, formatDate, formatYearMonth, formatPercent, toISODate, formatDateTime } from '../utils/formatting';
 import api from '../utils/api';
+import DateRangePicker from './DateRangePicker';
 
 const METHOD_COLORS = {
   AutoETS: '#2563eb',
@@ -41,6 +42,7 @@ const AGG_OPTS = [
   { value: 'Q',      label: 'Quarterly' },
   { value: 'Y',      label: 'Yearly' },
 ];
+
 
 /** Canonical period-start ISO date for any aggregation level. */
 const getPeriodKey = (dateStr, agg) => {
@@ -340,12 +342,16 @@ function ForecastTableWithAdjustments({
   isMultiMode, horizonLength, adjustments, adjSaving,
   saveAdjustment, resetAllAdjustments, locale, numberDecimals, isDark,
   dateRangeEnd, methodExplanation,
+  // Multi-mode aggregated adjustment props
+  multiSeriesData, saveMultiAdjustment, resetMultiAdjustments,
 }) {
   const bestMethodName = bestMethod?.best_method;
   const [adjRowsOpen, setAdjRowsOpen] = React.useState(false);
 
   // Keep adj rows open automatically if there are any saved values
-  const hasAnyAdj = Object.keys(adjustments).length > 0;
+  const hasAnyAdj = isMultiMode
+    ? Object.keys(multiSeriesData?.aggAdjustments || {}).length > 0
+    : Object.keys(adjustments).length > 0;
   React.useEffect(() => {
     if (hasAnyAdj) setAdjRowsOpen(true);
   }, [hasAnyAdj]);
@@ -423,16 +429,17 @@ function ForecastTableWithAdjustments({
 
   // Sync drafts whenever the persisted adjustments change (load, save, reset)
   React.useEffect(() => {
+    const source = isMultiMode ? (multiSeriesData?.aggAdjustments || {}) : adjustments;
     const adjMap = {};
     const ovMap  = {};
-    Object.entries(adjustments).forEach(([key, entry]) => {
+    Object.entries(source).forEach(([key, entry]) => {
       const [date, type] = key.split('|');
       if (type === 'adjustment') adjMap[date] = String(entry.value);
       if (type === 'override')   ovMap[date]  = String(entry.value);
     });
     setDraftAdj(adjMap);
     setDraftOv(ovMap);
-  }, [adjustments]);
+  }, [adjustments, isMultiMode, multiSeriesData?.aggAdjustments]);
 
   // Resolve base date from historical tail, or fallback to dateRangeEnd
   const lastDate = historicalData?.date?.length
@@ -470,19 +477,33 @@ function ForecastTableWithAdjustments({
     return cv !== modelVal;
   }, [consensusValue]);
 
-  const adjCount = Object.keys(adjustments).length;
+  const adjCount = isMultiMode
+    ? Object.keys(multiSeriesData?.aggAdjustments || {}).length
+    : Object.keys(adjustments).length;
+  const effectiveAdjustments = isMultiMode ? (multiSeriesData?.aggAdjustments || {}) : adjustments;
+  const effectiveSave = isMultiMode ? saveMultiAdjustment : saveAdjustment;
+  const effectiveReset = isMultiMode ? resetMultiAdjustments : resetAllAdjustments;
+
+  // For multi-mode: build a single aggregated forecast row from best-method sums
+  const aggFcRow = React.useMemo(() => {
+    if (!isMultiMode || !multiSeriesData?.aggBestForecast) return null;
+    return { method: 'Forecast', point_forecast: multiSeriesData.aggBestForecast, quantiles: {} };
+  }, [isMultiMode, multiSeriesData?.aggBestForecast]);
+
+  // Rows to render: single row in multi-mode, all methods in single-mode
+  const displayForecasts = isMultiMode && aggFcRow ? [aggFcRow] : activeForecasts;
 
   return (
     <Section
-      title={`Forecast Point Values${isMultiMode ? ' (aggregated sum)' : ''} (${horizonLength} months)`}
+      title={`Forecast Point Values${isMultiMode ? ` (aggregated sum \u2014 ${multiSeriesData?.uids?.length || 0} series)` : ''} (${horizonLength} months)`}
       storageKey="tsv_forecast_table_open"
     >
       {/* Reset button + adj count badge */}
-      {!isMultiMode && adjCount > 0 && (
+      {adjCount > 0 && (
         <div className="flex items-center justify-end gap-3 mb-2">
-          <span className="text-xs text-gray-400 dark:text-gray-500">{adjCount} adjustment{adjCount !== 1 ? 's' : ''} active</span>
+          <span className="text-xs text-gray-400 dark:text-gray-500">{adjCount} adjustment{adjCount !== 1 ? 's' : ''} active{isMultiMode ? ` (across ${multiSeriesData?.uids?.length} series)` : ''}</span>
           <button
-            onClick={resetAllAdjustments}
+            onClick={effectiveReset}
             className="px-2.5 py-1 text-xs bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-800 rounded hover:bg-red-100 dark:hover:bg-red-900/30"
           >
             ✕ Reset all adjustments
@@ -495,7 +516,7 @@ function ForecastTableWithAdjustments({
           <thead className="sticky top-0 z-10" style={{ backgroundColor: 'var(--color-surface-alt)' }}>
             <tr>
               <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase sticky left-0 z-20 min-w-[9rem]" style={{ backgroundColor: 'var(--color-surface-alt)', boxShadow: '2px 0 4px -1px rgba(0,0,0,0.1)' }}>
-                Method
+                {isMultiMode ? '' : 'Method'}
               </th>
               {forecastDates.map((d, i) => (
                 <th key={i} className="px-2 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase whitespace-nowrap">
@@ -505,8 +526,8 @@ function ForecastTableWithAdjustments({
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-            {activeForecasts.map((f, idx) => {
-              const isBest = f.method === bestMethodName;
+            {displayForecasts.map((f, idx) => {
+              const isBest = isMultiMode ? true : f.method === bestMethodName;
               const methodNote = (methodExplanation?.included || []).find(m => m.method === f.method)?.backtest_note || '';
               const rowBg  = isBest ? 'bg-emerald-50 dark:bg-emerald-900/20' : '';
               const stickyBg = isBest
@@ -535,8 +556,8 @@ function ForecastTableWithAdjustments({
                             </svg>
                           </span>
                         )}
-                        {/* Toggle adj rows — only for the best/selected method */}
-                        {isBest && !isMultiMode && (
+                        {/* Toggle adj rows — for the best/selected method, or always in multi-mode */}
+                        {isBest && (
                           <button
                             onClick={() => setAdjRowsOpen(o => !o)}
                             title={adjRowsOpen ? 'Hide adjustment rows' : 'Show adjustment rows'}
@@ -548,11 +569,11 @@ function ForecastTableWithAdjustments({
                       </div>
                     </td>
                     {f.point_forecast.map((v, i) => {
-                      // For the best method, show the final (adjusted) value in the cell
+                      // For the best method (or aggregated row), show the final (adjusted) value
                       if (isBest && monthDates[i]) {
                         const dateStr = monthDates[i];
-                        const adj = adjustments[`${dateStr}|adjustment`];
-                        const ov  = adjustments[`${dateStr}|override`];
+                        const adj = effectiveAdjustments[`${dateStr}|adjustment`];
+                        const ov  = effectiveAdjustments[`${dateStr}|override`];
                         const finalVal = ov
                           ? Number(ov.value)
                           : adj
@@ -587,8 +608,8 @@ function ForecastTableWithAdjustments({
                     })}
                   </tr>
 
-                  {/* ── Adjustment rows (only under best method, collapsible) ── */}
-                  {isBest && !isMultiMode && adjRowsOpen && monthDates.length > 0 && (
+                  {/* ── Adjustment rows (under best method or aggregated row, collapsible) ── */}
+                  {isBest && adjRowsOpen && monthDates.length > 0 && (
                     <>
                       {/* Row 1: Adjustment (±) */}
                       <tr className="bg-orange-50/60 dark:bg-orange-900/10">
@@ -605,7 +626,7 @@ function ForecastTableWithAdjustments({
                         {f.point_forecast.map((modelVal, i) => {
                           const dateStr = monthDates[i];
                           if (!dateStr) return <td key={i} />;
-                          const adj = adjustments[`${dateStr}|adjustment`];
+                          const adj = effectiveAdjustments[`${dateStr}|adjustment`];
                           return (
                             <td key={i} className="px-1 py-0.5">
                               <input
@@ -614,7 +635,9 @@ function ForecastTableWithAdjustments({
                                 value={draftAdj[dateStr] ?? ''}
                                 placeholder="±"
                                 onChange={e => setDraftAdj(prev => ({ ...prev, [dateStr]: e.target.value }))}
-                                onBlur={e => saveAdjustment(dateStr, 'adjustment', e.target.value, adj?.note)}
+                                onBlur={e => isMultiMode
+                                  ? effectiveSave(dateStr, 'adjustment', e.target.value, adj?.note, i)
+                                  : effectiveSave(dateStr, 'adjustment', e.target.value, adj?.note)}
                                 className="w-full min-w-[3.5rem] text-right border border-orange-200 dark:border-orange-800 rounded px-1.5 py-0.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-orange-400 bg-white dark:bg-gray-800 dark:text-gray-200"
                               />
                             </td>
@@ -637,7 +660,7 @@ function ForecastTableWithAdjustments({
                         {f.point_forecast.map((_, i) => {
                           const dateStr = monthDates[i];
                           if (!dateStr) return <td key={i} />;
-                          const ov = adjustments[`${dateStr}|override`];
+                          const ov = effectiveAdjustments[`${dateStr}|override`];
                           return (
                             <td key={i} className="px-1 py-0.5">
                               <input
@@ -646,7 +669,9 @@ function ForecastTableWithAdjustments({
                                 value={draftOv[dateStr] ?? ''}
                                 placeholder="—"
                                 onChange={e => setDraftOv(prev => ({ ...prev, [dateStr]: e.target.value }))}
-                                onBlur={e => saveAdjustment(dateStr, 'override', e.target.value, ov?.note)}
+                                onBlur={e => isMultiMode
+                                  ? effectiveSave(dateStr, 'override', e.target.value, ov?.note, i)
+                                  : effectiveSave(dateStr, 'override', e.target.value, ov?.note)}
                                 className="w-full min-w-[3.5rem] text-right border border-red-200 dark:border-red-800 rounded px-1.5 py-0.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-red-400 bg-white dark:bg-gray-800 dark:text-gray-200"
                               />
                             </td>
@@ -659,8 +684,8 @@ function ForecastTableWithAdjustments({
               );
             })}
 
-            {/* ── Consensus row — always visible when not in multi-mode ── */}
-            {!isMultiMode && bestFc && monthDates.length > 0 && (
+            {/* ── Consensus row — visible when adjustments exist ── */}
+            {(isMultiMode ? aggFcRow : bestFc) && monthDates.length > 0 && adjCount > 0 && (
               <tr className="border-t-2 border-indigo-200 dark:border-indigo-800 bg-indigo-50/70 dark:bg-indigo-900/20">
                 <td
                   className="px-3 py-2 text-xs font-semibold text-indigo-800 dark:text-indigo-300 whitespace-nowrap sticky left-0 z-10"
@@ -672,7 +697,7 @@ function ForecastTableWithAdjustments({
                     Consensus
                   </span>
                 </td>
-                {bestFc.point_forecast.map((modelVal, i) => {
+                {(isMultiMode ? aggFcRow : bestFc).point_forecast.map((modelVal, i) => {
                   const dateStr = monthDates[i];
                   if (!dateStr) return <td key={i} />;
                   const cv = consensusValue(modelVal, dateStr);
@@ -699,7 +724,7 @@ function ForecastTableWithAdjustments({
       </div>
 
       {/* Legend */}
-      {!isMultiMode && (
+      {(
         <div className="flex items-center gap-4 mt-2 text-xs text-gray-400 dark:text-gray-500 flex-wrap">
           <span className="flex items-center gap-1">
             <span className="inline-block w-2.5 h-2.5 rounded-full bg-indigo-500" />
@@ -1004,6 +1029,10 @@ export const TimeSeriesViewer = () => {
   // ---- Display aggregation granularity ----
   const [displayAgg, setDisplayAgg] = useState('native');
 
+  // ---- Period date-range filter ----
+  const [periodStart, setPeriodStart] = useState(null); // null = no filter (all)
+  const [periodEnd, setPeriodEnd] = useState(null);     // null = no filter (all)
+
   const handleDragStart = useCallback((id) => setDraggingId(id), []);
   const handleDragOver  = useCallback((id) => setDragOverId(id), []);
   const handleDrop      = useCallback((overId) => {
@@ -1072,17 +1101,30 @@ export const TimeSeriesViewer = () => {
   // For multi-select: load aggregated data instead of navigating
   const handleItemsChange = (items) => {
     setSelectedItems(items);
-    setSelectedSites([]); // reset sites when items change
     setMultiSeriesData(null);
+    // When clearing items (empty = "all"), keep sites as-is to allow "all items × selected sites"
+    // When selecting multiple items, auto-select all their available sites
+    if (items.length > 1) {
+      const sites = filteredSeriesList
+        .filter(s => items.includes(parseUniqueId(s.unique_id).item))
+        .map(s => parseUniqueId(s.unique_id).site);
+      const uniqueSites = [...new Set(sites)].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      setSelectedSites(uniqueSites);
+    } else if (items.length === 1) {
+      setSelectedSites([]); // reset sites when single item selected
+    }
+    // items.length === 0 → keep current sites (empty = "all items")
   };
 
   const handleSitesChange = (sites) => {
     setSelectedSites(sites);
     setMultiSeriesData(null);
+    // Navigate to single series only when exactly 1 item × 1 site
     if (selectedItems.length === 1 && sites.length === 1) {
       const newId = `${selectedItems[0]}_${sites[0]}`;
       if (newId !== decodedId) navigate(`/series/${encodeURIComponent(newId)}`);
     }
+    // sites.length === 0 → "all sites" → will trigger multi-series aggregation
   };
 
   const handleSegmentChange = (segId) => {
@@ -1092,12 +1134,38 @@ export const TimeSeriesViewer = () => {
     setMultiSeriesData(null);
   };
 
+  // ---- Derived dropdown options ----
+  // filteredSeriesList: scoped to the active segment (null segmentMemberSet = All)
+  const filteredSeriesList = useMemo(() => {
+    if (!segmentMemberSet) return allSeriesList;
+    return allSeriesList.filter(s => segmentMemberSet.has(s.unique_id));
+  }, [allSeriesList, segmentMemberSet]);
+
+  const allItems = useMemo(() => {
+    const items = [...new Set(filteredSeriesList.map(s => parseUniqueId(s.unique_id).item))];
+    return items.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [filteredSeriesList]);
+
+  const availableSites = useMemo(() => {
+    // When no items selected → show all sites in segment (empty = "all items")
+    const source = selectedItems.length === 0
+      ? filteredSeriesList
+      : filteredSeriesList.filter(s => selectedItems.includes(parseUniqueId(s.unique_id).item));
+    const sites = source.map(s => parseUniqueId(s.unique_id).site);
+    return [...new Set(sites)].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [filteredSeriesList, selectedItems]);
+
   // ---- Trigger multi-series load when selection changes ----
   useEffect(() => {
+    // Empty items = all items, empty sites = all sites (for current segment)
+    const effectiveItems = selectedItems.length > 0 ? selectedItems : allItems;
+    const effectiveSites = selectedSites.length > 0 ? selectedSites : availableSites;
     const selectedUids = [];
-    selectedItems.forEach(item => {
-      selectedSites.forEach(site => {
-        if (item && site) selectedUids.push(`${item}_${site}`);
+    effectiveItems.forEach(item => {
+      effectiveSites.forEach(site => {
+        // Only include UIDs that actually exist in filteredSeriesList
+        const uid = `${item}_${site}`;
+        if (filteredSeriesList.some(s => s.unique_id === uid)) selectedUids.push(uid);
       });
     });
     if (selectedUids.length <= 1) {
@@ -1111,17 +1179,23 @@ export const TimeSeriesViewer = () => {
         api.get(`/series/${encodeURIComponent(uid)}/data`),
         api.get(`/forecasts/${encodeURIComponent(uid)}`),
         api.get(`/metrics/${encodeURIComponent(uid)}`),
+        api.get(`/series/${encodeURIComponent(uid)}/best-method`),
+        api.get(`/adjustments/${encodeURIComponent(uid)}`),
       ])
     )).then(results => {
       // Aggregate: demand = sum, forecast = sum, metrics = weighted avg (by n_windows)
       const allHistorical = {}; // date -> sum
       const allForecasts = {};  // method -> [sum per horizon]
       const allMetrics = {};    // method -> {sum of metric*w, totalW, n}
-      let forecastDatesRef = null;
+      // Per-uid best-method forecast for disaggregation weights
+      const perUidForecasts = {}; // uid -> { bestMethod, point_forecast[] }
+      // Per-uid existing adjustments
+      const perUidAdjustments = {}; // uid -> { "date|type" -> { value, ... } }
 
-      results.forEach(r => {
+      results.forEach((r, uidIdx) => {
         if (r.status !== 'fulfilled') return;
-        const [dataRes, fcRes, metricsRes] = r.value;
+        const uid = selectedUids[uidIdx];
+        const [dataRes, fcRes, metricsRes, bestRes, adjRes] = r.value;
 
         // Historical sum
         if (dataRes.status === 'fulfilled') {
@@ -1131,19 +1205,40 @@ export const TimeSeriesViewer = () => {
           });
         }
 
-        // Forecast sum
+        // Best method for this series
+        const seriesBest = bestRes?.status === 'fulfilled' ? bestRes.value.data?.best_method : null;
+
+        // Forecast sum + per-uid storage
         if (fcRes.status === 'fulfilled') {
           const fcasts = fcRes.value.data.forecasts || [];
           fcasts.forEach(f => {
             if (!allForecasts[f.method]) {
               allForecasts[f.method] = { point: new Array(f.point_forecast.length).fill(0), count: 0 };
-              forecastDatesRef = forecastDatesRef || f;
             }
             f.point_forecast.forEach((v, i) => {
               if (allForecasts[f.method].point[i] !== undefined) allForecasts[f.method].point[i] += v || 0;
             });
             allForecasts[f.method].count++;
           });
+          // Store the best-method forecast for this series (for disaggregation)
+          const bestFc = fcasts.find(f => f.method === seriesBest) || fcasts[0];
+          if (bestFc) {
+            perUidForecasts[uid] = {
+              bestMethod: bestFc.method,
+              point_forecast: bestFc.point_forecast,
+            };
+          }
+        }
+
+        // Existing adjustments for this series
+        if (adjRes?.status === 'fulfilled') {
+          const map = {};
+          (adjRes.value.data || []).forEach(a => {
+            map[`${a.forecast_date}|${a.adjustment_type}`] = a;
+          });
+          perUidAdjustments[uid] = map;
+        } else {
+          perUidAdjustments[uid] = {};
         }
 
         // Metrics weighted average
@@ -1180,51 +1275,59 @@ export const TimeSeriesViewer = () => {
         return entry;
       });
 
+      // Aggregate the per-uid best-method forecasts into a single "Forecast" row
+      const uidList = Object.keys(perUidForecasts);
+      let aggBestForecast = null;
+      if (uidList.length > 0) {
+        const len = perUidForecasts[uidList[0]].point_forecast.length;
+        const summed = new Array(len).fill(0);
+        uidList.forEach(uid => {
+          perUidForecasts[uid].point_forecast.forEach((v, i) => { summed[i] += v || 0; });
+        });
+        aggBestForecast = summed;
+      }
+
+      // Aggregate existing adjustments from all series
+      const aggAdjustments = {};
+      Object.values(perUidAdjustments).forEach(adjMap => {
+        Object.entries(adjMap).forEach(([key, entry]) => {
+          if (!aggAdjustments[key]) aggAdjustments[key] = { ...entry, value: 0 };
+          aggAdjustments[key].value += Number(entry.value) || 0;
+        });
+      });
+
       setMultiSeriesData({
         historical: aggregatedHistorical,
         forecasts: aggregatedForecasts,
         metrics: aggregatedMetrics,
         uids: selectedUids,
+        perUidForecasts,     // for disaggregation weights
+        perUidAdjustments,   // existing per-series adjustments
+        aggBestForecast,     // single summed best-method forecast array
+        aggAdjustments,      // aggregated adjustments across all series
       });
       setMultiLoading(false);
     });
-  }, [selectedItems, selectedSites]);
-
-  // ---- Derived dropdown options ----
-  // filteredSeriesList: scoped to the active segment (null segmentMemberSet = All)
-  const filteredSeriesList = useMemo(() => {
-    if (!segmentMemberSet) return allSeriesList;
-    return allSeriesList.filter(s => segmentMemberSet.has(s.unique_id));
-  }, [allSeriesList, segmentMemberSet]);
-
-  const allItems = useMemo(() => {
-    const items = [...new Set(filteredSeriesList.map(s => parseUniqueId(s.unique_id).item))];
-    return items.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  }, [filteredSeriesList]);
-
-  const availableSites = useMemo(() => {
-    if (selectedItems.length === 0) return [];
-    // Sites available for any of the selected items (within segment)
-    const sites = filteredSeriesList
-      .filter(s => selectedItems.includes(parseUniqueId(s.unique_id).item))
-      .map(s => parseUniqueId(s.unique_id).site);
-    return [...new Set(sites)].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  }, [filteredSeriesList, selectedItems]);
+  }, [selectedItems, selectedSites, allItems, availableSites, filteredSeriesList]);
 
   // Derive single item/site for single-series mode (backward compat)
   const selectedItem = selectedItems[0] || '';
   const selectedSite = selectedSites[0] || '';
 
-  // All unique_ids from the current item × site selection
+  // All unique_ids from the current item × site selection (empty = "all")
   const forecastUids = useMemo(() => {
+    if (multiSeriesData?.uids) return multiSeriesData.uids;
+    const effItems = selectedItems.length > 0 ? selectedItems : allItems;
+    const effSites = selectedSites.length > 0 ? selectedSites : availableSites;
     const uids = [];
-    selectedItems.forEach(item => {
-      selectedSites.forEach(site => {
-        if (item && site) uids.push(`${item}_${site}`);
+    effItems.forEach(item => {
+      effSites.forEach(site => {
+        const uid = `${item}_${site}`;
+        if (filteredSeriesList.some(s => s.unique_id === uid)) uids.push(uid);
       });
     });
     return uids;
-  }, [selectedItems, selectedSites]);
+  }, [selectedItems, selectedSites, allItems, availableSites, filteredSeriesList, multiSeriesData]);
 
   /* ---------- data loading ---------- */
   useEffect(() => {
@@ -1462,6 +1565,114 @@ export const TimeSeriesViewer = () => {
     } catch { /* non-fatal */ }
   }, [decodedId]);
 
+  // ---- Multi-series adjustment: disaggregate proportionally and save to each series ----
+  const multiAdjDebounceRef = useRef({});
+
+  const saveMultiAdjustment = useCallback((forecastDate, adjType, value, note, periodIdx) => {
+    if (!multiSeriesData) return;
+    const key = `${forecastDate}|${adjType}`;
+    if (multiAdjDebounceRef.current[key]) clearTimeout(multiAdjDebounceRef.current[key]);
+
+    const strVal = String(value).trim();
+    const isEmpty = strVal === '' || strVal === null;
+    const numVal = isEmpty ? NaN : Number(strVal);
+    const isInvalid = isEmpty || isNaN(numVal);
+    const { perUidForecasts, uids, aggAdjustments, perUidAdjustments } = multiSeriesData;
+
+    if (isInvalid) {
+      // Delete all per-series adjustments for this date+type
+      multiAdjDebounceRef.current[key] = setTimeout(async () => {
+        setAdjSaving(prev => ({ ...prev, [key]: true }));
+        try {
+          await Promise.allSettled(uids.map(uid =>
+            api.delete(`/adjustments/${encodeURIComponent(uid)}/${forecastDate}/${adjType}`)
+          ));
+          // Update local multi-series state
+          setMultiSeriesData(prev => {
+            if (!prev) return prev;
+            const newAgg = { ...prev.aggAdjustments };
+            delete newAgg[key];
+            const newPerUid = { ...prev.perUidAdjustments };
+            uids.forEach(uid => {
+              newPerUid[uid] = { ...newPerUid[uid] };
+              delete newPerUid[uid][key];
+            });
+            return { ...prev, aggAdjustments: newAgg, perUidAdjustments: newPerUid };
+          });
+        } catch { /* non-fatal */ }
+        finally { setAdjSaving(prev => { const n = { ...prev }; delete n[key]; return n; }); }
+      }, 400);
+      return;
+    }
+
+    // Compute weights: each series' best-method forecast at this period / total
+    multiAdjDebounceRef.current[key] = setTimeout(async () => {
+      setAdjSaving(prev => ({ ...prev, [key]: true }));
+      try {
+        const weights = {};
+        let total = 0;
+        uids.forEach(uid => {
+          const fc = perUidForecasts[uid];
+          if (!fc) return;
+          const val = Math.abs(fc.point_forecast[periodIdx] || 0);
+          weights[uid] = val;
+          total += val;
+        });
+        // Normalize weights; if total is 0, distribute equally
+        const nUids = uids.length;
+        uids.forEach(uid => {
+          weights[uid] = total > 0 ? weights[uid] / total : 1 / nUids;
+        });
+
+        // For adjustments: distribute the delta proportionally
+        // For overrides: distribute the total value proportionally
+        const promises = uids.map(uid => {
+          const perSeriesVal = adjType === 'override'
+            ? numVal * weights[uid]                    // proportional share of the override total
+            : numVal * weights[uid];                   // proportional share of the adjustment delta
+          return api.post(`/adjustments/${encodeURIComponent(uid)}`, {
+            forecast_date: forecastDate,
+            adjustment_type: adjType,
+            value: Math.round(perSeriesVal * 100) / 100, // round to 2 decimals
+            note: note || null,
+          });
+        });
+        await Promise.allSettled(promises);
+
+        // Update local multi-series state
+        setMultiSeriesData(prev => {
+          if (!prev) return prev;
+          const newAgg = { ...prev.aggAdjustments };
+          newAgg[key] = { forecast_date: forecastDate, adjustment_type: adjType, value: numVal };
+          const newPerUid = { ...prev.perUidAdjustments };
+          uids.forEach(uid => {
+            const perVal = adjType === 'override'
+              ? numVal * weights[uid]
+              : numVal * weights[uid];
+            newPerUid[uid] = { ...newPerUid[uid] };
+            newPerUid[uid][key] = { forecast_date: forecastDate, adjustment_type: adjType, value: Math.round(perVal * 100) / 100 };
+          });
+          return { ...prev, aggAdjustments: newAgg, perUidAdjustments: newPerUid };
+        });
+      } catch (e) {
+        console.error('saveMultiAdjustment failed:', e?.response?.data || e.message);
+      } finally {
+        setAdjSaving(prev => { const n = { ...prev }; delete n[key]; return n; });
+      }
+    }, 400);
+  }, [multiSeriesData]);
+
+  const resetMultiAdjustments = useCallback(async () => {
+    if (!multiSeriesData) return;
+    if (!window.confirm(`Reset ALL adjustments for ${multiSeriesData.uids.length} series?`)) return;
+    try {
+      await Promise.allSettled(multiSeriesData.uids.map(uid =>
+        api.delete(`/adjustments/${encodeURIComponent(uid)}`)
+      ));
+      setMultiSeriesData(prev => prev ? { ...prev, aggAdjustments: {}, perUidAdjustments: {} } : prev);
+    } catch { /* non-fatal */ }
+  }, [multiSeriesData]);
+
   useEffect(() => {
     if (origins.length === 0) return;
     const origin = origins[selectedOriginIdx];
@@ -1527,11 +1738,32 @@ export const TimeSeriesViewer = () => {
     return 'year';
   }, [daysPerPeriod, displayAgg]);
 
-  // Display-aggregated historical data
-  const dispHistData = useMemo(
-    () => aggHistData(activeHistoricalData, displayAgg),
-    [activeHistoricalData, displayAgg]
-  );
+  // Date bounds for the period date-range picker
+  const dateBounds = useMemo(() => {
+    const dates = activeHistoricalData?.date;
+    if (!dates || dates.length === 0) return { min: null, max: null };
+    return { min: dates[0].slice(0, 10), max: dates[dates.length - 1].slice(0, 10) };
+  }, [activeHistoricalData]);
+
+  const handlePeriodChange = useCallback((start, end) => {
+    setPeriodStart(start);
+    setPeriodEnd(end);
+  }, []);
+
+  // Display-aggregated historical data (with optional period date-range filter)
+  const dispHistData = useMemo(() => {
+    let data = aggHistData(activeHistoricalData, displayAgg);
+    if (!data?.date?.length || (!periodStart && !periodEnd)) return data;
+    const lo = periodStart || data.date[0];
+    const hi = periodEnd || data.date[data.date.length - 1];
+    const startIdx = data.date.findIndex(d => d >= lo);
+    const endIdx = data.date.findLastIndex(d => d <= hi);
+    if (startIdx < 0 || endIdx < 0 || startIdx > endIdx) return data;
+    return {
+      date: data.date.slice(startIdx, endIdx + 1),
+      value: data.value.slice(startIdx, endIdx + 1),
+    };
+  }, [activeHistoricalData, displayAgg, periodStart, periodEnd]);
 
   /* ---------- build combined data for main chart ---------- */
   const { allData, allDates } = useMemo(() => {
@@ -2187,7 +2419,7 @@ export const TimeSeriesViewer = () => {
               onChange={handleSitesChange}
               options={availableSites}
               recentOptions={recentSites.filter(s => availableSites.includes(s))}
-              disabled={selectedItems.length === 0 || availableSites.length === 0}
+              disabled={availableSites.length === 0}
               placeholder="Search site..."
             />
             {/* Time aggregation granularity */}
@@ -2202,6 +2434,17 @@ export const TimeSeriesViewer = () => {
                   <option key={o.value} value={o.value}>{o.label}</option>
                 ))}
               </select>
+            </div>
+            {/* Period date-range filter */}
+            <div className="flex flex-col gap-1 flex-shrink-0">
+              <label className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Period</label>
+              <DateRangePicker
+                startDate={periodStart}
+                endDate={periodEnd}
+                minDate={dateBounds.min}
+                maxDate={dateBounds.max}
+                onChange={handlePeriodChange}
+              />
             </div>
             <div className="flex items-center gap-2 flex-shrink-0 pb-0.5">
               <button
@@ -2346,7 +2589,7 @@ export const TimeSeriesViewer = () => {
               onChange={handleSitesChange}
               options={availableSites}
               recentOptions={recentSites.filter(s => availableSites.includes(s))}
-              disabled={selectedItems.length === 0 || availableSites.length === 0}
+              disabled={availableSites.length === 0}
               placeholder="Search site..."
             />
             {/* Mobile time aggregation */}
@@ -2361,6 +2604,17 @@ export const TimeSeriesViewer = () => {
                   <option key={o.value} value={o.value}>{o.label}</option>
                 ))}
               </select>
+            </div>
+            {/* Mobile period filter */}
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide whitespace-nowrap">Period</label>
+              <DateRangePicker
+                startDate={periodStart}
+                endDate={periodEnd}
+                minDate={dateBounds.min}
+                maxDate={dateBounds.max}
+                onChange={handlePeriodChange}
+              />
             </div>
           </div>
           <div className="flex items-center gap-2 mt-3">
@@ -2452,21 +2706,23 @@ export const TimeSeriesViewer = () => {
         </div>
       </div>
 
-      {/* Header */}
-      <div id="tsv-header" className="mb-6">
-        <h1 className="text-2xl sm:text-3xl font-bold mb-3 dark:text-white">Series: {decodedId}</h1>
-        {characteristics && (
-          <div className="flex flex-wrap gap-2 text-sm">
-            <span className="bg-gray-100 dark:bg-gray-700 dark:text-gray-300 px-3 py-1 rounded-full">{characteristics.n_observations} observations</span>
-            <span className={`px-3 py-1 rounded-full ${characteristics.is_intermittent ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300' : 'bg-gray-100 dark:bg-gray-700 dark:text-gray-300'}`}>{characteristics.is_intermittent ? 'Intermittent' : 'Continuous'}</span>
-            <span className={`px-3 py-1 rounded-full ${characteristics.has_seasonality ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300' : 'bg-gray-100 dark:bg-gray-700 dark:text-gray-300'}`}>{characteristics.has_seasonality ? 'Seasonal' : 'Non-Seasonal'}</span>
-            <span className={`px-3 py-1 rounded-full ${characteristics.has_trend ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300' : 'bg-gray-100 dark:bg-gray-700 dark:text-gray-300'}`}>{characteristics.has_trend ? 'Trending' : 'Stationary'}</span>
-            <span className={`px-3 py-1 rounded-full font-medium ${characteristics.complexity_level === 'high' ? 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300' : characteristics.complexity_level === 'medium' ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300' : 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300'}`}>{characteristics.complexity_level} complexity</span>
-            {hasOutlierCorrections && <span className="bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-300 px-3 py-1 rounded-full font-semibold">{nOutliers} outlier{nOutliers !== 1 ? 's' : ''} adjusted</span>}
-            {bestMethod && <span className="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300 px-3 py-1 rounded-full font-semibold">Winner: {bestMethod.best_method}</span>}
-          </div>
-        )}
-      </div>
+      {/* Header — hidden in multi-series mode */}
+      {!isMultiMode && (
+        <div id="tsv-header" className="mb-6">
+          <h1 className="text-2xl sm:text-3xl font-bold mb-3 dark:text-white">Series: {decodedId}</h1>
+          {characteristics && (
+            <div className="flex flex-wrap gap-2 text-sm">
+              <span className="bg-gray-100 dark:bg-gray-700 dark:text-gray-300 px-3 py-1 rounded-full">{characteristics.n_observations} observations</span>
+              <span className={`px-3 py-1 rounded-full ${characteristics.is_intermittent ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300' : 'bg-gray-100 dark:bg-gray-700 dark:text-gray-300'}`}>{characteristics.is_intermittent ? 'Intermittent' : 'Continuous'}</span>
+              <span className={`px-3 py-1 rounded-full ${characteristics.has_seasonality ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-300' : 'bg-gray-100 dark:bg-gray-700 dark:text-gray-300'}`}>{characteristics.has_seasonality ? 'Seasonal' : 'Non-Seasonal'}</span>
+              <span className={`px-3 py-1 rounded-full ${characteristics.has_trend ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-800 dark:text-purple-300' : 'bg-gray-100 dark:bg-gray-700 dark:text-gray-300'}`}>{characteristics.has_trend ? 'Trending' : 'Stationary'}</span>
+              <span className={`px-3 py-1 rounded-full font-medium ${characteristics.complexity_level === 'high' ? 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-300' : characteristics.complexity_level === 'medium' ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-300' : 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-300'}`}>{characteristics.complexity_level} complexity</span>
+              {hasOutlierCorrections && <span className="bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-300 px-3 py-1 rounded-full font-semibold">{nOutliers} outlier{nOutliers !== 1 ? 's' : ''} adjusted</span>}
+              {bestMethod && <span className="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300 px-3 py-1 rounded-full font-semibold">Winner: {bestMethod.best_method}</span>}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Draggable sections — rendered in user-defined order ── */}
       {(() => {
@@ -2483,8 +2739,8 @@ export const TimeSeriesViewer = () => {
         // Build map of section id → JSX (null = not applicable, skip)
         const sectionNodes = {};
 
-        /* toggles */
-        sectionNodes['toggles'] = activeForecasts.length > 0 ? (
+        /* toggles — hidden in multi-series mode */
+        sectionNodes['toggles'] = (activeForecasts.length > 0 && !isMultiMode) ? (
           <Section key="toggles" id="tsv-toggles" title="Method Toggles" storageKey="tsv_toggles_open" {...dp('toggles')}>
             <p className="text-xs text-gray-400 dark:text-gray-500 mb-2">Click a method to show/hide its line. Click the <span className="inline-block align-middle" style={{width:14,height:10,background:'rgba(99,102,241,0.25)',borderRadius:2,border:'1px solid rgba(99,102,241,0.5)'}}></span> icon to toggle its confidence bands.</p>
             <div className="flex flex-wrap gap-2">
@@ -2523,8 +2779,8 @@ export const TimeSeriesViewer = () => {
           </Section>
         ) : null;
 
-        /* outlier */
-        sectionNodes['outlier'] = (hasOutlierCorrections && outlierChartSpec) ? (
+        /* outlier — hidden in multi-series mode */
+        sectionNodes['outlier'] = (hasOutlierCorrections && outlierChartSpec && !isMultiMode) ? (
           <Section key="outlier" title="Demand Before & After Correction" storageKey="tsv_outlier_open" badge={`${nOutliers} outlier${nOutliers !== 1 ? 's' : ''}`} {...dp('outlier')}>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
               Detected via <span className="font-medium">{outlierInfo?.detection_method || 'IQR'}</span>, corrected with <span className="font-medium">{outlierInfo?.correction_method || 'clip'}</span>.
@@ -2546,8 +2802,8 @@ export const TimeSeriesViewer = () => {
           </Section>
         );
 
-        /* rationale */
-        if (methodExplanation) {
+        /* rationale — hidden in multi-series mode */
+        if (methodExplanation && !isMultiMode) {
           const chars = methodExplanation.characteristics || {};
           const acf   = methodExplanation.acf  || { lags: [], values: [], ci_upper: [], ci_lower: [] };
           const pacf  = methodExplanation.pacf || { lags: [], values: [] };
@@ -2782,8 +3038,8 @@ export const TimeSeriesViewer = () => {
           sectionNodes['rationale'] = null;
         }
 
-        /* scoring */
-        sectionNodes['scoring'] = (targetChartSpec || compositeScoreSpec) ? (
+        /* scoring — hidden in multi-series mode */
+        sectionNodes['scoring'] = ((targetChartSpec || compositeScoreSpec) && !isMultiMode) ? (
           <Section key="scoring" id="tsv-scoring" title="Accuracy vs Precision & Composite Score" storageKey="tsv_scoring_open" {...dp('scoring')}>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {targetChartSpec && (
@@ -2809,8 +3065,8 @@ export const TimeSeriesViewer = () => {
           </Section>
         ) : null;
 
-        /* metrics */
-        sectionNodes['metrics'] = activeMetrics.length > 0 ? (
+        /* metrics — hidden in multi-series mode */
+        sectionNodes['metrics'] = (activeMetrics.length > 0 && !isMultiMode) ? (
           <Section key="metrics" title={`Comprehensive Metrics Comparison${isMultiMode ? ' (weighted avg)' : ''}`} storageKey="tsv_metrics_open" {...dp('metrics')}>
 
             {/* ── Backtesting Configuration sliders (single-series only) ── */}
@@ -3044,8 +3300,8 @@ export const TimeSeriesViewer = () => {
           </Section>
         ) : null;
 
-        /* hyperparameters — per-method EDITABLE parameter cards */
-        sectionNodes['hyperparameters'] = activeForecasts.some(f => f.hyperparameters) ? (
+        /* hyperparameters — per-method EDITABLE parameter cards — hidden in multi-series mode */
+        sectionNodes['hyperparameters'] = (activeForecasts.some(f => f.hyperparameters) && !isMultiMode) ? (
           <Section key="hyperparameters" title="Model Hyperparameters &amp; Configuration" storageKey="tsv_hyperparams_open" {...dp('hyperparameters')}>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
               Edit parameters below and click <strong className="dark:text-gray-300">Save</strong> to persist. Click <strong className="dark:text-gray-300">Run Forecast</strong> to re-run with your custom values.
@@ -3382,8 +3638,8 @@ export const TimeSeriesViewer = () => {
           </Section>
         ) : null;
 
-        /* ridge */
-        sectionNodes['ridge'] = ridgePlotData ? (
+        /* ridge — hidden in multi-series mode */
+        sectionNodes['ridge'] = (ridgePlotData && !isMultiMode) ? (
           <Section key="ridge" title="Forecast Distribution Over Time (3D)" storageKey="tsv_ridge_open" {...dp('ridge')}>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-1">
               3D surface of forecast density by horizon ({distributions?.method || 'best method'}). X = forecast value, Y = horizon month, Z = density. Dashed lines = mean per horizon.
@@ -3425,7 +3681,7 @@ export const TimeSeriesViewer = () => {
                               : (convergenceView === 'racing' && !hasRacing) ? 'convergence'
                               : convergenceView;
 
-          if (hasConvergence || hasRacing) {
+          if ((hasConvergence || hasRacing) && !isMultiMode) {
             sectionNodes['evolution'] = (
               <Section key="evolution" title="Forecast Evolution" storageKey="tsv_evolution_open" {...dp('evolution')}>
                 {/* View toggle tabs */}
@@ -3554,6 +3810,9 @@ export const TimeSeriesViewer = () => {
               isDark={isDark}
               dateRangeEnd={dateRangeEnd}
               methodExplanation={methodExplanation}
+              multiSeriesData={multiSeriesData}
+              saveMultiAdjustment={saveMultiAdjustment}
+              resetMultiAdjustments={resetMultiAdjustments}
             />
           </div>
         ) : null;
