@@ -31,6 +31,95 @@ const METHOD_COLORS = {
 };
 const getMethodColor = (method) => METHOD_COLORS[method] || '#6b7280';
 
+/* ─── ListEditorPopup ──────────────────────────────────────────────────
+ * A small popup for editing array values (e.g. confidence_levels).
+ * Displays each item as an editable row with add / delete controls.
+ * ─────────────────────────────────────────────────────────────────────── */
+const ListEditorPopup = ({ values, onChange, onClose, label }) => {
+  const [items, setItems] = useState(() =>
+    (Array.isArray(values) ? values : []).map((v, i) => ({ id: i, value: v }))
+  );
+  const nextId = useRef((Array.isArray(values) ? values.length : 0));
+  const popupRef = useRef(null);
+
+  // Close on outside click or Escape
+  useEffect(() => {
+    const handleClick = (e) => { if (popupRef.current && !popupRef.current.contains(e.target)) onClose(); };
+    const handleKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleKey);
+    return () => { document.removeEventListener('mousedown', handleClick); document.removeEventListener('keydown', handleKey); };
+  }, [onClose]);
+
+  const updateItem = (id, raw) => {
+    setItems(prev => prev.map(it => it.id === id ? { ...it, value: raw } : it));
+  };
+  const removeItem = (id) => {
+    setItems(prev => prev.filter(it => it.id !== id));
+  };
+  const addItem = () => {
+    const id = nextId.current++;
+    setItems(prev => [...prev, { id, value: '' }]);
+  };
+  const handleApply = () => {
+    const parsed = items.map(it => {
+      const trimmed = String(it.value).trim();
+      const n = Number(trimmed);
+      return trimmed === '' ? null : (isNaN(n) ? trimmed : n);
+    }).filter(v => v !== null);
+    onChange(parsed);
+    onClose();
+  };
+
+  return (
+    <div ref={popupRef}
+      className="absolute z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-lg shadow-xl p-3 min-w-[200px]"
+      style={{ top: '100%', right: 0, marginTop: 4 }}
+    >
+      <div className="text-xs font-semibold text-gray-600 dark:text-gray-300 mb-2">{label || 'Edit list'}</div>
+      <div className="flex flex-col gap-1 max-h-48 overflow-y-auto mb-2">
+        {items.map((it, idx) => (
+          <div key={it.id} className="flex items-center gap-1">
+            <span className="text-[10px] text-gray-400 dark:text-gray-500 w-4 text-right flex-shrink-0">{idx + 1}</span>
+            <input
+              type="text"
+              autoFocus={idx === items.length - 1}
+              value={it.value}
+              onChange={(e) => updateItem(it.id, e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addItem(); } }}
+              className="flex-1 text-xs font-mono border border-gray-200 dark:border-gray-600 rounded px-1.5 py-0.5 bg-white dark:bg-gray-900 dark:text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-400 w-20"
+            />
+            <button
+              onClick={() => removeItem(it.id)}
+              className="text-red-400 hover:text-red-600 dark:text-red-500 dark:hover:text-red-400 text-xs px-1 flex-shrink-0"
+              title="Remove"
+            >&times;</button>
+          </div>
+        ))}
+        {items.length === 0 && (
+          <div className="text-xs text-gray-400 dark:text-gray-500 italic py-1">Empty list</div>
+        )}
+      </div>
+      <div className="flex items-center justify-between border-t border-gray-100 dark:border-gray-700 pt-2">
+        <button
+          onClick={addItem}
+          className="text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-300 font-medium"
+        >+ Add row</button>
+        <div className="flex gap-1.5">
+          <button
+            onClick={onClose}
+            className="text-xs px-2 py-1 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+          >Cancel</button>
+          <button
+            onClick={handleApply}
+            className="text-xs px-2.5 py-1 bg-indigo-500 text-white rounded hover:bg-indigo-600 font-medium"
+          >Apply</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const fmtDate = (d) => d.toISOString().split('T')[0];
 
 // ---- Time aggregation helpers ----
@@ -119,7 +208,7 @@ const parseUniqueId = (uid) => {
 const SECTION_ORDER_KEY = 'tsv_section_order';
 const DEFAULT_SECTION_ORDER = [
   'toggles', 'main_chart', 'forecast_table', 'outlier',
-  'rationale', 'scoring', 'metrics', 'hyperparameters', 'ridge', 'evolution',
+  'rationale', 'metrics', 'hyperparameters', 'ridge', 'evolution',
 ];
 
 function useSectionOrder() {
@@ -1020,6 +1109,7 @@ export const TimeSeriesViewer = () => {
   const [hpEdits, setHpEdits] = useState({});           // {method: {param: newValue}}
   const [hpSaving, setHpSaving] = useState(false);
   const [hpSavedOverrides, setHpSavedOverrides] = useState({}); // from DB: {method: {param: val}}
+  const [openListPopup, setOpenListPopup] = useState(null); // "method:key" for which list popup is open
 
   // ---- Section drag-and-drop order ----
   const { order: sectionOrder, reorder: reorderSections } = useSectionOrder();
@@ -2205,37 +2295,6 @@ export const TimeSeriesViewer = () => {
     return { traces, layout, method: selectedMethod };
   }, [convergenceData, convergenceMethod, bestMethod]);
 
-  const targetChartSpec = useMemo(() => {
-    if (!activeMetrics || activeMetrics.length === 0) return null;
-    const data = activeMetrics.map(m => ({ method: m.method, accuracy: Math.abs(m.bias || 0), precision: m.rmse || 0, isBest: bestMethod?.best_method === m.method, composite: compositeRanking?.[m.method] ?? null }));
-    const maxAccuracy = Math.max(...data.map(d => d.accuracy), 1);
-    const maxPrecision = Math.max(...data.map(d => d.precision), 1);
-    const bestStroke = isDark ? '#34d399' : '#059669';
-    const ruleColor = isDark ? '#4b5563' : '#d1d5db';
-    const pointStroke = isDark ? '#1f2937' : '#ffffff';
-    return {
-      $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: 380,
-      autosize: { type: 'fit', contains: 'padding' },
-      layer: [
-        { data: { values: [{ x: 0, y: 0, x2: maxAccuracy * 0.5, y2: maxPrecision * 0.5 }] }, mark: { type: 'rect', opacity: isDark ? 0.10 : 0.06, color: isDark ? '#22c55e' : '#16a34a' }, encoding: { x: { field: 'x', type: 'quantitative', scale: { domain: [0, maxAccuracy * 1.15] }, title: '|Bias| (Accuracy)' }, x2: { field: 'x2' }, y: { field: 'y', type: 'quantitative', scale: { domain: [0, maxPrecision * 1.15] }, title: 'RMSE (Precision)' }, y2: { field: 'y2' } } },
-        { data: { values: [{ x: maxAccuracy * 0.5, y: maxPrecision * 0.5 }] }, mark: { type: 'rule', strokeDash: [4, 4], color: ruleColor, strokeWidth: 1 }, encoding: { x: { field: 'x', type: 'quantitative' } } },
-        { data: { values: [{ x: maxAccuracy * 0.5, y: maxPrecision * 0.5 }] }, mark: { type: 'rule', strokeDash: [4, 4], color: ruleColor, strokeWidth: 1 }, encoding: { y: { field: 'y', type: 'quantitative' } } },
-        { data: { values: [{ x: maxAccuracy * 0.02, y: maxPrecision * 0.02, label: 'Best' }, { x: maxAccuracy * 1.05, y: maxPrecision * 0.02, label: 'Biased' }, { x: maxAccuracy * 0.02, y: maxPrecision * 1.05, label: 'Noisy' }, { x: maxAccuracy * 1.05, y: maxPrecision * 1.05, label: 'Worst' }] }, mark: { type: 'text', fontSize: 10, fontWeight: 'bold', opacity: isDark ? 0.35 : 0.25, align: 'left', baseline: 'top' }, encoding: { x: { field: 'x', type: 'quantitative' }, y: { field: 'y', type: 'quantitative' }, text: { field: 'label', type: 'nominal' } } },
-        { data: { values: data }, mark: { type: 'point', filled: true, size: 200, opacity: 0.9 }, encoding: { x: { field: 'accuracy', type: 'quantitative' }, y: { field: 'precision', type: 'quantitative' }, color: { field: 'method', type: 'nominal', scale: activeMethodDomain, legend: null }, stroke: { condition: { test: 'datum.isBest', value: bestStroke }, value: pointStroke }, strokeWidth: { condition: { test: 'datum.isBest', value: 3 }, value: 1.5 }, tooltip: [{ field: 'method', type: 'nominal', title: 'Method' }, { field: 'accuracy', type: 'quantitative', title: '|Bias|', format: ',.1f' }, { field: 'precision', type: 'quantitative', title: 'RMSE', format: ',.1f' }, { field: 'composite', type: 'quantitative', title: 'Score', format: '.3f' }] } },
-        { data: { values: data }, mark: { type: 'text', fontSize: 10, dy: -14, fontWeight: 500 }, encoding: { x: { field: 'accuracy', type: 'quantitative' }, y: { field: 'precision', type: 'quantitative' }, text: { field: 'method', type: 'nominal' }, color: { field: 'method', type: 'nominal', scale: activeMethodDomain, legend: null } } },
-        { data: { values: data.filter(d => d.isBest) }, mark: { type: 'text', fontSize: 16, dy: 1, dx: 18 }, encoding: { x: { field: 'accuracy', type: 'quantitative' }, y: { field: 'precision', type: 'quantitative' }, text: { value: '★' }, color: { value: bestStroke } } }
-      ],
-      config: vegaThemeConfig
-    };
-  }, [activeMetrics, bestMethod, compositeRanking, activeMethodDomain, isDark, vegaThemeConfig]);
-
-  const compositeScoreSpec = useMemo(() => {
-    if (!compositeRanking || Object.keys(compositeRanking).length === 0) return null;
-    const data = Object.entries(compositeRanking).map(([method, score]) => ({ method, score: score ?? 999, isBest: bestMethod?.best_method === method })).sort((a, b) => a.score - b.score);
-    const bestStroke = isDark ? '#34d399' : '#059669';
-    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: Math.max(120, data.length * 36), autosize: { type: 'fit', contains: 'padding' }, data: { values: data }, mark: { type: 'bar', cornerRadiusEnd: 4 }, encoding: { y: { field: 'method', type: 'nominal', sort: { field: 'score', order: 'ascending' }, title: 'Method' }, x: { field: 'score', type: 'quantitative', title: 'Composite Score (lower is better)' }, color: { field: 'method', type: 'nominal', legend: null, scale: activeMethodDomain }, stroke: { condition: { test: 'datum.isBest', value: bestStroke }, value: null }, strokeWidth: { condition: { test: 'datum.isBest', value: 3 }, value: 0 }, tooltip: [{ field: 'method', type: 'nominal', title: 'Method' }, { field: 'score', type: 'quantitative', title: 'Composite Score', format: '.4f' }] }, config: vegaThemeConfig };
-  }, [compositeRanking, bestMethod, activeMethodDomain, vegaThemeConfig, isDark]);
-
   const ridgePlotData = useMemo(() => {
     if (!distributions || !distributions.horizons || distributions.horizons.length === 0) return null;
     const horizons = distributions.horizons;
@@ -3038,32 +3097,7 @@ export const TimeSeriesViewer = () => {
           sectionNodes['rationale'] = null;
         }
 
-        /* scoring — hidden in multi-series mode */
-        sectionNodes['scoring'] = ((targetChartSpec || compositeScoreSpec) && !isMultiMode) ? (
-          <Section key="scoring" id="tsv-scoring" title="Accuracy vs Precision & Composite Score" storageKey="tsv_scoring_open" {...dp('scoring')}>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {targetChartSpec && (
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-300 mb-1">Accuracy vs Precision</h3>
-                  <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">Bottom-left = best (low bias, low RMSE). Star = winner.</p>
-                  <div className="w-full overflow-x-auto"><VegaLite spec={targetChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
-                </div>
-              )}
-              {compositeScoreSpec && (
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-300 mb-1">Composite Score Ranking</h3>
-                  <p className="text-xs text-gray-400 dark:text-gray-500 mb-1">Weighted score: lower is better. Green border = winner.</p>
-                  {compositeWeights && (
-                    <p className="text-xs text-gray-400 dark:text-gray-500 mb-3">
-                      Weights: {Object.entries(compositeWeights).map(([k, v]) => `${k}=${(v * 100).toFixed(0)}%`).join(', ')}
-                    </p>
-                  )}
-                  <div className="w-full overflow-x-auto"><VegaLite spec={compositeScoreSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
-                </div>
-              )}
-            </div>
-          </Section>
-        ) : null;
+        sectionNodes['scoring'] = null;
 
         /* metrics — hidden in multi-series mode */
         sectionNodes['metrics'] = (activeMetrics.length > 0 && !isMultiMode) ? (
@@ -3389,22 +3423,35 @@ export const TimeSeriesViewer = () => {
                     );
                   }
                   if (Array.isArray(original)) {
+                    const popupKey = `${method}:${k}`;
+                    const isPopupOpen = openListPopup === popupKey;
+                    const displayArr = Array.isArray(effective) ? effective : [];
                     return (
-                      <input type="text"
-                        value={Array.isArray(effective) ? effective.join(', ') : String(effective ?? '')}
-                        className={`w-full text-right font-mono text-xs border rounded px-1 py-0.5 ${borderCls} bg-white dark:bg-gray-900 dark:text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-400`}
-                        onChange={e => {
-                          const val = e.target.value.split(',').map(s => {
-                            const trimmed = s.trim();
-                            const n = Number(trimmed);
-                            return isNaN(n) ? trimmed : n;
-                          });
-                          setHpEdits(prev => ({
-                            ...prev,
-                            [method]: { ...(prev[method] || {}), [k]: val }
-                          }));
-                        }}
-                      />
+                      <div className="relative">
+                        <button
+                          onClick={() => setOpenListPopup(isPopupOpen ? null : popupKey)}
+                          className={`w-full text-right font-mono text-xs border rounded px-1.5 py-0.5 ${borderCls} bg-white dark:bg-gray-900 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer truncate flex items-center justify-end gap-1`}
+                          title={`[${displayArr.join(', ')}] — click to edit`}
+                        >
+                          <span className="truncate text-indigo-600 dark:text-indigo-400">[{displayArr.join(', ')}]</span>
+                          <svg className="w-3 h-3 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                          </svg>
+                        </button>
+                        {isPopupOpen && (
+                          <ListEditorPopup
+                            values={displayArr}
+                            label={k}
+                            onClose={() => setOpenListPopup(null)}
+                            onChange={(newArr) => {
+                              setHpEdits(prev => ({
+                                ...prev,
+                                [method]: { ...(prev[method] || {}), [k]: newArr }
+                              }));
+                            }}
+                          />
+                        )}
+                      </div>
                     );
                   }
                   // string

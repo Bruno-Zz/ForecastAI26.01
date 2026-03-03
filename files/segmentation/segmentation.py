@@ -472,11 +472,13 @@ class SegmentationEngine:
                     i.xuid           AS item_xuid,
                     i.description    AS item_description,
                     i.type_id        AS item_type_id,
+                    it.name          AS item_type_name,
                     i.attributes     AS item_attributes,
                     s.name           AS site_name,
                     s.xuid           AS site_xuid,
                     s.description    AS site_description,
                     s.type_id        AS site_type_id,
+                    st.name          AS site_type_name,
                     s.attributes     AS site_attributes,
                     tsc.n_observations,
                     tsc.date_range_start,
@@ -510,7 +512,9 @@ class SegmentationEngine:
                     ORDER BY unique_id
                 ) da
                 LEFT JOIN {schema}.item i ON i.id = da.item_id
+                LEFT JOIN {schema}.item_type it ON it.id = i.type_id
                 LEFT JOIN {schema}.site s ON s.id = da.site_id
+                LEFT JOIN {schema}.site_type st ON st.id = s.type_id
                 LEFT JOIN {schema}.time_series_characteristics tsc
                        ON tsc.unique_id = da.unique_id
             """
@@ -659,9 +663,10 @@ class SegmentationEngine:
 
         item.name                → item_name
         item.xuid                → item_xuid
-        item.type_id             → item_type_id
+        item.type_id             → item_type_name  (resolved via JOIN)
         item.attributes.color    → item_attr_color
         site.name                → site_name
+        site.type_id             → site_type_name  (resolved via JOIN)
         site.attributes.country  → site_attr_country
         demand.n_observations    → n_observations
         demand.abc_class         → abc_class
@@ -674,6 +679,11 @@ class SegmentationEngine:
         if field.startswith("site.attributes."):
             key = field[len("site.attributes."):]
             return f"site_attr_{key}"
+        # type_id fields resolve to the joined type name columns
+        if field == "item.type_id":
+            return "item_type_name"
+        if field == "site.type_id":
+            return "site_type_name"
         if field.startswith("item."):
             sub = field[len("item."):]
             return f"item_{sub}"

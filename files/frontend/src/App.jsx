@@ -1,17 +1,26 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
-import Dashboard from './components/Dashboard';
-import TimeSeriesViewer from './components/TimeSeriesViewer';
-import PipelineRunner from './components/PipelineRunner';
-import ProcessLog from './components/ProcessLog';
-import Settings from './components/Settings';
-import Segments from './components/Segments';
 import Login from './components/Login';
-import UserManagement from './components/UserManagement';
-import AuditLog from './components/AuditLog';
 import ThemeToggle from './components/ThemeToggle';
 import { useAuth } from './contexts/AuthContext';
 import { useTour } from './tour/useTour';
+
+/* ── Lazy-loaded route components (code-split into separate chunks) ── */
+const Dashboard = lazy(() => import('./components/Dashboard'));
+const TimeSeriesViewer = lazy(() => import('./components/TimeSeriesViewer'));
+const PipelineRunner = lazy(() => import('./components/PipelineRunner'));
+const ProcessLog = lazy(() => import('./components/ProcessLog'));
+const Settings = lazy(() => import('./components/Settings'));
+const Segments = lazy(() => import('./components/Segments'));
+const UserManagement = lazy(() => import('./components/UserManagement'));
+const AuditLog = lazy(() => import('./components/AuditLog'));
+
+/** Shared loading fallback shown while a lazy chunk downloads */
+const PageSpinner = () => (
+  <div className="flex items-center justify-center h-64">
+    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
+  </div>
+);
 
 function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
   const location = useLocation();
@@ -224,17 +233,19 @@ function App() {
 
         {/* Page content */}
         <main className="flex-1 overflow-y-auto">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/series/:uniqueId" element={<TimeSeriesViewer />} />
-            <Route path="/segments" element={<Segments />} />
-            <Route path="/pipeline" element={<PipelineRunner />} />
-            <Route path="/logs" element={<ProcessLog />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="/audit" element={<AuditLog />} />
-            <Route path="/users" element={<UserManagement />} />
-            <Route path="/login" element={<Navigate to="/" replace />} />
-          </Routes>
+          <Suspense fallback={<PageSpinner />}>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/series/:uniqueId" element={<TimeSeriesViewer />} />
+              <Route path="/segments" element={<Segments />} />
+              <Route path="/pipeline" element={<PipelineRunner />} />
+              <Route path="/logs" element={<ProcessLog />} />
+              <Route path="/settings" element={<Settings />} />
+              <Route path="/audit" element={<AuditLog />} />
+              <Route path="/users" element={<UserManagement />} />
+              <Route path="/login" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Suspense>
         </main>
       </div>
     </div>

@@ -6,7 +6,7 @@
  * All sections are individually collapsible.
  */
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { VegaLite } from 'react-vega';
 import { useLocale } from '../contexts/LocaleContext';
@@ -80,6 +80,10 @@ export const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Accuracy/Precision data
+  const [accuracyPrecisionData, setAccuracyPrecisionData] = useState(null);
+  const [selectedAccuracyMethod, setSelectedAccuracyMethod] = useState('');
+
   // Filters
   const [search, setSearch] = useState('');
   const [complexityFilter, setComplexityFilter] = useState('');
@@ -87,6 +91,14 @@ export const Dashboard = () => {
   const [bestMethodFilter, setBestMethodFilter] = useState('');
   const [sortField, setSortField] = useState('unique_id');
   const [sortDir, setSortDir] = useState('asc');
+  const [accuracyZoom, setAccuracyZoom] = useState(null);
+
+  // Brush overlay refs for accuracy/precision chart (direct DOM — no re-renders during drag)
+  const apChartRef = useRef(null);
+  const apViewRef = useRef(null);
+  const apBrushRef = useRef(null);    // the overlay div
+  const apDragRef = useRef({ active: false, x0: 0, y0: 0 });
+  const apDomainsRef = useRef({ x: [0, 1], y: [0, 1] }); // data domains for pixel↔data conversion
 
   // Pagination
   const [page, setPage] = useState(0);
@@ -104,17 +116,41 @@ export const Dashboard = () => {
         api.get('/series', { params: { limit: 50000 } }),
         api.get('/analytics'),
       ]);
-      if (seriesRes.status === 'fulfilled') setSeries(seriesRes.value.data);
-      if (analyticsRes.status === 'fulfilled') setAnalytics(analyticsRes.value.data);
-      setLoading(false);
+      if (seriesRes.status === 'fulfilled') {
+        setSeries(seriesRes.value.data || []);
+      } else {
+        console.error('Failed to load series:', seriesRes.reason);
+      }
+      if (analyticsRes.status === 'fulfilled') {
+        setAnalytics(analyticsRes.value.data);
+      } else {
+        console.error('Failed to load analytics:', analyticsRes.reason);
+      }
     } catch (err) {
+      console.error('Dashboard load error:', err);
       setError(err.message);
+    } finally {
       setLoading(false);
     }
   };
 
+  // Load accuracy/precision data when method filter changes
+  useEffect(() => {
+    const loadAccuracyPrecision = async () => {
+      try {
+        const params = selectedAccuracyMethod ? { method: selectedAccuracyMethod } : {};
+        const res = await api.get('/analytics/accuracy-precision', { params });
+        setAccuracyPrecisionData(res.data);
+      } catch (err) {
+        console.error('Failed to load accuracy/precision data:', err);
+        setAccuracyPrecisionData(null);
+      }
+    };
+    loadAccuracyPrecision();
+  }, [selectedAccuracyMethod]);
+
   const filteredSeries = useMemo(() => {
-    let result = series;
+    let result = series || [];
     if (search) {
       const lower = search.toLowerCase();
       result = result.filter(s => s.unique_id.toLowerCase().includes(lower));
@@ -125,6 +161,20 @@ export const Dashboard = () => {
       result = result.filter(s => s.is_intermittent === isInt);
     }
     if (bestMethodFilter) result = result.filter(s => s.best_method === bestMethodFilter);
+    
+    // Apply accuracy/precision zoom filter
+    if (accuracyZoom && accuracyPrecisionData?.points) {
+      const zoomedIds = new Set(
+        accuracyPrecisionData.points
+          .filter(d => 
+            d.accuracy >= accuracyZoom.x[0] && d.accuracy <= accuracyZoom.x[1] &&
+            d.precision >= accuracyZoom.y[0] && d.precision <= accuracyZoom.y[1]
+          )
+          .map(d => d.unique_id)
+      );
+      result = result.filter(s => zoomedIds.has(s.unique_id));
+    }
+    
     result.sort((a, b) => {
       let va = a[sortField], vb = b[sortField];
       if (typeof va === 'string') va = va.toLowerCase();
@@ -134,7 +184,7 @@ export const Dashboard = () => {
       return 0;
     });
     return result;
-  }, [series, search, complexityFilter, intermittentFilter, bestMethodFilter, sortField, sortDir]);
+  }, [series, search, complexityFilter, intermittentFilter, bestMethodFilter, sortField, sortDir, accuracyZoom, accuracyPrecisionData]);
 
   const pagedSeries = filteredSeries.slice(page * pageSize, (page + 1) * pageSize);
   const totalPages = Math.ceil(filteredSeries.length / pageSize);
@@ -254,8 +304,117 @@ export const Dashboard = () => {
     };
   }, [analytics, vegaConfig, locale, bestMethodFilter, isDark]);
 
+  const accuracyPrecisionSpec = useMemo(() => {
+    try {
+      if (!accuracyPrecisionData?.points || accuracyPrecisionData.points.length === 0) return null;
+      let data = accuracyPrecisionData.points;
+      
+      // Apply zoom filter if active
+      if (accuracyZoom) {
+        data = data.filter(d => 
+          d.accuracy >= accuracyZoom.x[0] && d.accuracy <= accuracyZoom.x[1] &&
+          d.precision >= accuracyZoom.y[0] && d.precision <= accuracyZoom.y[1]
+        );
+      }
+      
+      if (data.length === 0) return null;
+      
+      const maxAccuracy = Math.max(...data.map(d => d.accuracy || 0), 1);
+      const maxPrecision = Math.max(...data.map(d => d.precision || 0), 1);
+      const avgAccuracy = accuracyPrecisionData.summary?.avg_accuracy || 0;
+      const avgPrecision = accuracyPrecisionData.summary?.avg_precision || 0;
+      
+      // Get unique methods for color scale, sorted by count (same order as best method chart)
+      const methodCounts = {};
+      data.forEach(d => { if (d.method) methodCounts[d.method] = (methodCounts[d.method] || 0) + 1; });
+      const methods = Object.entries(methodCounts).sort((a, b) => b[1] - a[1]).map(([m]) => m);
+      
+      const xDom = [0, maxAccuracy * 1.1];
+      const yDom = [0, maxPrecision * 1.1];
+      apDomainsRef.current = { x: xDom, y: yDom };
+      const xScale = { domain: xDom };
+      const yScale = { domain: yDom };
+
+      return {
+        $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
+        width: 'container', height: 350,
+        config: { ...vegaConfig, legend: { labelColor: isDark ? '#e5e7eb' : '#374151', titleColor: isDark ? '#e5e7eb' : '#374151' } },
+        title: {
+          text: `Accuracy vs Precision (${formatNumber(data.length, locale, 0)} series${accuracyZoom ? ' (filtered)' : ''})`,
+          fontSize: 14,
+          color: isDark ? '#e5e7eb' : '#111827'
+        },
+        data: { values: data },
+        layer: [
+          // Green quadrant (best)
+          { data: { values: [{ x: 0, y: 0, x2: avgAccuracy, y2: avgPrecision }] },
+            mark: { type: 'rect', opacity: isDark ? 0.1 : 0.06, color: isDark ? '#22c55e' : '#16a34a' },
+            encoding: {
+              x: { field: 'x', type: 'quantitative', scale: xScale, title: '|Bias| (Accuracy)' },
+              x2: { field: 'x2' },
+              y: { field: 'y', type: 'quantitative', scale: yScale, title: 'RMSE (Precision)' },
+              y2: { field: 'y2' }
+            }
+          },
+          // Average lines
+          { data: { values: [{ x: avgAccuracy }] },
+            mark: { type: 'rule', strokeDash: [4, 4], color: isDark ? '#60a5fa' : '#3b82f6', strokeWidth: 1.5 },
+            encoding: { x: { field: 'x', type: 'quantitative', scale: xScale } }
+          },
+          { data: { values: [{ y: avgPrecision }] },
+            mark: { type: 'rule', strokeDash: [4, 4], color: isDark ? '#60a5fa' : '#3b82f6', strokeWidth: 1.5 },
+            encoding: { y: { field: 'y', type: 'quantitative', scale: yScale } }
+          },
+          // Labels
+          { data: { values: [
+            { x: maxAccuracy * 0.02, y: maxPrecision * 0.02, label: 'Best' },
+            { x: maxAccuracy * 0.98, y: maxPrecision * 0.02, label: 'Biased' },
+            { x: maxAccuracy * 0.02, y: maxPrecision * 0.98, label: 'Noisy' },
+            { x: maxAccuracy * 0.98, y: maxPrecision * 0.98, label: 'Worst' }
+          ]},
+            mark: { type: 'text', fontSize: 11, fontWeight: 'bold', opacity: isDark ? 0.4 : 0.25 },
+            encoding: { x: { field: 'x', type: 'quantitative', scale: xScale }, y: { field: 'y', type: 'quantitative', scale: yScale }, text: { field: 'label', type: 'nominal' } }
+          },
+          // Points colored by method
+          { data: { values: data },
+            mark: { type: 'point', filled: true, size: 80, opacity: 0.8 },
+            encoding: {
+              x: { field: 'accuracy', type: 'quantitative', scale: xScale, title: '|Bias| (Accuracy)' },
+              y: { field: 'precision', type: 'quantitative', scale: yScale, title: 'RMSE (Precision)' },
+              color: {
+                field: 'method',
+                type: 'nominal',
+                scale: { scheme: 'tableau10', domain: methods },
+                legend: { title: 'Method', orient: 'right' }
+              },
+              tooltip: [
+                { field: 'unique_id', type: 'nominal', title: 'Series' },
+                { field: 'method', type: 'nominal', title: 'Method' },
+                { field: 'accuracy', type: 'quantitative', title: '|Bias|', format: ',.2f' },
+                { field: 'precision', type: 'quantitative', title: 'RMSE', format: ',.2f' }
+              ]
+            }
+          }
+        ]
+      };
+    } catch (err) {
+      console.error('Error building accuracyPrecisionSpec:', err);
+      return null;
+    }
+  }, [accuracyPrecisionData, vegaConfig, locale, isDark, accuracyZoom]);
+
   if (loading) return <div className="flex items-center justify-center h-64"><div className="text-xl text-gray-500 dark:text-gray-400 animate-pulse">Loading dashboard...</div></div>;
   if (error) return <div className="flex items-center justify-center h-64"><div className="text-xl text-red-600 dark:text-red-400">Error: {error}</div></div>;
+
+  // Ensure we have data
+  if (!analytics && !series.length) {
+    return (
+      <div className="p-4 sm:p-6">
+        <h1 className="text-2xl sm:text-3xl font-bold mb-6 text-gray-900 dark:text-white">Forecasting Dashboard</h1>
+        <div className="text-gray-500 dark:text-gray-400">No data available. Please run the pipeline first.</div>
+      </div>
+    );
+  }
 
   // Table column definitions with responsive visibility
   const columns = [
@@ -298,27 +457,133 @@ export const Dashboard = () => {
       )}
 
       {/* Charts */}
-      {(complexitySpec || bestMethodSpec) && (
+      {(accuracyPrecisionSpec || bestMethodSpec) && (
         <Section title="Charts" storageKey="dash_charts_open" id="dash-charts">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {complexitySpec && (
+            {accuracyPrecisionSpec && (
               <div>
-                <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-400 mb-2">Complexity Distribution</h3>
-                <div className="w-full flex justify-center">
-                  <VegaLite
-                    spec={complexitySpec}
-                    actions={false}
-                    renderer="svg"
-                    style={{display:'block'}}
-                    onNewView={(view) => {
-                      view.addEventListener('click', (event, item) => {
-                        if (item?.datum?.level) {
-                          const level = item.datum.level;
-                          setComplexityFilter(prev => { setPage(0); return prev === level ? '' : level; });
-                        }
-                      });
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-400">Accuracy vs Precision</h3>
+                  <select
+                    value={selectedAccuracyMethod}
+                    onChange={(e) => { setSelectedAccuracyMethod(e.target.value); setPage(0); }}
+                    className="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 dark:text-gray-200"
+                  >
+                    <option value="">All Methods</option>
+                    {analytics?.best_method_distribution && Object.keys(analytics.best_method_distribution).map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-2 mb-2">
+                  <div
+                    ref={apChartRef}
+                    className="w-full overflow-x-auto relative select-none"
+                    style={{ cursor: 'crosshair' }}
+                    onMouseDown={(e) => {
+                      if (e.button !== 0) return;
+                      const rect = apChartRef.current.getBoundingClientRect();
+                      apDragRef.current = { active: true, x0: e.clientX - rect.left, y0: e.clientY - rect.top };
+                      if (apBrushRef.current) {
+                        const b = apBrushRef.current;
+                        b.style.display = 'block';
+                        b.style.left = `${apDragRef.current.x0}px`;
+                        b.style.top = `${apDragRef.current.y0}px`;
+                        b.style.width = '0px';
+                        b.style.height = '0px';
+                      }
                     }}
-                  />
+                    onMouseMove={(e) => {
+                      if (!apDragRef.current.active) return;
+                      const rect = apChartRef.current.getBoundingClientRect();
+                      const { x0, y0 } = apDragRef.current;
+                      const cx = e.clientX - rect.left;
+                      const cy = e.clientY - rect.top;
+                      if (apBrushRef.current) {
+                        const b = apBrushRef.current;
+                        b.style.left = `${Math.min(x0, cx)}px`;
+                        b.style.top = `${Math.min(y0, cy)}px`;
+                        b.style.width = `${Math.abs(cx - x0)}px`;
+                        b.style.height = `${Math.abs(cy - y0)}px`;
+                      }
+                    }}
+                    onMouseUp={(e) => {
+                      if (!apDragRef.current.active) return;
+                      apDragRef.current.active = false;
+                      if (apBrushRef.current) apBrushRef.current.style.display = 'none';
+                      const divRect = apChartRef.current.getBoundingClientRect();
+                      const { x0, y0 } = apDragRef.current;
+                      const cx = e.clientX - divRect.left;
+                      const cy = e.clientY - divRect.top;
+                      // Ignore clicks (require at least 10px drag)
+                      if (Math.abs(cx - x0) < 10 || Math.abs(cy - y0) < 10) return;
+                      const view = apViewRef.current;
+                      if (!view) return;
+                      try {
+                        // Get the SVG element inside the wrapper to compute the offset
+                        const svgEl = apChartRef.current.querySelector('svg');
+                        if (!svgEl) return;
+                        const svgRect = svgEl.getBoundingClientRect();
+                        const svgOffX = svgRect.left - divRect.left;
+                        const svgOffY = svgRect.top - divRect.top;
+                        // Vega origin = pixel offset of the plot area within the SVG
+                        const origin = view.origin();
+                        const plotW = view.width();
+                        const plotH = view.height();
+                        if (plotW <= 0 || plotH <= 0) return;
+                        // Convert div-relative px → plot-area-relative px
+                        const pxLeft  = Math.min(x0, cx) - svgOffX - origin[0];
+                        const pxRight = Math.max(x0, cx) - svgOffX - origin[0];
+                        const pxTop   = Math.min(y0, cy) - svgOffY - origin[1];
+                        const pxBot   = Math.max(y0, cy) - svgOffY - origin[1];
+                        // Clamp to plot area
+                        const cL = Math.max(0, Math.min(plotW, pxLeft));
+                        const cR = Math.max(0, Math.min(plotW, pxRight));
+                        const cT = Math.max(0, Math.min(plotH, pxTop));
+                        const cB = Math.max(0, Math.min(plotH, pxBot));
+                        // Linear interpolation using the known data domains
+                        const { x: xDom, y: yDom } = apDomainsRef.current;
+                        const dataX1 = xDom[0] + (cL / plotW) * (xDom[1] - xDom[0]);
+                        const dataX2 = xDom[0] + (cR / plotW) * (xDom[1] - xDom[0]);
+                        // Y axis is inverted: top pixel → high data value
+                        const dataY2 = yDom[1] - (cT / plotH) * (yDom[1] - yDom[0]);
+                        const dataY1 = yDom[1] - (cB / plotH) * (yDom[1] - yDom[0]);
+                        if (dataX2 > dataX1 && dataY2 > dataY1) {
+                          setAccuracyZoom({ x: [dataX1, dataX2], y: [dataY1, dataY2] });
+                          setPage(0);
+                        }
+                      } catch (err) { console.warn('brush zoom failed:', err); }
+                    }}
+                    onMouseLeave={() => {
+                      if (apDragRef.current.active) {
+                        apDragRef.current.active = false;
+                        if (apBrushRef.current) apBrushRef.current.style.display = 'none';
+                      }
+                    }}
+                  >
+                    <VegaLite
+                      spec={accuracyPrecisionSpec}
+                      actions={false}
+                      renderer="svg"
+                      style={{width: '100%'}}
+                      onNewView={(v) => { apViewRef.current = v; }}
+                    />
+                    {/* Brush selection rectangle (CSS overlay — no React re-renders) */}
+                    <div
+                      ref={apBrushRef}
+                      style={{ display: 'none', position: 'absolute', background: 'rgba(59,130,246,0.15)',
+                               border: '1px solid rgba(59,130,246,0.5)', borderRadius: 2,
+                               pointerEvents: 'none', zIndex: 10 }}
+                    />
+                  </div>
+                  {accuracyZoom && (
+                    <button
+                      onClick={() => setAccuracyZoom(null)}
+                      className="flex-shrink-0 text-xs px-2 py-1 bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 rounded text-gray-700 dark:text-gray-200"
+                    >
+                      Reset Zoom
+                    </button>
+                  )}
                 </div>
               </div>
             )}

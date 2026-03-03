@@ -3,7 +3,7 @@ FastAPI Backend for Forecasting System
 RESTful API for accessing forecasts, metrics, and visualizations
 """
 
-from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi import FastAPI, HTTPException, Query, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Optional, Dict, Any
@@ -1970,6 +1970,80 @@ async def get_analytics():
         analytics["outlier_total_count"] = 0
 
     return analytics
+
+
+@app.get("/api/analytics/accuracy-precision")
+async def get_accuracy_precision(
+    method: str = Query(None, description="Filter by best method"),
+):
+    """
+    Get aggregated accuracy/precision data for all series.
+
+    Returns data for accuracy vs precision scatter plot.
+    Can be filtered by best method.
+    """
+    if data_cache["metrics"] is None:
+        raise HTTPException(status_code=503, detail="Metrics data not loaded")
+    if data_cache["best_methods"] is None:
+        raise HTTPException(status_code=503, detail="Best methods data not loaded")
+
+    metrics_df = _compute(data_cache["metrics"])
+    best_df = _compute(data_cache["best_methods"])
+
+    # Get metrics for each series' best method only
+    best_methods_dict = best_df.set_index("unique_id")["best_method"].to_dict()
+
+    # Filter metrics to only include best methods per series
+    filtered = metrics_df[
+        metrics_df.apply(
+            lambda r: best_methods_dict.get(r["unique_id"]) == r["method"], axis=1
+        )
+    ]
+
+    if method:
+        # Get all series that have this as their best method
+        series_with_method = set(best_df[best_df["best_method"] == method]["unique_id"])
+        filtered = filtered[filtered["unique_id"].isin(series_with_method)]
+
+    # Aggregate by unique_id (take mean of metrics)
+    aggregated = (
+        filtered.groupby("unique_id")
+        .agg(
+            {
+                "bias": lambda x: abs(x.mean()),
+                "rmse": "mean",
+                "mape": "mean",
+                "smape": "mean",
+            }
+        )
+        .reset_index()
+    )
+
+    # Add best method for each series
+    aggregated["best_method"] = aggregated["unique_id"].map(best_methods_dict)
+
+    return {
+        "points": [
+            {
+                "unique_id": row["unique_id"],
+                "method": row["best_method"],
+                "accuracy": abs(row["bias"]),
+                "precision": row["rmse"],
+                "mape": row["mape"],
+                "smape": row["smape"],
+            }
+            for _, row in aggregated.iterrows()
+        ],
+        "summary": {
+            "total_series": len(aggregated),
+            "avg_accuracy": float(aggregated["bias"].abs().mean())
+            if len(aggregated) > 0
+            else 0,
+            "avg_precision": float(aggregated["rmse"].mean())
+            if len(aggregated) > 0
+            else 0,
+        },
+    }
 
 
 @app.get("/api/best-methods")
@@ -4277,8 +4351,8 @@ def _pg_type_to_field_type(pg_type: str) -> str:
 
 
 # Columns to skip when auto-discovering fields for the criteria builder
-_SKIP_ITEM_COLS = {"id", "attributes", "type_id"}
-_SKIP_SITE_COLS = {"id", "attributes", "type_id"}
+_SKIP_ITEM_COLS = {"id", "attributes"}
+_SKIP_SITE_COLS = {"id", "attributes"}
 _SKIP_TSC_COLS = {"id", "unique_id", "seasonal_periods", "recommended_methods"}
 
 # Known enum fields in time_series_characteristics (detected via DISTINCT queries below)
@@ -4469,14 +4543,15 @@ async def get_segment_fields():
         # ── 6. Detect site_type options and patch site.type_id ──────────────
         site_type_options = []
         try:
-            cur.execute(
-                f"""
-                SELECT id, name
-                FROM {schema}.site_type
-                ORDER BY name
-                """
-            )
-            site_type_options = [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
+            with conn.cursor() as cur2:
+                cur2.execute(
+                    f"""
+                    SELECT id, name
+                    FROM {schema}.site_type
+                    ORDER BY name
+                    """
+                )
+                site_type_options = [{"id": r[0], "name": r[1]} for r in cur2.fetchall()]
         except Exception:
             pass  # table may not exist yet
 
@@ -4490,14 +4565,15 @@ async def get_segment_fields():
         # ── 7. Detect item_type options and patch item.type_id ──────────────
         item_type_options = []
         try:
-            cur.execute(
-                f"""
-                SELECT id, name
-                FROM {schema}.item_type
-                ORDER BY name
-                """
-            )
-            item_type_options = [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
+            with conn.cursor() as cur3:
+                cur3.execute(
+                    f"""
+                    SELECT id, name
+                    FROM {schema}.item_type
+                    ORDER BY name
+                    """
+                )
+                item_type_options = [{"id": r[0], "name": r[1]} for r in cur3.fetchall()]
         except Exception:
             pass  # table may not exist yet
 

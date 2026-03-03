@@ -38,7 +38,8 @@ function buildFieldsFromApi(fieldsData) {
   // ── Item table columns ──
   if (fieldsData.item_columns?.length) {
     for (const c of fieldsData.item_columns) {
-      result.push({ key: `item.${c.column}`, label: `Item ${colLabel(c.column)}`, type: c.type, options: c.options, optionsById: c.options_by_id });
+      const label = c.column === 'type_id' && c.options_by_id ? 'Item Type' : `Item ${colLabel(c.column)}`;
+      result.push({ key: `item.${c.column}`, label, type: c.type, options: c.options, optionsById: c.options_by_id });
     }
   } else {
     // Fallback if API hasn't returned column info yet
@@ -68,7 +69,8 @@ function buildFieldsFromApi(fieldsData) {
   // ── Site table columns ──
   if (fieldsData.site_columns?.length) {
     for (const c of fieldsData.site_columns) {
-      result.push({ key: `site.${c.column}`, label: `Site ${colLabel(c.column)}`, type: c.type, options: c.options, optionsById: c.options_by_id });
+      const label = c.column === 'type_id' && c.options_by_id ? 'Site Type' : `Site ${colLabel(c.column)}`;
+      result.push({ key: `site.${c.column}`, label, type: c.type, options: c.options, optionsById: c.options_by_id });
     }
   } else {
     result.push(
@@ -213,11 +215,7 @@ function CriteriaCondition({ node, onChange, onRemove, allFields }) {
                 placeholder="A, B, C"
                 value={Array.isArray(node.value) ? node.value.join(', ') : node.value}
                 onChange={e => {
-                  const names = e.target.value.split(',').map(s => s.trim());
-                  // For type_id fields with optionsById, convert names to IDs
-                  const vals = field.optionsById
-                    ? names.map(n => field.optionsById[n]).filter(v => v != null)
-                    : names;
+                  const vals = e.target.value.split(',').map(s => s.trim());
                   update({ value: vals });
                 }}
                 className="text-xs border border-gray-300 dark:border-gray-600 rounded
@@ -227,9 +225,7 @@ function CriteriaCondition({ node, onChange, onRemove, allFields }) {
               ? <select
                   value={node.value}
                   onChange={e => {
-                    // For type_id fields with optionsById, convert name to ID
-                    const val = field.optionsById ? field.optionsById[e.target.value] : e.target.value;
-                    update({ value: val ?? e.target.value });
+                    update({ value: e.target.value });
                   }}
                   className="text-xs border border-gray-300 dark:border-gray-600 rounded
                              px-2 py-1 bg-white dark:bg-gray-700 dark:text-gray-100"
