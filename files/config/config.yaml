@@ -63,21 +63,21 @@ etl:
     frequency: W
     method: sum
 outlier_detection:
-  enabled: true
-  detection_method: iqr
-  correction_method: clip
   iqr:
     multiplier: 1.5
   zscore:
-    threshold: 3.0
     use_mad: true
+    threshold: 3
+  enabled: true
+  correction:
+    median_window: 5
+    interpolation_method: linear
   stl_residuals:
     seasonal_period: 52
-    residual_threshold: 3.0
-  correction:
-    interpolation_method: linear
-    median_window: 5
+    residual_threshold: 3
+  detection_method: iqr
   min_observations: 6
+  correction_method: clip
 characterization:
   seasonality:
     test_periods:
@@ -105,10 +105,10 @@ forecasting:
   horizon: 52
   frequency: W
   backtesting:
-    backtest_horizon: 60    # Total periods from end of series for backtesting zone
-    window_size: 8          # Evaluation window per test (periods)
-    n_tests: 4              # Number of backtest origins (0 = slide by 1 period)
-    min_train_size: 24      # Minimum training periods (safety floor)
+    backtest_horizon: 60
+    window_size: 8
+    n_tests: 4
+    min_train_size: 24
   confidence_levels:
   - 10
   - 25
@@ -264,11 +264,11 @@ auth:
     client_id: YOUR-AZURE-APP-CLIENT-ID
     tenant_id: YOUR-AZURE-TENANT-ID
     redirect_uri: http://localhost:5173
-  jwt_secret: CHANGE-ME-use-a-random-64-char-string-in-production
   default_admin:
     email: admin@forecastai.local
     password: ChangeMe123!
     display_name: Admin
+  jwt_secret: CHANGE-ME-use-a-random-64-char-string-in-production
   token_expiry_minutes: 480
 logging:
   level: INFO

@@ -11,35 +11,108 @@ import api from '../utils/api';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-const DEMAND_FIELDS = [
-  { key: 'demand.n_observations', label: 'Observations',       type: 'number' },
-  { key: 'demand.mean',           label: 'Mean Demand',         type: 'number' },
-  { key: 'demand.std',            label: 'Std Dev',             type: 'number' },
-  { key: 'demand.zero_ratio',     label: 'Zero Ratio',          type: 'number' },
-  { key: 'demand.adi',            label: 'ADI',                 type: 'number' },
-  { key: 'demand.cov',            label: 'CoV',                 type: 'number' },
-  { key: 'demand.has_trend',      label: 'Has Trend',           type: 'boolean' },
-  { key: 'demand.is_intermittent',label: 'Is Intermittent',     type: 'boolean' },
-  { key: 'demand.has_seasonality',label: 'Has Seasonality',     type: 'boolean' },
-  { key: 'demand.complexity_level',label:'Complexity Level',    type: 'enum',
-    options: ['low', 'medium', 'high'] },
-  { key: 'demand.abc_class',      label: 'ABC Class',           type: 'enum',
-    options: ['A', 'B', 'C'] },
-];
+/**
+ * Build human-readable label from a column name.
+ * e.g. "n_observations" → "N Observations", "abc_class" → "ABC Class"
+ */
+function colLabel(col) {
+  return col
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase())
+    .replace(/\bAbc\b/, 'ABC')
+    .replace(/\bAdi\b/, 'ADI')
+    .replace(/\bCov\b/, 'CoV')
+    .replace(/\bAdf\b/, 'ADF')
+    .replace(/\bMl\b/, 'ML')
+    .replace(/\bId\b/, 'ID')
+    .replace(/\bXuid\b/, 'Code');
+}
 
-const STATIC_ITEM_FIELDS = [
-  { key: 'item.name',        label: 'Item Name',        type: 'string' },
-  { key: 'item.xuid',        label: 'Item Code',        type: 'string' },
-  { key: 'item.description', label: 'Item Description', type: 'string' },
-  { key: 'item.type_id',     label: 'Item Type ID',     type: 'number' },
-];
+/**
+ * Build the allFields list from the API /segments/fields response.
+ * Falls back to minimal hardcoded defaults when columns are not yet loaded.
+ */
+function buildFieldsFromApi(fieldsData) {
+  const result = [];
 
-const STATIC_SITE_FIELDS = [
-  { key: 'site.name',        label: 'Site Name',        type: 'string' },
-  { key: 'site.xuid',        label: 'Site Code',        type: 'string' },
-  { key: 'site.description', label: 'Site Description', type: 'string' },
-  { key: 'site.type_id',     label: 'Site Type ID',     type: 'number' },
-];
+  // ── Item table columns ──
+  if (fieldsData.item_columns?.length) {
+    for (const c of fieldsData.item_columns) {
+      result.push({ key: `item.${c.column}`, label: `Item ${colLabel(c.column)}`, type: c.type, options: c.options });
+    }
+  } else {
+    // Fallback if API hasn't returned column info yet
+    result.push(
+      { key: 'item.name',    label: 'Item Name', type: 'string' },
+      { key: 'item.xuid',    label: 'Item Code', type: 'string' },
+      { key: 'item.type_id', label: 'Item Type ID', type: 'number' },
+    );
+  }
+
+  // ── Item JSONB attributes ──
+  if (fieldsData.item_attr_info?.length) {
+    for (const a of fieldsData.item_attr_info) {
+      const hasOpts = a.options && a.options.length > 0;
+      result.push({
+        key: `item.attributes.${a.key}`,
+        label: `Item: ${colLabel(a.key)}`,
+        type: hasOpts ? 'enum' : 'string',
+        ...(hasOpts ? { options: a.options } : {}),
+      });
+    }
+  } else {
+    for (const k of (fieldsData.item || [])) {
+      result.push({ key: `item.attributes.${k}`, label: `Item: ${colLabel(k)}`, type: 'string' });
+    }
+  }
+
+  // ── Site table columns ──
+  if (fieldsData.site_columns?.length) {
+    for (const c of fieldsData.site_columns) {
+      result.push({ key: `site.${c.column}`, label: `Site ${colLabel(c.column)}`, type: c.type, options: c.options });
+    }
+  } else {
+    result.push(
+      { key: 'site.name',    label: 'Site Name', type: 'string' },
+      { key: 'site.xuid',    label: 'Site Code', type: 'string' },
+      { key: 'site.type_id', label: 'Site Type ID', type: 'number' },
+    );
+  }
+
+  // ── Site JSONB attributes ──
+  if (fieldsData.site_attr_info?.length) {
+    for (const a of fieldsData.site_attr_info) {
+      const hasOpts = a.options && a.options.length > 0;
+      result.push({
+        key: `site.attributes.${a.key}`,
+        label: `Site: ${colLabel(a.key)}`,
+        type: hasOpts ? 'enum' : 'string',
+        ...(hasOpts ? { options: a.options } : {}),
+      });
+    }
+  } else {
+    for (const k of (fieldsData.site || [])) {
+      result.push({ key: `site.attributes.${k}`, label: `Site: ${colLabel(k)}`, type: 'string' });
+    }
+  }
+
+  // ── Demand / characteristics columns ──
+  if (fieldsData.demand_columns?.length) {
+    for (const c of fieldsData.demand_columns) {
+      const field = { key: `demand.${c.column}`, label: colLabel(c.column), type: c.type };
+      if (c.options) field.options = c.options;
+      result.push(field);
+    }
+  } else {
+    result.push(
+      { key: 'demand.n_observations', label: 'N Observations', type: 'number' },
+      { key: 'demand.mean',           label: 'Mean',           type: 'number' },
+      { key: 'demand.abc_class',      label: 'ABC Class',      type: 'enum', options: ['A', 'B', 'C'] },
+    );
+  }
+
+  return result;
+}
 
 const OPERATORS_BY_TYPE = {
   string:  ['=','!=','contains','starts_with','is_null','is_not_null'],
@@ -542,6 +615,229 @@ function RunDropdown({ segment, onRun, onClose }) {
   );
 }
 
+// ─── DetailModal ─────────────────────────────────────────────────────────────
+
+function CriteriaSummary({ node, allFields, depth = 0 }) {
+  if (!node || typeof node !== 'object') return null;
+  if (node.type === 'condition') {
+    const f = allFields.find(x => x.key === node.field);
+    const label = f?.label ?? node.field;
+    const opLabel = OP_LABELS[node.op] ?? node.op;
+    const val = Array.isArray(node.value) ? node.value.join(', ') : (node.value ?? '');
+    const noValue = ['is_null','is_not_null','is_true','is_false'].includes(node.op);
+    return (
+      <span className="inline-flex items-center gap-1 text-xs bg-gray-100 dark:bg-gray-700
+                        rounded px-2 py-0.5 text-gray-700 dark:text-gray-300">
+        <span className="font-medium">{label}</span>
+        <span className="text-gray-500 dark:text-gray-400">{opLabel}</span>
+        {!noValue && <span className="font-semibold">{val}</span>}
+      </span>
+    );
+  }
+  // group
+  const op = node.operator || 'AND';
+  return (
+    <div className={`flex flex-wrap items-center gap-1 ${depth > 0 ? 'ml-3 pl-2 border-l-2 border-gray-200 dark:border-gray-600' : ''}`}>
+      {(node.children || []).map((child, i) => (
+        <span key={i} className="flex items-center gap-1">
+          {i > 0 && <span className={`text-xs font-bold px-1.5 py-0.5 rounded-full
+                          ${op === 'AND' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+                                         : 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300'}`}>{op}</span>}
+          <CriteriaSummary node={child} allFields={allFields} depth={depth + 1} />
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** Extract which attribute keys are referenced in the segment criteria */
+function extractCriteriaAttrKeys(node) {
+  const keys = { item: new Set(), site: new Set() };
+  if (!node) return keys;
+  if (node.type === 'condition') {
+    if (node.field?.startsWith('item.attributes.'))
+      keys.item.add(node.field.replace('item.attributes.', ''));
+    if (node.field?.startsWith('site.attributes.'))
+      keys.site.add(node.field.replace('site.attributes.', ''));
+  }
+  if (node.children) {
+    for (const c of node.children) {
+      const sub = extractCriteriaAttrKeys(c);
+      sub.item.forEach(k => keys.item.add(k));
+      sub.site.forEach(k => keys.site.add(k));
+    }
+  }
+  return keys;
+}
+
+function DetailModal({ segment, onClose, allFields }) {
+  const [detail, setDetail] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [page, setPage] = useState(0);
+  const PAGE_SIZE = 100;
+
+  const fetchPage = useCallback(async (p) => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await api.get(`/segments/${segment.id}/details`, {
+        params: { limit: PAGE_SIZE, offset: p * PAGE_SIZE },
+      });
+      setDetail(res.data);
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [segment.id]);
+
+  useEffect(() => { fetchPage(page); }, [fetchPage, page]);
+
+  // Figure out which attribute keys are used in criteria
+  const criteriaKeys = detail ? extractCriteriaAttrKeys(detail.criteria) : { item: new Set(), site: new Set() };
+
+  // Build visible attribute columns: criteria-referenced attrs + a few defaults
+  const defaultItemKeys = ['level1', 'Product', 'type_name'];
+  const defaultSiteKeys = ['level1', 'type_name'];
+  const extraItemCols = [...new Set([...criteriaKeys.item, ...defaultItemKeys])];
+  const extraSiteCols = [...new Set([...criteriaKeys.site, ...defaultSiteKeys])];
+
+  const totalPages = detail ? Math.max(1, Math.ceil(detail.total / PAGE_SIZE)) : 1;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4
+                    bg-black/50 backdrop-blur-sm">
+      <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-6xl
+                      max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between p-5 border-b dark:border-gray-700 shrink-0">
+          <div>
+            <h2 className="text-lg font-semibold dark:text-white">
+              {segment.name}
+              <span className="ml-2 text-sm font-normal text-gray-500 dark:text-gray-400">
+                {detail ? `${detail.total.toLocaleString()} series` : ''}
+              </span>
+            </h2>
+            {segment.description && (
+              <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">{segment.description}</p>
+            )}
+          </div>
+          <button onClick={onClose}
+                  className="text-gray-400 dark:text-gray-500 hover:text-gray-600
+                             dark:hover:text-gray-300 text-xl">✕</button>
+        </div>
+
+        {/* Criteria summary */}
+        {detail?.criteria && Object.keys(detail.criteria).length > 0 && (
+          <div className="px-5 py-3 border-b dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 shrink-0">
+            <span className="text-xs font-medium text-gray-500 dark:text-gray-400 mr-2">Criteria:</span>
+            <CriteriaSummary node={detail.criteria} allFields={allFields} />
+          </div>
+        )}
+
+        {/* Content */}
+        <div className="flex-1 overflow-auto">
+          {loading && !detail ? (
+            <div className="text-center py-16 text-gray-400">Loading…</div>
+          ) : error ? (
+            <div className="text-center py-16 text-red-500">{error}</div>
+          ) : (
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 dark:bg-gray-800 sticky top-0">
+                <tr>
+                  <th className="text-left px-3 py-2 font-medium text-gray-600 dark:text-gray-300">Series</th>
+                  <th className="text-left px-3 py-2 font-medium text-gray-600 dark:text-gray-300">Item</th>
+                  <th className="text-left px-3 py-2 font-medium text-gray-600 dark:text-gray-300">Site</th>
+                  {extraItemCols.map(k => (
+                    <th key={`ia_${k}`} className="text-left px-3 py-2 font-medium text-gray-600
+                                                    dark:text-gray-300 whitespace-nowrap">
+                      {colLabel(k)}
+                    </th>
+                  ))}
+                  {extraSiteCols.map(k => (
+                    <th key={`sa_${k}`} className="text-left px-3 py-2 font-medium text-gray-600
+                                                    dark:text-gray-300 whitespace-nowrap">
+                      Site: {colLabel(k)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
+                {(detail?.members || []).map(m => (
+                  <tr key={m.unique_id}
+                      className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                    <td className="px-3 py-1.5 font-mono text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                      {m.unique_id}
+                    </td>
+                    <td className="px-3 py-1.5 text-gray-800 dark:text-gray-200 max-w-[200px] truncate"
+                        title={m.item_name ?? ''}>
+                      {m.item_name ?? m.item_code ?? '—'}
+                    </td>
+                    <td className="px-3 py-1.5 text-gray-800 dark:text-gray-200 max-w-[200px] truncate"
+                        title={m.site_name ?? ''}>
+                      {m.site_name ?? m.site_code ?? '—'}
+                    </td>
+                    {extraItemCols.map(k => {
+                      const val = m.item_attributes?.[k];
+                      return (
+                        <td key={`ia_${k}`}
+                            className="px-3 py-1.5 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                          {val != null && val !== '' && val !== '[]' ? String(val) : '—'}
+                        </td>
+                      );
+                    })}
+                    {extraSiteCols.map(k => {
+                      const val = m.site_attributes?.[k];
+                      return (
+                        <td key={`sa_${k}`}
+                            className="px-3 py-1.5 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                          {val != null && val !== '' && val !== '[]' ? String(val) : '—'}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Footer / Pagination */}
+        <div className="flex items-center justify-between px-5 py-3 border-t dark:border-gray-700 shrink-0">
+          <span className="text-xs text-gray-500 dark:text-gray-400">
+            {detail ? `Showing ${Math.min(page * PAGE_SIZE + 1, detail.total)}–${Math.min((page + 1) * PAGE_SIZE, detail.total)} of ${detail.total.toLocaleString()}` : ''}
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setPage(p => Math.max(0, p - 1))}
+              disabled={page === 0 || loading}
+              className="px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600
+                         text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700
+                         disabled:opacity-40"
+            >Prev</button>
+            <span className="text-xs text-gray-500 dark:text-gray-400 self-center">
+              {page + 1} / {totalPages}
+            </span>
+            <button
+              onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+              disabled={page >= totalPages - 1 || loading}
+              className="px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600
+                         text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700
+                         disabled:opacity-40"
+            >Next</button>
+            <button
+              onClick={onClose}
+              className="px-3 py-1.5 text-xs rounded-lg border border-gray-300 dark:border-gray-600
+                         text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+            >Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Toast ───────────────────────────────────────────────────────────────────
 
 function Toast({ msg, type, onClose }) {
@@ -568,26 +864,17 @@ function Toast({ msg, type, onClose }) {
 export default function Segments() {
   const navigate = useNavigate();
   const [segments, setSegments] = useState([]);
-  const [fields, setFields] = useState({ item: [], site: [] });
+  const [fields, setFields] = useState({ item: [], site: [], item_columns: [], site_columns: [], demand_columns: [] });
   const [loading, setLoading] = useState(true);
   const [editModal, setEditModal] = useState(null);   // null | segment obj | {_isNew:true}
+  const [detailModal, setDetailModal] = useState(null); // null | segment obj
   const [runDropdown, setRunDropdown] = useState(null); // segment id
   const [assigning, setAssigning] = useState(null);   // segment id
   const [deleting, setDeleting] = useState(null);
   const [toast, setToast] = useState(null);           // {msg, type}
 
-  // Build allFields from static + dynamic attrs
-  const allFields = [
-    ...STATIC_ITEM_FIELDS,
-    ...(fields.item || []).map(k => ({
-      key: `item.attributes.${k}`, label: `Item: ${k}`, type: 'string'
-    })),
-    ...STATIC_SITE_FIELDS,
-    ...(fields.site || []).map(k => ({
-      key: `site.attributes.${k}`, label: `Site: ${k}`, type: 'string'
-    })),
-    ...DEMAND_FIELDS,
-  ];
+  // Build allFields from API-detected columns + JSONB attribute keys
+  const allFields = buildFieldsFromApi(fields);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -682,7 +969,7 @@ export default function Segments() {
 
       {/* Table */}
       <div id="seg-table" className="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200
-                      dark:border-gray-700 shadow-sm overflow-hidden">
+                      dark:border-gray-700 shadow-sm overflow-visible">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 dark:bg-gray-800 border-b dark:border-gray-700">
             <tr>
@@ -702,7 +989,11 @@ export default function Segments() {
                       className="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors">
                     <td className="px-5 py-3">
                       <div className="flex items-center gap-2">
-                        <span className="font-medium text-gray-900 dark:text-white">{seg.name}</span>
+                        <button
+                          onClick={() => setDetailModal(seg)}
+                          className="font-medium text-blue-700 dark:text-blue-400 hover:underline
+                                     cursor-pointer text-left"
+                        >{seg.name}</button>
                         {seg.is_default && (
                           <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100
                                            dark:bg-gray-700 text-gray-500 dark:text-gray-400">
@@ -793,6 +1084,15 @@ export default function Segments() {
           segment={editModal}
           onSave={handleSave}
           onClose={() => setEditModal(null)}
+          allFields={allFields}
+        />
+      )}
+
+      {/* Detail modal */}
+      {detailModal && (
+        <DetailModal
+          segment={detailModal}
+          onClose={() => setDetailModal(null)}
           allFields={allFields}
         />
       )}

@@ -211,14 +211,37 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
     if step == 'segmentation':
         from segmentation.segmentation import SegmentationEngine
         engine = SegmentationEngine(config_path)
-        results = engine.run_all()
-        for seg_name, count in results.items():
-            print(f"  '{seg_name}': {count} series assigned")
+        handler = ListHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+        logging.getLogger().addHandler(handler)
+        log_id = pl.start_step('segmentation')
+        try:
+            results = engine.run_all()
+            for seg_name, count in results.items():
+                print(f"  '{seg_name}': {count} series assigned")
+            total = sum(results.values())
+            pl.end_step(log_id, 'success', rows=total, log_tail=handler.get_tail())
+        except Exception as exc:
+            pl.end_step(log_id, 'error', error=str(exc), log_tail=handler.get_tail())
+            raise
+        finally:
+            logging.getLogger().removeHandler(handler)
         print(f"Segmentation complete: {len(results)} segments processed")
         return
 
     if step == 'etl':
-        df = orchestrator.step_etl()
+        handler = ListHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+        logging.getLogger().addHandler(handler)
+        log_id = pl.start_step('etl')
+        try:
+            df = orchestrator.step_etl()
+            pl.end_step(log_id, 'success', rows=len(df), log_tail=handler.get_tail())
+        except Exception as exc:
+            pl.end_step(log_id, 'error', error=str(exc), log_tail=handler.get_tail())
+            raise
+        finally:
+            logging.getLogger().removeHandler(handler)
         print(f"ETL complete: {len(df)} rows, {df['unique_id'].nunique()} series")
 
     elif step == 'outlier-detection':
@@ -231,8 +254,19 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
         if series_filter:
             df = df[df['unique_id'].isin(series_filter)]
             print(f"  Series filter applied: {len(series_filter)} series")
-        corrected_df, outliers_df = orchestrator.step_outlier_detection(df)
-        n_adjusted = outliers_df['unique_id'].nunique() if not outliers_df.empty else 0
+        handler = ListHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+        logging.getLogger().addHandler(handler)
+        log_id = pl.start_step('outlier-detection')
+        try:
+            corrected_df, outliers_df = orchestrator.step_outlier_detection(df)
+            n_adjusted = outliers_df['unique_id'].nunique() if not outliers_df.empty else 0
+            pl.end_step(log_id, 'success', rows=len(outliers_df), log_tail=handler.get_tail())
+        except Exception as exc:
+            pl.end_step(log_id, 'error', error=str(exc), log_tail=handler.get_tail())
+            raise
+        finally:
+            logging.getLogger().removeHandler(handler)
         print(f"Outlier detection complete: {len(outliers_df)} outliers in {n_adjusted} series")
 
     elif step == 'characterize':
@@ -245,7 +279,18 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
         if series_filter:
             df = df[df['unique_id'].isin(series_filter)]
             print(f"  Series filter applied: {len(series_filter)} series")
-        chars_df = orchestrator.step_characterize(df)
+        handler = ListHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+        logging.getLogger().addHandler(handler)
+        log_id = pl.start_step('characterize')
+        try:
+            chars_df = orchestrator.step_characterize(df)
+            pl.end_step(log_id, 'success', rows=len(chars_df), log_tail=handler.get_tail())
+        except Exception as exc:
+            pl.end_step(log_id, 'error', error=str(exc), log_tail=handler.get_tail())
+            raise
+        finally:
+            logging.getLogger().removeHandler(handler)
         print(f"Characterization complete: {len(chars_df)} series analyzed")
 
     elif step == 'forecast':
@@ -345,6 +390,10 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
             all_methods=all_methods,
             config_path=config_path,
         )
+        handler = ListHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+        logging.getLogger().addHandler(handler)
+        log_id = pl.start_step('backtest')
         # Start Dask for parallel backtesting (mirrors forecast step behaviour)
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
@@ -353,29 +402,49 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
             metrics_df, origin_df = orchestrator.step_backtest(
                 df, chars_df, all_methods=all_methods,
             )
+            pl.end_step(log_id, 'success', rows=len(metrics_df), log_tail=handler.get_tail())
+        except Exception as exc:
+            pl.end_step(log_id, 'error', error=str(exc), log_tail=handler.get_tail())
+            raise
         finally:
             if orchestrator.client:
                 orchestrator.stop_dask_client()
+            logging.getLogger().removeHandler(handler)
         print(f"Backtesting complete: {len(metrics_df)} metric rows, {len(origin_df)} origin forecast rows")
 
     elif step == 'best-method':
         print("Loading backtest metrics from PostgreSQL...")
         metrics_df = _load_metrics_from_db(config_path)
-        best_df = orchestrator.step_select_best_methods(metrics_df)
+        log_id = pl.start_step('best-method')
+        try:
+            best_df = orchestrator.step_select_best_methods(metrics_df)
+            pl.end_step(log_id, 'success', rows=len(best_df))
+        except Exception as exc:
+            pl.end_step(log_id, 'error', error=str(exc))
+            raise
         print(f"Best method selection complete: {len(best_df)} series ranked")
 
     elif step == 'distributions':
         print("Loading forecasts from PostgreSQL...")
         forecasts_df = _load_forecasts_from_db(config_path)
+        handler = ListHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+        logging.getLogger().addHandler(handler)
+        log_id = pl.start_step('distributions')
         # Start Dask for parallel distribution fitting (mirrors forecast/backtest steps)
         from utils.orchestrator import DASK_AVAILABLE
         if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
             orchestrator.start_dask_client()
         try:
             dist_df = orchestrator.step_fit_distributions(forecasts_df)
+            pl.end_step(log_id, 'success', rows=len(dist_df), log_tail=handler.get_tail())
+        except Exception as exc:
+            pl.end_step(log_id, 'error', error=str(exc), log_tail=handler.get_tail())
+            raise
         finally:
             if orchestrator.client:
                 orchestrator.stop_dask_client()
+            logging.getLogger().removeHandler(handler)
         print(f"Distribution fitting complete: {len(dist_df)} distributions fitted")
 
     else:

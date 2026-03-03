@@ -5,10 +5,11 @@ import api from '../utils/api';
 
 /* ─── Helpers ─── */
 const STATUS_CFG = {
-  success: { bg: 'bg-emerald-100 dark:bg-emerald-900/30', text: 'text-emerald-700 dark:text-emerald-400', icon: '\u2713', dot: 'bg-emerald-500' },
-  error:   { bg: 'bg-red-100 dark:bg-red-900/30',         text: 'text-red-700 dark:text-red-400',         icon: '\u2717', dot: 'bg-red-500' },
-  running: { bg: 'bg-blue-100 dark:bg-blue-900/30',        text: 'text-blue-700 dark:text-blue-400',       icon: null,     dot: 'bg-blue-500' },
-  pending: { bg: 'bg-gray-100 dark:bg-gray-700',           text: 'text-gray-500 dark:text-gray-400',       icon: '\u2022', dot: 'bg-gray-400' },
+  success:     { bg: 'bg-emerald-100 dark:bg-emerald-900/30', text: 'text-emerald-700 dark:text-emerald-400', icon: '\u2713', dot: 'bg-emerald-500' },
+  error:       { bg: 'bg-red-100 dark:bg-red-900/30',         text: 'text-red-700 dark:text-red-400',         icon: '\u2717', dot: 'bg-red-500' },
+  interrupted: { bg: 'bg-amber-100 dark:bg-amber-900/30',     text: 'text-amber-700 dark:text-amber-400',     icon: '\u26A0', dot: 'bg-amber-500' },
+  running:     { bg: 'bg-blue-100 dark:bg-blue-900/30',       text: 'text-blue-700 dark:text-blue-400',       icon: null,     dot: 'bg-blue-500' },
+  pending:     { bg: 'bg-gray-100 dark:bg-gray-700',          text: 'text-gray-500 dark:text-gray-400',       icon: '\u2022', dot: 'bg-gray-400' },
 };
 
 function StatusBadge({ status }) {
@@ -357,6 +358,11 @@ const ProcessLog = () => {
                       {run.error_count > 0 && (
                         <span className="text-[10px] bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-1.5 py-0.5 rounded-full font-medium">
                           {'\u2717'} {run.error_count}
+                        </span>
+                      )}
+                      {run.interrupted_count > 0 && (
+                        <span className="text-[10px] bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded-full font-medium">
+                          {'\u26A0'} {run.interrupted_count}
                         </span>
                       )}
                       {run.running_count > 0 && (

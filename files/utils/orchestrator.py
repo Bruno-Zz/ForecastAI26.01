@@ -50,7 +50,8 @@ from utils.process_logger import ProcessLogger, ListHandler
 
 def _dask_forecast_batch(config_path: str,
                          batch_df: pd.DataFrame,
-                         batch_chars: pd.DataFrame) -> pd.DataFrame:
+                         batch_chars: pd.DataFrame,
+                         config_override: dict = None) -> pd.DataFrame:
     """
     Module-level standalone function submitted to Dask workers.
 
@@ -62,6 +63,8 @@ def _dask_forecast_batch(config_path: str,
         config_path: Path to config.yaml (picklable string).
         batch_df: Time series data slice for this batch.
         batch_chars: Characteristics slice for this batch.
+        config_override: Optional dict deep-merged onto config.yaml before
+            component construction (parameter-aware pipeline).
 
     Returns:
         DataFrame with forecast results for the batch.
@@ -73,7 +76,7 @@ def _dask_forecast_batch(config_path: str,
 
     # Statistical forecasts (always attempted)
     try:
-        stat_forecaster = StatisticalForecaster(config_path)
+        stat_forecaster = StatisticalForecaster(config_path, config_override=config_override)
         stat_forecasts = stat_forecaster.forecast_multiple_series(
             df=batch_df,
             characteristics_df=batch_chars
@@ -90,6 +93,9 @@ def _dask_forecast_batch(config_path: str,
         import yaml as _yaml
         with open(config_path, 'r') as _fh:
             _cfg = _yaml.safe_load(_fh)
+        if config_override:
+            from utils.parameter_resolver import ParameterResolver
+            _cfg = ParameterResolver.deep_merge(_cfg, config_override)
         _sufficiency = _cfg.get('characterization', {}).get('data_sufficiency', {})
         _min_ml = _sufficiency.get('min_for_ml', 100)
         _min_dl = _sufficiency.get('min_for_deep_learning', 200)
@@ -105,7 +111,7 @@ def _dask_forecast_batch(config_path: str,
 
     if len(ml_eligible) > 0:
         try:
-            ml_forecaster = MLForecaster(config_path)
+            ml_forecaster = MLForecaster(config_path, config_override=config_override)
             ml_forecasts = ml_forecaster.forecast_multiple_series(
                 df=batch_df,
                 characteristics_df=ml_eligible
@@ -131,7 +137,9 @@ _STAT_METHODS = {
 def _dask_backtest_batch(config_path: str,
                          batch_df: pd.DataFrame,
                          batch_work: list,
-                         bt_overrides_map: dict = None) -> tuple:
+                         bt_overrides_map: dict = None,
+                         fc_config_override: dict = None,
+                         eval_config_override: dict = None) -> tuple:
     """
     Module-level standalone function submitted to Dask workers for backtesting.
 
@@ -147,6 +155,8 @@ def _dask_backtest_batch(config_path: str,
         batch_work:  List of (unique_id, methods, characteristics_dict) tuples.
         bt_overrides_map: Optional {unique_id: {backtest_horizon, window_size, n_tests}}
                           per-series backtesting overrides loaded from the DB.
+        fc_config_override: Optional config override for forecasting components.
+        eval_config_override: Optional config override for evaluation component.
 
     Returns:
         Tuple (metrics_df, origin_forecasts_df) — concatenation of all series
@@ -155,8 +165,8 @@ def _dask_backtest_batch(config_path: str,
     import logging
     logger = logging.getLogger(__name__)
 
-    stat_forecaster = StatisticalForecaster(config_path)
-    evaluator = ForecastEvaluator(config_path)
+    stat_forecaster = StatisticalForecaster(config_path, config_override=fc_config_override)
+    evaluator = ForecastEvaluator(config_path, config_override=eval_config_override)
     use_with_forecasts = hasattr(evaluator, 'backtest_series_with_forecasts')
 
     # Lazily construct MLForecaster only when ML methods are present in the batch
@@ -168,7 +178,7 @@ def _dask_backtest_batch(config_path: str,
     ml_forecaster = None
     if _needs_ml:
         try:
-            ml_forecaster = MLForecaster(config_path)
+            ml_forecaster = MLForecaster(config_path, config_override=fc_config_override)
         except Exception as exc:
             logger.warning(f"Could not init MLForecaster in worker: {exc}")
 
@@ -394,6 +404,7 @@ class ForecastOrchestrator:
         self._characterizer = None
         self._method_selector = None
         self._outlier_detector = None
+        self._parameter_resolver = None
 
         # Dask client
         self.client = None
@@ -459,6 +470,60 @@ class ForecastOrchestrator:
         if self._outlier_detector is None:
             self._outlier_detector = OutlierDetector(self.config_path)
         return self._outlier_detector
+
+    @property
+    def parameter_resolver(self):
+        """Lazy ParameterResolver.  Returns None when DB/table unavailable."""
+        if self._parameter_resolver is None:
+            try:
+                from utils.parameter_resolver import ParameterResolver
+                self._parameter_resolver = ParameterResolver(str(self.config_path))
+            except Exception:
+                self._parameter_resolver = False  # sentinel – don't retry
+        return self._parameter_resolver if self._parameter_resolver is not False else None
+
+    def _get_param_groups(self, unique_ids, business_type):
+        """
+        Group *unique_ids* by their assigned parameter set for *business_type*.
+
+        Returns a list of ``(config_override | None, [uids])`` tuples.
+        Series that have per-SKU hyperparameter overrides are separated into
+        their own single-element groups so they get a fully-merged config.
+
+        When the resolver is unavailable (first run, empty table) a single
+        ``(None, unique_ids)`` group is returned – identical to today's
+        behaviour.
+        """
+        resolver = self.parameter_resolver
+        if resolver is None:
+            return [(None, list(unique_ids))]
+
+        groups = resolver.group_series_by_param_set(list(unique_ids), business_type)
+        override_uids = resolver.get_series_with_overrides(list(unique_ids), business_type)
+
+        result = []
+        for param_id, group_uids in groups.items():
+            group_override = resolver.build_group_config_override(param_id, business_type)
+            bulk_uids = [u for u in group_uids if u not in override_uids]
+            if bulk_uids:
+                result.append((group_override, bulk_uids))
+            # Each SKU-override series gets its own fully-merged config
+            for uid in group_uids:
+                if uid in override_uids:
+                    uid_override = resolver.build_config_override(uid, business_type)
+                    result.append((uid_override, [uid]))
+
+        if not result:
+            return [(None, list(unique_ids))]
+
+        n_groups = len(result)
+        n_overrides = sum(1 for _, uids in result if len(uids) == 1 and uids[0] in override_uids)
+        if n_groups > 1:
+            self.logger.info(
+                f"Parameter grouping ({business_type}): {n_groups} groups "
+                f"({n_overrides} individual overrides)"
+            )
+        return result
 
     # -- Dask management --
 
@@ -576,7 +641,20 @@ class ForecastOrchestrator:
         self.logger.info("STEP 1b: Outlier Detection & Correction")
         self.logger.info("=" * 80)
 
-        corrected_df, outliers_df = self.outlier_detector.detect_and_correct_all(df)
+        groups = self._get_param_groups(df['unique_id'].unique(), 'outlier_detection')
+        if len(groups) == 1 and groups[0][0] is None:
+            corrected_df, outliers_df = self.outlier_detector.detect_and_correct_all(df)
+        else:
+            all_corrected, all_outliers = [], []
+            for config_override, uids in groups:
+                detector = OutlierDetector(self.config_path, config_override=config_override)
+                group_df = df[df['unique_id'].isin(uids)]
+                c, o = detector.detect_and_correct_all(group_df)
+                all_corrected.append(c)
+                if not o.empty:
+                    all_outliers.append(o)
+            corrected_df = pd.concat(all_corrected, ignore_index=True)
+            outliers_df = pd.concat(all_outliers, ignore_index=True) if all_outliers else pd.DataFrame()
 
         # Save corrected data to PostgreSQL (update corrected_qty in demand_actuals)
         try:
@@ -675,9 +753,33 @@ class ForecastOrchestrator:
         self.logger.info("STEP 2: Time Series Characterization")
         self.logger.info("=" * 80)
 
-        characteristics_df = self.characterizer.analyze_all(
-            df, id_col='unique_id', date_col='date', value_col='y', save=True
-        )
+        groups = self._get_param_groups(df['unique_id'].unique(), 'characterization')
+        if len(groups) == 1 and groups[0][0] is None:
+            characteristics_df = self.characterizer.analyze_all(
+                df, id_col='unique_id', date_col='date', value_col='y', save=True
+            )
+        else:
+            all_chars = []
+            for config_override, uids in groups:
+                charzer = TimeSeriesCharacterizer(self.config_path, config_override=config_override)
+                group_df = df[df['unique_id'].isin(uids)]
+                chars = charzer.analyze_all(
+                    group_df, id_col='unique_id', date_col='date', value_col='y', save=False
+                )
+                all_chars.append(chars)
+            characteristics_df = pd.concat(all_chars, ignore_index=True)
+            # Save combined results once
+            try:
+                from db.db import bulk_insert, get_schema, jsonb_serialize
+                schema = get_schema(str(self.config_path))
+                cols = list(characteristics_df.columns)
+                rows = [tuple(jsonb_serialize(v) for v in row)
+                        for row in characteristics_df.itertuples(index=False, name=None)]
+                bulk_insert(str(self.config_path),
+                            f"{schema}.time_series_characteristics", cols, rows, truncate=True)
+            except Exception as exc:
+                self.logger.error(f"Could not save grouped characteristics: {exc}")
+                raise
 
         # Log summary
         self.logger.info(f"Characterized {len(characteristics_df)} series")
@@ -691,7 +793,8 @@ class ForecastOrchestrator:
     def forecast_batch(self,
                        df: pd.DataFrame,
                        characteristics_df: pd.DataFrame,
-                       methods_filter: Optional[List[str]] = None) -> pd.DataFrame:
+                       methods_filter: Optional[List[str]] = None,
+                       config_override: dict = None) -> pd.DataFrame:
         """
         Generate forecasts for a batch of time series across all model families.
 
@@ -699,16 +802,33 @@ class ForecastOrchestrator:
             df: Time series data
             characteristics_df: Characteristics for this batch
             methods_filter: Optional list to restrict methods
+            config_override: Optional config override for this group's components.
 
         Returns:
             DataFrame with forecast results
         """
         all_forecasts = []
 
+        # Use group-specific component instances when override is provided
+        if config_override:
+            _stat_fc = StatisticalForecaster(self.config_path, config_override=config_override)
+            _ml_fc_fn = lambda: MLForecaster(self.config_path, config_override=config_override)
+            _neural_fc_fn = lambda: NeuralForecaster(self.config_path, config_override=config_override)
+            _found_fc_fn = lambda: FoundationForecaster(self.config_path, config_override=config_override)
+            # Merge override into config for threshold lookups
+            from utils.parameter_resolver import ParameterResolver
+            _merged_cfg = ParameterResolver.deep_merge(dict(self.config), config_override)
+        else:
+            _stat_fc = self.stat_forecaster
+            _ml_fc_fn = lambda: self.ml_forecaster
+            _neural_fc_fn = lambda: self.neural_forecaster
+            _found_fc_fn = lambda: self.foundation_forecaster
+            _merged_cfg = self.config
+
         # --- Statistical forecasts ---
         self.logger.info(f"Statistical forecasts for {len(characteristics_df)} series...")
         try:
-            stat_forecasts = self.stat_forecaster.forecast_multiple_series(
+            stat_forecasts = _stat_fc.forecast_multiple_series(
                 df=df,
                 characteristics_df=characteristics_df
             )
@@ -719,7 +839,7 @@ class ForecastOrchestrator:
 
         # --- ML forecasts (LightGBM / XGBoost) ---
         # Recompute eligibility from current config so stale DB booleans are ignored.
-        _sufficiency = self.config.get('characterization', {}).get('data_sufficiency', {})
+        _sufficiency = _merged_cfg.get('characterization', {}).get('data_sufficiency', {})
         _min_ml = _sufficiency.get('min_for_ml', 100)
         _min_dl = _sufficiency.get('min_for_deep_learning', 200)
 
@@ -733,7 +853,8 @@ class ForecastOrchestrator:
         if len(ml_eligible) > 0:
             self.logger.info(f"ML forecasts for {len(ml_eligible)} series (min_obs={_min_ml})...")
             try:
-                ml_forecasts = self.ml_forecaster.forecast_multiple_series(
+                ml_fc = _ml_fc_fn()
+                ml_forecasts = ml_fc.forecast_multiple_series(
                     df=df,
                     characteristics_df=ml_eligible
                 )
@@ -753,7 +874,8 @@ class ForecastOrchestrator:
         if len(neural_eligible) > 0:
             self.logger.info(f"Neural forecasts for {len(neural_eligible)} series (min_obs={_min_dl})...")
             try:
-                neural_forecasts = self.neural_forecaster.forecast_multiple_series(
+                neural_fc = _neural_fc_fn()
+                neural_forecasts = neural_fc.forecast_multiple_series(
                     df=df,
                     characteristics_df=neural_eligible
                 )
@@ -765,8 +887,9 @@ class ForecastOrchestrator:
         # --- Foundation model (TimesFM) ---
         self.logger.info(f"Foundation model forecasts for {len(characteristics_df)} series...")
         try:
-            if self.foundation_forecaster.model is not None:
-                foundation_forecasts = self.foundation_forecaster.forecast_multiple_series(
+            found_fc = _found_fc_fn()
+            if found_fc.model is not None:
+                foundation_forecasts = found_fc.forecast_multiple_series(
                     df=df,
                     characteristics_df=characteristics_df
                 )
@@ -803,38 +926,53 @@ class ForecastOrchestrator:
 
         batch_size = self.parallel_config.get('batch_size', 100)
 
+        # Parameter-aware grouping
+        param_groups = self._get_param_groups(
+            characteristics_df['unique_id'].unique(), 'forecasting'
+        )
+
         if self.client is None or not DASK_AVAILABLE:
-            # Serial mode
+            # Serial mode — iterate over parameter groups
             n_series = len(characteristics_df)
             self.logger.info("Running forecasting in serial mode...")
             self.logger.info(f"[FORECAST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total=1")
-            forecasts_df = self.forecast_batch(df, characteristics_df)
+            group_results = []
+            for config_override, uids in param_groups:
+                grp_chars = characteristics_df[characteristics_df['unique_id'].isin(uids)]
+                grp_df = df[df['unique_id'].isin(uids)]
+                grp_fc = self.forecast_batch(grp_df, grp_chars, config_override=config_override)
+                if not grp_fc.empty:
+                    group_results.append(grp_fc)
+            forecasts_df = pd.concat(group_results, ignore_index=True) if group_results else pd.DataFrame()
             self.logger.info(f"[FORECAST_PROGRESS] completed={n_series} total={n_series} batches_done=1 batches_total=1")
         else:
-            # Parallel with Dask — use the module-level standalone function so
-            # the orchestrator instance (which holds un-picklable asyncio state)
-            # is never transmitted to workers.
+            # Parallel with Dask — each parameter group is sub-batched separately
             self.logger.info(f"Running parallel forecasting with Dask, batch_size={batch_size}...")
             n_series = len(characteristics_df)
-            n_batches = (n_series + batch_size - 1) // batch_size
-            self.logger.info(f"  {n_series} series → {n_batches} batches")
 
             futures = []
-            self.logger.info(f"[FORECAST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total={n_batches}")
-            for i in range(n_batches):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, n_series)
-                batch_chars = characteristics_df.iloc[start_idx:end_idx]
-                batch_ids = batch_chars['unique_id'].tolist()
-                batch_df = df[df['unique_id'].isin(batch_ids)]
+            for config_override, uids in param_groups:
+                grp_chars = characteristics_df[characteristics_df['unique_id'].isin(uids)]
+                n_grp = len(grp_chars)
+                n_batches_grp = (n_grp + batch_size - 1) // batch_size
+                for i in range(n_batches_grp):
+                    start_idx = i * batch_size
+                    end_idx = min((i + 1) * batch_size, n_grp)
+                    batch_chars = grp_chars.iloc[start_idx:end_idx]
+                    batch_ids = batch_chars['unique_id'].tolist()
+                    batch_df = df[df['unique_id'].isin(batch_ids)]
+                    future = self.client.submit(
+                        _dask_forecast_batch,
+                        self.config_path,
+                        batch_df,
+                        batch_chars,
+                        config_override=config_override,
+                    )
+                    futures.append(future)
 
-                future = self.client.submit(
-                    _dask_forecast_batch,   # picklable module-level function
-                    self.config_path,       # picklable string
-                    batch_df,               # DataFrame (Arrow-serialisable)
-                    batch_chars,            # DataFrame (Arrow-serialisable)
-                )
-                futures.append(future)
+            n_batches = len(futures)
+            self.logger.info(f"  {n_series} series → {n_batches} batches")
+            self.logger.info(f"[FORECAST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total={n_batches}")
 
             results = []
             completed_series = 0

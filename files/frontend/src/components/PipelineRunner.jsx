@@ -2,7 +2,8 @@
  * PipelineRunner Component
  *
  * Lets the user trigger individual pipeline steps (ETL, outlier detection,
- * forecast, backtest, best-method, distributions) OR the full pipeline in
+ * segmentation, characterization, forecast, backtest, best-method,
+ * distributions) OR the full pipeline in
  * order, and see live log output via Server-Sent Events.
  */
 
@@ -12,7 +13,7 @@ import { useTheme } from '../contexts/ThemeContext';
 import { formatTime, formatNumber } from '../utils/formatting';
 import api from '../utils/api';
 
-const STEP_ORDER = ['etl', 'outlier-detection', 'forecast', 'backtest', 'best-method', 'distributions'];
+const STEP_ORDER = ['etl', 'outlier-detection', 'segmentation', 'characterization', 'forecast', 'backtest', 'best-method', 'distributions'];
 
 // Parse a UTC ISO timestamp that may or may not already end with 'Z'
 const parseUTC = (s) => new Date(s.endsWith('Z') ? s : s + 'Z');
@@ -20,6 +21,8 @@ const parseUTC = (s) => new Date(s.endsWith('Z') ? s : s + 'Z');
 const ICONS = {
   'etl':               '🗄️',
   'outlier-detection': '🔍',
+  'segmentation':      '🏷️',
+  'characterization':  '🔬',
   'forecast':          '📊',
   'backtest':          '🔁',
   'best-method':       '🏆',
@@ -65,17 +68,19 @@ const Spinner = ({ cls = 'w-4 h-4' }) => (
 /** Status badge */
 const StatusBadge = ({ status }) => {
   const map = {
-    pending:  { cls: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400',         label: 'Pending' },
-    running:  { cls: 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300',         label: 'Running…' },
-    success:  { cls: 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300',   label: 'Success' },
-    error:    { cls: 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300',           label: 'Error' },
+    pending:     { cls: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400',               label: 'Pending' },
+    running:     { cls: 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300',             label: 'Running\u2026' },
+    success:     { cls: 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300', label: 'Success' },
+    error:       { cls: 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300',                 label: 'Error' },
+    interrupted: { cls: 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300',         label: 'Interrupted' },
   };
   const { cls, label } = map[status] || { cls: 'bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400', label: status };
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
       {status === 'running' && <Spinner cls="w-3 h-3" />}
-      {status === 'success' && '✓'}
-      {status === 'error'   && '✕'}
+      {status === 'success' && '\u2713'}
+      {status === 'error'   && '\u2715'}
+      {status === 'interrupted' && '\u26A0'}
       {label}
     </span>
   );
@@ -171,13 +176,14 @@ const PipelineProgress = ({ steps, currentStepId, jobStatus }) => {
 /** Full-pipeline card at the top */
 const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs, locale }) => {
   const isRunning = job?.status === 'running';
-  const isDone    = job?.status === 'success' || job?.status === 'error';
+  const isDone    = job?.status === 'success' || job?.status === 'error' || job?.status === 'interrupted';
 
   return (
     <div className={`bg-white dark:bg-gray-800 rounded-xl border-2 transition-colors mb-6 ${
       isRunning        ? 'border-blue-300 dark:border-blue-600 shadow-lg dark:shadow-blue-900/30' :
-      job?.status === 'success' ? 'border-emerald-300 dark:border-emerald-600' :
-      job?.status === 'error'   ? 'border-red-300 dark:border-red-600' :
+      job?.status === 'success'     ? 'border-emerald-300 dark:border-emerald-600' :
+      job?.status === 'error'       ? 'border-red-300 dark:border-red-600' :
+      job?.status === 'interrupted' ? 'border-amber-300 dark:border-amber-600' :
       'border-indigo-200 dark:border-indigo-700'
     }`}>
       <div className="p-4">
@@ -278,15 +284,16 @@ const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs, l
 /** Single step card */
 const StepCard = ({ step, onRun, onKill, activeJob, onToggleLogs, showLogs, isFullPipelineRunning, locale }) => {
   const isRunning = activeJob?.status === 'running';
-  const isDone    = activeJob?.status === 'success' || activeJob?.status === 'error';
+  const isDone    = activeJob?.status === 'success' || activeJob?.status === 'error' || activeJob?.status === 'interrupted';
   const hasJob    = !!activeJob;
   const disabled  = isRunning || isFullPipelineRunning;
 
   return (
     <div className={`bg-white dark:bg-gray-800 rounded-xl border-2 transition-colors ${
       isRunning           ? 'border-blue-300 dark:border-blue-600 shadow-md dark:shadow-blue-900/30' :
-      activeJob?.status === 'success' ? 'border-emerald-200 dark:border-emerald-700' :
-      activeJob?.status === 'error'   ? 'border-red-200 dark:border-red-700' :
+      activeJob?.status === 'success'     ? 'border-emerald-200 dark:border-emerald-700' :
+      activeJob?.status === 'error'       ? 'border-red-200 dark:border-red-700' :
+      activeJob?.status === 'interrupted' ? 'border-amber-200 dark:border-amber-700' :
       'border-gray-200 dark:border-gray-600'
     }`}>
       <div className="p-4">
@@ -667,9 +674,10 @@ export const PipelineRunner = () => {
             {/* Step number + connector line */}
             <div className="flex flex-col items-center flex-shrink-0 w-8">
               <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold border-2 flex-shrink-0 ${
-                jobs[step.id]?.status === 'success' ? 'bg-emerald-100 dark:bg-emerald-900/30 border-emerald-400 text-emerald-700 dark:text-emerald-300' :
-                jobs[step.id]?.status === 'error'   ? 'bg-red-100 dark:bg-red-900/30 border-red-400 text-red-700 dark:text-red-300' :
-                jobs[step.id]?.status === 'running' ? 'bg-blue-100 dark:bg-blue-900/30 border-blue-400 text-blue-700 dark:text-blue-300' :
+                jobs[step.id]?.status === 'success'     ? 'bg-emerald-100 dark:bg-emerald-900/30 border-emerald-400 text-emerald-700 dark:text-emerald-300' :
+                jobs[step.id]?.status === 'error'       ? 'bg-red-100 dark:bg-red-900/30 border-red-400 text-red-700 dark:text-red-300' :
+                jobs[step.id]?.status === 'interrupted' ? 'bg-amber-100 dark:bg-amber-900/30 border-amber-400 text-amber-700 dark:text-amber-300' :
+                jobs[step.id]?.status === 'running'     ? 'bg-blue-100 dark:bg-blue-900/30 border-blue-400 text-blue-700 dark:text-blue-300' :
                 'bg-gray-100 dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-500 dark:text-gray-400'
               }`}>
                 {i + 1}

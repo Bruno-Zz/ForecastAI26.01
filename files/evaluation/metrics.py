@@ -58,11 +58,14 @@ class ForecastEvaluator:
     Implements rolling window cross-validation.
     """
     
-    def __init__(self, config_path: str = "config/config.yaml"):
+    def __init__(self, config_path: str = "config/config.yaml", config_override: dict = None):
         """Initialize with configuration."""
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
-        
+        if config_override:
+            from utils.parameter_resolver import ParameterResolver
+            self.config = ParameterResolver.deep_merge(self.config, config_override)
+
         self.forecast_config = self.config['forecasting']
         self.backtesting_config = self.forecast_config['backtesting']
         self.logger = logging.getLogger(__name__)

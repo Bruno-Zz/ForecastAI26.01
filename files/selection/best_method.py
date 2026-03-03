@@ -33,7 +33,7 @@ class MethodSelector:
     Lower composite_score == better.
     """
 
-    def __init__(self, config_path: str = "config/config.yaml"):
+    def __init__(self, config_path: str = "config/config.yaml", config_override: dict = None):
         """
         Initialise the selector.
 
@@ -43,9 +43,11 @@ class MethodSelector:
             Path to the YAML configuration file.  The weights are read from
             the ``best_method.weights`` section.  If the file or section is
             missing the hard-coded defaults are used instead.
+        config_override : dict, optional
+            Dict to deep-merge on top of config.yaml before extracting weights.
         """
         self.logger = logging.getLogger(__name__)
-        self.weights = self._load_weights(config_path)
+        self.weights = self._load_weights(config_path, config_override)
         self.logger.info(
             "MethodSelector initialised with weights: %s", self.weights
         )
@@ -53,13 +55,16 @@ class MethodSelector:
     # ------------------------------------------------------------------
     # Weight loading
     # ------------------------------------------------------------------
-    def _load_weights(self, config_path: str) -> Dict[str, float]:
+    def _load_weights(self, config_path: str, config_override: dict = None) -> Dict[str, float]:
         """Load metric weights from config, falling back to defaults."""
         try:
             cfg_file = Path(config_path)
             if cfg_file.exists():
                 with open(cfg_file, "r") as fh:
                     config = yaml.safe_load(fh) or {}
+                if config_override:
+                    from utils.parameter_resolver import ParameterResolver
+                    config = ParameterResolver.deep_merge(config, config_override)
                 weights = (
                     config.get("best_method", {}).get("weights", None)
                 )

@@ -497,6 +497,266 @@ class ETLPipeline:
         finally:
             conn.close()
 
+    # Known structural columns in the local item/site tables.
+    # Any source columns beyond these are gathered into `attributes` JSONB.
+    _DIM_KNOWN_COLS = {"id", "xuid", "name", "description", "attributes", "type_id"}
+
+    def _extract_dimension_rows(self, src_conn, src_table: str, dim: str,
+                                type_names: dict = None):
+        """
+        Read all rows from a source dimension table and return them as a
+        list of tuples ready for INSERT into the local item/site table.
+
+        Extra columns (beyond id, xuid, name, description, type_id) are
+        always collected into the ``attributes`` JSONB dict.  If the source
+        table already has an ``attributes`` JSONB column its content is used
+        as the base and the extra columns are merged on top of it.
+
+        If *type_names* is provided (a {type_id → name} dict) the resolved
+        ``type_name`` is added to the attributes automatically.
+
+        Returns
+        -------
+        (rows, extra_cols) where rows is a list of
+            (id, xuid, name, description, attributes_json, type_id)
+        and extra_cols is the list of column names gathered into attributes.
+        """
+        if type_names is None:
+            type_names = {}
+
+        with src_conn.cursor(
+            cursor_factory=psycopg2.extras.DictCursor
+        ) as cur:
+            # Discover what columns the source table actually has
+            cur.execute(f"SELECT * FROM {src_table} LIMIT 0")
+            src_columns = [desc[0] for desc in cur.description]
+
+            has_native_attrs = "attributes" in src_columns
+
+            # Extra columns = anything beyond the known structural ones
+            extra_cols = [
+                c for c in src_columns if c not in self._DIM_KNOWN_COLS
+            ]
+
+            if extra_cols:
+                self.logger.info(
+                    f"    Source {src_table}: gathering {len(extra_cols)} "
+                    f"extra column(s) into attributes JSONB: {extra_cols}"
+                )
+
+            # Fetch all rows (SELECT *)
+            cur.execute(f"SELECT * FROM {src_table}")
+            raw = cur.fetchall()
+
+            rows = []
+            for r in raw:
+                # Start from existing attributes JSONB (if present)
+                base = {}
+                if has_native_attrs and r.get("attributes"):
+                    val = r["attributes"]
+                    if isinstance(val, dict):
+                        base = val
+                    elif isinstance(val, str):
+                        try:
+                            base = json.loads(val)
+                        except Exception:
+                            base = {}
+
+                # Merge extra columns on top
+                for col in extra_cols:
+                    val = r.get(col)
+                    if val is not None:
+                        if isinstance(val, (int, float, bool, str)):
+                            base[col] = val
+                        else:
+                            base[col] = str(val)
+
+                # Resolve type_id → type_name
+                tid = r.get("type_id")
+                if tid is not None and tid in type_names:
+                    base["type_name"] = type_names[tid]
+
+                rows.append(
+                    (
+                        r["id"],
+                        r.get("xuid"),
+                        r.get("name"),
+                        r.get("description"),
+                        psycopg2.extras.Json(base) if base else None,
+                        r.get("type_id"),
+                    )
+                )
+
+            return rows, extra_cols
+
+    # Columns in plan.site that are useful as site attributes for
+    # segmentation (beyond the standard id/xuid/name/description/type_id).
+    _PLAN_SITE_EXTRA = {
+        "address", "city", "state", "postal_code",
+        "latitude", "longitude", "country_id",
+    }
+
+    def _merge_plan_attributes(self, src_conn, dst_conn, local_schema: str):
+        """
+        Enrich local item/site attributes from ``plan.item`` / ``plan.site``.
+
+        The ``plan`` schema tables often carry a richly-populated ``attributes``
+        JSONB column (e.g. Product, Country_of_origin, level1–5, Quality …)
+        plus extra structural columns (address, city, …).
+
+        For every local item/site that has a matching ``xuid`` in the plan
+        schema, the plan attributes are merged **under** the existing local
+        attributes (i.e. local values take precedence in case of key clash).
+        Empty-list values (``[]``) in the plan JSONB are skipped.
+        """
+        for dim, plan_table, extra_cols in [
+            ("item", "plan.item", set()),
+            ("site", "plan.site", self._PLAN_SITE_EXTRA),
+        ]:
+            try:
+                # Check if plan table exists
+                with src_conn.cursor() as chk:
+                    chk.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema = 'plan' AND table_name = %s",
+                        (dim,),
+                    )
+                    if not chk.fetchone():
+                        self.logger.info(
+                            f"  {plan_table} does not exist — "
+                            f"skipping attribute enrichment for {dim}"
+                        )
+                        continue
+
+                # Discover available columns
+                with src_conn.cursor() as cur:
+                    cur.execute(f"SELECT * FROM {plan_table} LIMIT 0")
+                    plan_cols = {desc[0] for desc in cur.description}
+
+                usable_extra = sorted(extra_cols & plan_cols)
+
+                # Build SELECT for plan table
+                sel_parts = ["xuid", "attributes"]
+                sel_parts.extend(usable_extra)
+                sel_sql = ", ".join(sel_parts)
+
+                with src_conn.cursor(
+                    cursor_factory=psycopg2.extras.DictCursor
+                ) as cur:
+                    cur.execute(
+                        f"SELECT {sel_sql} FROM {plan_table} "
+                        f"WHERE xuid IS NOT NULL"
+                    )
+                    plan_rows = cur.fetchall()
+
+                # Build xuid → merged-attrs dict
+                plan_attrs_by_xuid = {}
+                for pr in plan_rows:
+                    xuid = pr["xuid"]
+                    merged = {}
+
+                    # Plan JSONB attributes
+                    raw_attrs = pr.get("attributes")
+                    if raw_attrs:
+                        if isinstance(raw_attrs, dict):
+                            d = raw_attrs
+                        elif isinstance(raw_attrs, str):
+                            try:
+                                d = json.loads(raw_attrs)
+                            except Exception:
+                                d = {}
+                        else:
+                            d = {}
+
+                        for k, v in d.items():
+                            # Skip empty lists / None
+                            if v is None or v == [] or v == "":
+                                continue
+                            if isinstance(v, (int, float, bool, str)):
+                                merged[k] = v
+                            elif isinstance(v, list):
+                                # list of strings → join
+                                merged[k] = ", ".join(str(x) for x in v)
+                            else:
+                                merged[k] = str(v)
+
+                    # Extra structural columns
+                    for col in usable_extra:
+                        val = pr.get(col)
+                        if val is not None:
+                            if isinstance(val, (int, float, bool, str)):
+                                merged[col] = val
+                            else:
+                                merged[col] = str(val)
+
+                    if merged:
+                        plan_attrs_by_xuid[xuid] = merged
+
+                if not plan_attrs_by_xuid:
+                    self.logger.info(
+                        f"  {plan_table}: no enrichable attributes found"
+                    )
+                    continue
+
+                self.logger.info(
+                    f"  {plan_table}: enriching {len(plan_attrs_by_xuid):,} "
+                    f"{dim}(s) with plan attributes"
+                )
+
+                # Read current local attributes and merge
+                with dst_conn.cursor(
+                    cursor_factory=psycopg2.extras.DictCursor
+                ) as cur:
+                    cur.execute(
+                        f"SELECT id, xuid, attributes "
+                        f"FROM {local_schema}.{dim}"
+                    )
+                    local_rows = cur.fetchall()
+
+                updates = []
+                for lr in local_rows:
+                    xuid = lr.get("xuid")
+                    if not xuid or xuid not in plan_attrs_by_xuid:
+                        continue
+
+                    plan_a = plan_attrs_by_xuid[xuid]
+                    local_a = lr.get("attributes") or {}
+                    if isinstance(local_a, str):
+                        try:
+                            local_a = json.loads(local_a)
+                        except Exception:
+                            local_a = {}
+
+                    # Plan attrs go first, local overrides on top
+                    combined = {**plan_a, **local_a}
+                    if combined != local_a:
+                        updates.append(
+                            (psycopg2.extras.Json(combined), lr["id"])
+                        )
+
+                if updates:
+                    with dst_conn.cursor() as cur:
+                        psycopg2.extras.execute_batch(
+                            cur,
+                            f"UPDATE {local_schema}.{dim} "
+                            f"SET attributes = %s WHERE id = %s",
+                            updates,
+                        )
+                    dst_conn.commit()
+                    self.logger.info(
+                        f"    → {len(updates):,} {dim}(s) enriched "
+                        f"with plan attributes"
+                    )
+                else:
+                    self.logger.info(
+                        f"    → no {dim} updates needed (already enriched)"
+                    )
+
+            except Exception as exc:
+                self.logger.warning(
+                    f"  Could not enrich {dim} from {plan_table}: {exc}"
+                )
+
     def _load_dimension_tables(self) -> None:
         """
         Extract dimension data from the source DB and load into the local
@@ -609,18 +869,26 @@ class ETLPipeline:
                 f"    → {len(site_type_rows):,} site type(s) upserted"
             )
 
+            # ── Build type-name lookups so we can enrich attributes ─────
+            type_name_lookup = {}
+            for type_tbl, prefix in [(item_type_src, "item"), (site_type_src, "site")]:
+                try:
+                    with src_conn.cursor(
+                        cursor_factory=psycopg2.extras.DictCursor
+                    ) as tcur:
+                        tcur.execute(f"SELECT id, name FROM {type_tbl}")
+                        type_name_lookup[prefix] = {
+                            r["id"]: r["name"] for r in tcur.fetchall()
+                        }
+                except Exception:
+                    type_name_lookup[prefix] = {}
+
             # ── Items ─────────────────────────────────────────────────────
             self.logger.info(f"  {item_src} → {local_schema}.item")
-            with src_conn.cursor(
-                cursor_factory=psycopg2.extras.DictCursor
-            ) as cur:
-                cur.execute(
-                    f"""
-                    SELECT id, xuid, name, description, attributes, type_id
-                    FROM {item_src}
-                    """
-                )
-                item_rows = cur.fetchall()
+            item_rows, item_extra = self._extract_dimension_rows(
+                src_conn, item_src, "item",
+                type_names=type_name_lookup.get("item", {}),
+            )
 
             with dst_conn.cursor() as cur:
                 psycopg2.extras.execute_values(
@@ -636,39 +904,23 @@ class ETLPipeline:
                         attributes  = EXCLUDED.attributes,
                         type_id     = EXCLUDED.type_id
                     """,
-                    [
-                        (
-                            r["id"],
-                            r["xuid"],
-                            r["name"],
-                            r["description"],
-                            # psycopg2 auto-deserialises JSONB → dict;
-                            # re-serialise to str for the INSERT adapter.
-                            psycopg2.extras.Json(r["attributes"])
-                            if r["attributes"] is not None
-                            else None,
-                            r["type_id"],
-                        )
-                        for r in item_rows
-                    ],
+                    item_rows,
                 )
             dst_conn.commit()
             self.logger.info(
                 f"    → {len(item_rows):,} item(s) upserted"
             )
+            if item_extra:
+                self.logger.info(
+                    f"    → extra columns gathered into attributes: {item_extra}"
+                )
 
             # ── Sites ─────────────────────────────────────────────────────
             self.logger.info(f"  {site_src} → {local_schema}.site")
-            with src_conn.cursor(
-                cursor_factory=psycopg2.extras.DictCursor
-            ) as cur:
-                cur.execute(
-                    f"""
-                    SELECT id, xuid, name, description, attributes, type_id
-                    FROM {site_src}
-                    """
-                )
-                site_rows = cur.fetchall()
+            site_rows, site_extra = self._extract_dimension_rows(
+                src_conn, site_src, "site",
+                type_names=type_name_lookup.get("site", {}),
+            )
 
             with dst_conn.cursor() as cur:
                 psycopg2.extras.execute_values(
@@ -684,24 +936,24 @@ class ETLPipeline:
                         attributes  = EXCLUDED.attributes,
                         type_id     = EXCLUDED.type_id
                     """,
-                    [
-                        (
-                            r["id"],
-                            r["xuid"],
-                            r["name"],
-                            r["description"],
-                            psycopg2.extras.Json(r["attributes"])
-                            if r["attributes"] is not None
-                            else None,
-                            r["type_id"],
-                        )
-                        for r in site_rows
-                    ],
+                    site_rows,
                 )
             dst_conn.commit()
             self.logger.info(
                 f"    → {len(site_rows):,} site(s) upserted"
             )
+            if site_extra:
+                self.logger.info(
+                    f"    → extra columns gathered into attributes: {site_extra}"
+                )
+
+            # ── Enrich attributes from plan.item / plan.site ────────────
+            # The plan schema (plan.item, plan.site) often contains a
+            # richly populated attributes JSONB (e.g. Product, level1-5,
+            # Country_of_origin, etc.) plus extra columns (address, city).
+            # We merge those into the local attributes so they are
+            # available for segmentation criteria.
+            self._merge_plan_attributes(src_conn, dst_conn, local_schema)
 
             self.logger.info("Dimension tables loaded successfully")
 

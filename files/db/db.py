@@ -118,6 +118,9 @@ def init_schema(config_path: Union[str, Path]) -> None:
     -- Schema
     CREATE SCHEMA IF NOT EXISTS {schema};
 
+    -- ─── Mooncake columnar extension ──────────────────────────────────
+    CREATE EXTENSION IF NOT EXISTS pg_mooncake;
+
     -- ─── Lookup / type tables (must come before item/site) ───────────
 
     -- Item types (mirrors dp_plan.dp_item_type)
@@ -161,20 +164,25 @@ def init_schema(config_path: Union[str, Path]) -> None:
     -- ─── Demand actuals ──────────────────────────────────────────────
 
     CREATE TABLE IF NOT EXISTS {schema}.demand_actuals (
-        id              SERIAL PRIMARY KEY,
         item_id         INTEGER,
         site_id         INTEGER,
         channel         TEXT,
         date            DATE NOT NULL,
         qty             DOUBLE PRECISION,
-        corrected_qty   DOUBLE PRECISION,
         item_name       TEXT,
         site_name       TEXT,
-        unique_id       TEXT,
-        UNIQUE (item_id, site_id, channel, date)
-    );
+        unique_id       TEXT
+    ) USING columnstore;
     CREATE INDEX IF NOT EXISTS idx_demand_unique_id
         ON {schema}.demand_actuals (unique_id);
+
+    -- Outlier corrections stored separately (heap — supports UPDATE)
+    CREATE TABLE IF NOT EXISTS {schema}.demand_corrections (
+        unique_id       TEXT NOT NULL,
+        date            DATE NOT NULL,
+        corrected_qty   DOUBLE PRECISION,
+        PRIMARY KEY (unique_id, date)
+    );
 
     -- ─── Detected outliers ───────────────────────────────────────────
 
@@ -227,21 +235,19 @@ def init_schema(config_path: Union[str, Path]) -> None:
     -- ─── Forecast results (all methods) ──────────────────────────────
 
     CREATE TABLE IF NOT EXISTS {schema}.forecast_results (
-        id                SERIAL PRIMARY KEY,
         unique_id         TEXT NOT NULL,
         method            TEXT NOT NULL,
         point_forecast    JSONB,
         quantiles         JSONB,
         hyperparameters   JSONB,
         training_time     DOUBLE PRECISION
-    );
+    ) USING columnstore;
     CREATE INDEX IF NOT EXISTS idx_forecasts_uid_method
         ON {schema}.forecast_results (unique_id, method);
 
     -- ─── Backtest metrics ────────────────────────────────────────────
 
     CREATE TABLE IF NOT EXISTS {schema}.backtest_metrics (
-        id                SERIAL PRIMARY KEY,
         unique_id         TEXT NOT NULL,
         method            TEXT NOT NULL,
         forecast_origin   DATE,
@@ -263,21 +269,20 @@ def init_schema(config_path: Union[str, Path]) -> None:
         bic               DOUBLE PRECISION,
         aicc              DOUBLE PRECISION,
         metric_source     TEXT DEFAULT 'rolling_window'
-    );
+    ) USING columnstore;
     CREATE INDEX IF NOT EXISTS idx_metrics_uid
         ON {schema}.backtest_metrics (unique_id);
 
     -- ─── Forecasts by origin (per-step backtest detail) ──────────────
 
     CREATE TABLE IF NOT EXISTS {schema}.forecasts_by_origin (
-        id                SERIAL PRIMARY KEY,
         unique_id         TEXT NOT NULL,
         method            TEXT NOT NULL,
         forecast_origin   DATE,
         horizon_step      INTEGER,
         point_forecast    DOUBLE PRECISION,
         actual_value      DOUBLE PRECISION
-    );
+    ) USING columnstore;
     CREATE INDEX IF NOT EXISTS idx_fbo_uid
         ON {schema}.forecasts_by_origin (unique_id, method);
 
@@ -298,7 +303,6 @@ def init_schema(config_path: Union[str, Path]) -> None:
     -- ─── Fitted distributions (MEIO) ─────────────────────────────────
 
     CREATE TABLE IF NOT EXISTS {schema}.fitted_distributions (
-        id                       SERIAL PRIMARY KEY,
         unique_id                TEXT NOT NULL,
         method                   TEXT NOT NULL,
         forecast_horizon         INTEGER,
@@ -309,7 +313,7 @@ def init_schema(config_path: Union[str, Path]) -> None:
         ks_statistic             DOUBLE PRECISION,
         ks_pvalue                DOUBLE PRECISION,
         service_level_quantiles  JSONB
-    );
+    ) USING columnstore;
     CREATE INDEX IF NOT EXISTS idx_dist_uid
         ON {schema}.fitted_distributions (unique_id, method);
 
@@ -408,20 +412,198 @@ def init_schema(config_path: Union[str, Path]) -> None:
         revoked_at  TIMESTAMPTZ DEFAULT NOW()
     );
 
-    -- Configuration sections (pipeline config stored in DB)
-    CREATE TABLE IF NOT EXISTS {schema}.config_sections (
-        id          SERIAL PRIMARY KEY,
-        section     TEXT NOT NULL UNIQUE,
-        label       TEXT NOT NULL,
-        config      JSONB NOT NULL DEFAULT '{{}}'::jsonb,
-        description TEXT,
-        updated_at  TIMESTAMPTZ DEFAULT NOW(),
-        created_at  TIMESTAMPTZ DEFAULT NOW()
+    -- Parameter sets (pipeline config stored in DB, versioned)
+    CREATE TABLE IF NOT EXISTS {schema}.parameters (
+        id              SERIAL PRIMARY KEY,
+        parameter_type  TEXT NOT NULL,
+        name            TEXT NOT NULL DEFAULT 'Default',
+        label           TEXT NOT NULL,
+        parameters_set  JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+        description     TEXT,
+        is_default      BOOLEAN DEFAULT FALSE,
+        sort_order      INTEGER DEFAULT 0,
+        updated_at      TIMESTAMPTZ DEFAULT NOW(),
+        created_at      TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(parameter_type, name)
     );
+
+    -- Junction: parameter versions ↔ segments
+    CREATE TABLE IF NOT EXISTS {schema}.parameter_segment (
+        id              SERIAL PRIMARY KEY,
+        parameter_id    INTEGER NOT NULL REFERENCES {schema}.parameters(id) ON DELETE CASCADE,
+        segment_id      INTEGER NOT NULL REFERENCES {schema}.segment(id) ON DELETE CASCADE,
+        UNIQUE(parameter_id, segment_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_param_seg_param
+        ON {schema}.parameter_segment (parameter_id);
+    CREATE INDEX IF NOT EXISTS idx_param_seg_seg
+        ON {schema}.parameter_segment (segment_id);
+
+    -- Resolution: each series → assigned parameter version per business type
+    CREATE TABLE IF NOT EXISTS {schema}.series_parameter_assignment (
+        unique_id                       TEXT NOT NULL PRIMARY KEY,
+        item_id                         BIGINT,
+        site_id                         BIGINT,
+        forecasting_parameter_id        INTEGER REFERENCES {schema}.parameters(id) ON DELETE SET NULL,
+        outlier_detection_parameter_id  INTEGER REFERENCES {schema}.parameters(id) ON DELETE SET NULL,
+        characterization_parameter_id   INTEGER REFERENCES {schema}.parameters(id) ON DELETE SET NULL,
+        evaluation_parameter_id         INTEGER REFERENCES {schema}.parameters(id) ON DELETE SET NULL,
+        best_method_parameter_id        INTEGER REFERENCES {schema}.parameters(id) ON DELETE SET NULL,
+        updated_at                      TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- ─── Audit log ────────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS {schema}.audit_log (
+        id              SERIAL PRIMARY KEY,
+        entity_type     TEXT NOT NULL,
+        entity_id       INTEGER,
+        action          TEXT NOT NULL,
+        old_value       JSONB,
+        new_value       JSONB,
+        changed_by      TEXT DEFAULT 'system',
+        created_at      TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_entity
+        ON {schema}.audit_log (entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_created
+        ON {schema}.audit_log (created_at DESC);
     """
 
     # Separate ALTER statements for adding columns to existing tables
     alter_stmts = [
+        # Migration: rename config_sections → parameters (if old table exists)
+        f"""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'config_sections'
+            ) AND NOT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'parameters'
+            ) THEN
+                ALTER TABLE {schema}.config_sections RENAME TO parameters;
+            END IF;
+        END $$;
+        """,
+        # Migration: rename config_sections columns → parameter_type, parameters_set
+        f"""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'parameters'
+                  AND column_name = 'section'
+            ) THEN
+                ALTER TABLE {schema}.parameters RENAME COLUMN section TO parameter_type;
+            END IF;
+        END $$;
+        """,
+        f"""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'parameters'
+                  AND column_name = 'config'
+            ) THEN
+                ALTER TABLE {schema}.parameters RENAME COLUMN config TO parameters_set;
+            END IF;
+        END $$;
+        """,
+        # Migration: add 'name' column to parameters (versioning)
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'parameters'
+                  AND column_name = 'name'
+            ) THEN
+                ALTER TABLE {schema}.parameters ADD COLUMN name TEXT NOT NULL DEFAULT 'Default';
+            END IF;
+        END $$;
+        """,
+        # Migration: add 'is_default' column to parameters
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'parameters'
+                  AND column_name = 'is_default'
+            ) THEN
+                ALTER TABLE {schema}.parameters ADD COLUMN is_default BOOLEAN DEFAULT FALSE;
+                UPDATE {schema}.parameters SET is_default = TRUE;
+            END IF;
+        END $$;
+        """,
+        # Migration: drop old UNIQUE(parameter_type), add UNIQUE(parameter_type, name)
+        f"""
+        DO $$
+        DECLARE
+            _cname TEXT;
+        BEGIN
+            -- Find and drop any UNIQUE constraint on parameter_type alone
+            SELECT tc.constraint_name INTO _cname
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.constraint_column_usage ccu
+              ON tc.constraint_name = ccu.constraint_name
+             AND tc.table_schema = ccu.table_schema
+            WHERE tc.table_schema = '{schema}'
+              AND tc.table_name = 'parameters'
+              AND tc.constraint_type = 'UNIQUE'
+              AND ccu.column_name = 'parameter_type'
+              AND NOT EXISTS (
+                  SELECT 1 FROM information_schema.constraint_column_usage ccu2
+                  WHERE ccu2.constraint_name = tc.constraint_name
+                    AND ccu2.table_schema = tc.table_schema
+                    AND ccu2.column_name = 'name'
+              )
+            LIMIT 1;
+
+            IF _cname IS NOT NULL THEN
+                EXECUTE format('ALTER TABLE {schema}.parameters DROP CONSTRAINT %I', _cname);
+            END IF;
+
+            -- Add composite unique if it doesn't exist yet
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint c
+                JOIN pg_namespace n ON n.oid = c.connamespace
+                WHERE n.nspname = '{schema}'
+                  AND c.conrelid = '{schema}.parameters'::regclass
+                  AND c.contype = 'u'
+                  AND array_length(c.conkey, 1) = 2
+            ) THEN
+                ALTER TABLE {schema}.parameters
+                    ADD CONSTRAINT parameters_parameter_type_name_key
+                    UNIQUE (parameter_type, name);
+            END IF;
+        END $$;
+        """,
+        # Migration: add sort_order to parameters (priority ordering)
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'parameters'
+                  AND column_name = 'sort_order'
+            ) THEN
+                ALTER TABLE {schema}.parameters ADD COLUMN sort_order INTEGER DEFAULT 0;
+                UPDATE {schema}.parameters SET sort_order = 9999 WHERE is_default = TRUE;
+                UPDATE {schema}.parameters SET sort_order = id WHERE is_default = FALSE;
+            END IF;
+        END $$;
+        """,
         # demand_actuals — corrected_qty (legacy add)
         f"""
         DO $$

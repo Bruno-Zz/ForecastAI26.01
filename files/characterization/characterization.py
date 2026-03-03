@@ -163,16 +163,20 @@ class TimeSeriesCharacterizer:
         unique_id | ds (datetime) | y (numeric)
     """
 
-    def __init__(self, config_path: str = "config/config.yaml"):
+    def __init__(self, config_path: str = "config/config.yaml", config_override: dict = None):
         """
         Initialize the characterizer from a YAML configuration file.
 
         Args:
             config_path: Path to the project config.yaml.
+            config_override: Optional dict to deep-merge on top of the loaded config.
         """
         self.config_path = config_path
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
+        if config_override:
+            from utils.parameter_resolver import ParameterResolver
+            self.config = ParameterResolver.deep_merge(self.config, config_override)
 
         self.char_config = self.config['characterization']
         self.method_selection = self.config['forecasting']['method_selection']

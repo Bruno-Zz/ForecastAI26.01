@@ -96,21 +96,21 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── Config section registry: order + display metadata ──
-CONFIG_SECTION_REGISTRY = [
-    {"section": "data_source",       "label": "Data Source",        "description": "Source database connection and ETL table mappings"},
-    {"section": "etl",               "label": "ETL",                "description": "Extract-Transform-Load parameters"},
-    {"section": "outlier_detection",  "label": "Outlier Detection",  "description": "Outlier detection and correction settings"},
-    {"section": "characterization",   "label": "Characterization",   "description": "Time-series characterization thresholds"},
-    {"section": "forecasting",        "label": "Forecasting",        "description": "Forecast horizon, methods, and backtesting"},
-    {"section": "hierarchical",       "label": "Hierarchical",       "description": "Hierarchical reconciliation settings"},
-    {"section": "evaluation",         "label": "Evaluation",         "description": "Metric weights and scoring"},
-    {"section": "best_method",        "label": "Best Method",        "description": "Composite scoring weights"},
-    {"section": "meio",               "label": "MEIO",               "description": "Inventory optimization distributions"},
-    {"section": "parallel",           "label": "Parallel",           "description": "Dask / parallel execution settings"},
-    {"section": "output",             "label": "Output",             "description": "Output format and save flags"},
-    {"section": "auth",               "label": "Auth",               "description": "Authentication and JWT settings"},
-    {"section": "logging",            "label": "Logging",            "description": "Log level and file settings"},
+# ── Parameter registry: order + display metadata ──
+PARAMETER_REGISTRY = [
+    {"parameter_type": "data_source",       "label": "Data Source",        "description": "Source database connection and ETL table mappings"},
+    {"parameter_type": "etl",               "label": "ETL",                "description": "Extract-Transform-Load parameters"},
+    {"parameter_type": "outlier_detection",  "label": "Outlier Detection",  "description": "Outlier detection and correction settings"},
+    {"parameter_type": "characterization",   "label": "Characterization",   "description": "Time-series characterization thresholds"},
+    {"parameter_type": "forecasting",        "label": "Forecasting",        "description": "Forecast horizon, methods, and backtesting"},
+    {"parameter_type": "hierarchical",       "label": "Hierarchical",       "description": "Hierarchical reconciliation settings"},
+    {"parameter_type": "evaluation",         "label": "Evaluation",         "description": "Metric weights and scoring"},
+    {"parameter_type": "best_method",        "label": "Best Method",        "description": "Composite scoring weights"},
+    {"parameter_type": "meio",               "label": "MEIO",               "description": "Inventory optimization distributions"},
+    {"parameter_type": "parallel",           "label": "Parallel",           "description": "Dask / parallel execution settings"},
+    {"parameter_type": "output",             "label": "Output",             "description": "Output format and save flags"},
+    {"parameter_type": "auth",               "label": "Auth",               "description": "Authentication and JWT settings"},
+    {"parameter_type": "logging",            "label": "Logging",            "description": "Log level and file settings"},
 ]
 
 # Data cache
@@ -390,8 +390,8 @@ def _get_config():
     return data_cache.get('config') or {}
 
 
-def seed_config_sections(config_path: str) -> None:
-    """Seed config_sections table from config.yaml if the table is empty."""
+def seed_parameters(config_path: str) -> None:
+    """Seed default parameter versions from config.yaml (one per type)."""
     if not _DB_AVAILABLE:
         return
     schema = get_schema(config_path)
@@ -401,24 +401,18 @@ def seed_config_sections(config_path: str) -> None:
     conn = get_conn(config_path)
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM {schema}.config_sections")
-            count = cur.fetchone()[0]
-            if count > 0:
-                logger.info(f"config_sections already has {count} row(s) — skipping seed")
-                return
-
-            for meta in CONFIG_SECTION_REGISTRY:
-                section_key = meta["section"]
-                section_data = full_cfg.get(section_key, {})
+            for meta in PARAMETER_REGISTRY:
+                param_type = meta["parameter_type"]
+                param_data = full_cfg.get(param_type, {})
                 cur.execute(
-                    f"""INSERT INTO {schema}.config_sections
-                        (section, label, config, description)
-                    VALUES (%s, %s, %s::jsonb, %s)
-                    ON CONFLICT (section) DO NOTHING""",
-                    (section_key, meta["label"], json.dumps(section_data, default=str), meta.get("description")),
+                    f"""INSERT INTO {schema}.parameters
+                        (parameter_type, name, label, parameters_set, description, is_default, sort_order)
+                    VALUES (%s, 'Default', %s, %s::jsonb, %s, TRUE, 9999)
+                    ON CONFLICT (parameter_type, name) DO NOTHING""",
+                    (param_type, meta["label"], json.dumps(param_data, default=str), meta.get("description")),
                 )
         conn.commit()
-        logger.info(f"Seeded {len(CONFIG_SECTION_REGISTRY)} config sections into DB")
+        logger.info(f"Seeded default parameter sets into DB")
     except Exception:
         conn.rollback()
         raise
@@ -442,11 +436,13 @@ async def startup_event():
             seed_default_admin(_api_config_path())
         except Exception as exc:
             logger.warning(f"Admin seed failed (non-fatal): {exc}")
-        # Seed config sections from config.yaml
+        # Seed parameters from config.yaml
         try:
-            seed_config_sections(_api_config_path())
+            seed_parameters(_api_config_path())
         except Exception as exc:
-            logger.warning(f"Config section seed failed (non-fatal): {exc}")
+            logger.warning(f"Parameter seed failed (non-fatal): {exc}")
+        # Mark any leftover 'running' process_log rows as interrupted
+        _mark_stale_db_steps()
     load_data()
 
 
@@ -473,7 +469,7 @@ async def get_config():
             conn = get_conn(_api_config_path())
             try:
                 with conn.cursor() as cur:
-                    cur.execute(f"SELECT section, config FROM {schema}.config_sections ORDER BY id")
+                    cur.execute(f"SELECT parameter_type, parameters_set FROM {schema}.parameters WHERE is_default = TRUE ORDER BY id")
                     rows = cur.fetchall()
             finally:
                 conn.close()
@@ -577,7 +573,7 @@ async def update_config(body: dict = Body(...)):
     # Refresh in-memory cache
     data_cache['config'] = config
 
-    # Sync changed sections to config_sections DB table
+    # Sync changed sections to parameters DB table
     if _DB_AVAILABLE:
         try:
             schema = get_schema(str(config_path))
@@ -588,7 +584,7 @@ async def update_config(body: dict = Body(...)):
                     for sect_key in changed_sections:
                         section_data = config.get(sect_key, {})
                         cur.execute(
-                            f"UPDATE {schema}.config_sections SET config = %s::jsonb, updated_at = NOW() WHERE section = %s",
+                            f"UPDATE {schema}.parameters SET parameters_set = %s::jsonb, updated_at = NOW() WHERE parameter_type = %s AND is_default = TRUE",
                             (json.dumps(section_data, default=str), sect_key),
                         )
                 conn.commit()
@@ -597,23 +593,66 @@ async def update_config(body: dict = Body(...)):
             finally:
                 conn.close()
         except Exception as sync_err:
-            logger.warning(f"Config section DB sync failed (non-fatal): {sync_err}")
+            logger.warning(f"Parameters DB sync failed (non-fatal): {sync_err}")
 
     logger.info(f"Config updated: {[a['path'] for a in applied]}")
     return {"status": "ok", "applied": applied}
 
 
 # ===========================================================================
-# CONFIG SECTIONS endpoints (DB-backed config with surrogate keys)
+# PARAMETERS endpoints (DB-backed config with versioning)
 # ===========================================================================
 
-class ConfigSectionUpdate(BaseModel):
-    config: Dict[str, Any]
+class ParameterCreate(BaseModel):
+    parameter_type: str
+    name: str
+    description: Optional[str] = None
+    parameters_set: Optional[Dict[str, Any]] = None
+    clone_from_id: Optional[int] = None
+
+class ParameterUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    parameters_set: Optional[Dict[str, Any]] = None
+
+class ParameterSegmentUpdate(BaseModel):
+    segment_ids: List[int]
+
+class ParameterReorder(BaseModel):
+    parameter_type: str
+    ordered_ids: List[int]
+
+_PARAM_BLOCKED_KEYS = {'password', 'secret', 'token', 'account_key', 'connection_string', 'sslmode'}
 
 
-@app.get("/api/config/sections")
-async def list_config_sections():
-    """List all config sections with id, section name, label, and config."""
+def _param_row_to_dict(cols, row):
+    """Convert a parameters row tuple into a JSON-safe dict."""
+    entry = dict(zip(cols, row))
+    for ts_col in ("updated_at", "created_at"):
+        if entry.get(ts_col):
+            entry[ts_col] = entry[ts_col].isoformat()
+    if isinstance(entry.get("parameters_set"), str):
+        entry["parameters_set"] = json.loads(entry["parameters_set"])
+    return entry
+
+
+def _audit_log(cur, schema: str, entity_type: str, entity_id, action: str,
+               old_value=None, new_value=None, changed_by: str = "system"):
+    """Insert an audit log row inside an existing transaction cursor."""
+    cur.execute(
+        f"INSERT INTO {schema}.audit_log "
+        f"(entity_type, entity_id, action, old_value, new_value, changed_by) "
+        f"VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s)",
+        (entity_type, entity_id, action,
+         json.dumps(old_value, default=str) if old_value else None,
+         json.dumps(new_value, default=str) if new_value else None,
+         changed_by),
+    )
+
+
+@app.get("/api/parameters")
+async def list_parameters():
+    """List all parameter versions with segment associations."""
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="DB not available")
     schema = get_schema(_api_config_path())
@@ -621,86 +660,71 @@ async def list_config_sections():
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, section, label, config, description, updated_at, created_at "
-                f"FROM {schema}.config_sections ORDER BY id"
+                f"SELECT id, parameter_type, name, label, parameters_set, description, "
+                f"is_default, sort_order, updated_at, created_at "
+                f"FROM {schema}.parameters ORDER BY parameter_type, sort_order ASC, id"
             )
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
+
+            # Fetch all segment associations in one query
+            cur.execute(f"SELECT parameter_id, segment_id FROM {schema}.parameter_segment")
+            seg_map: dict[int, list[int]] = {}
+            for pid, sid in cur.fetchall():
+                seg_map.setdefault(pid, []).append(sid)
+
         result = []
         for row in rows:
-            entry = dict(zip(cols, row))
-            for ts_col in ("updated_at", "created_at"):
-                if entry.get(ts_col):
-                    entry[ts_col] = entry[ts_col].isoformat()
-            if isinstance(entry.get("config"), str):
-                entry["config"] = json.loads(entry["config"])
+            entry = _param_row_to_dict(cols, row)
+            entry["segment_ids"] = seg_map.get(entry["id"], [])
             result.append(entry)
         return result
     finally:
         conn.close()
 
 
-@app.get("/api/config/sections/{section_id}")
-async def get_config_section(section_id: int):
-    """Get one config section by surrogate key."""
+@app.put("/api/parameters/reorder")
+async def reorder_parameters(body: ParameterReorder):
+    """Reorder parameter versions within a type. Default must be last."""
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="DB not available")
     schema = get_schema(_api_config_path())
     conn = get_conn(_api_config_path())
     try:
         with conn.cursor() as cur:
+            # Validate all IDs belong to the given parameter_type
             cur.execute(
-                f"SELECT id, section, label, config, description, updated_at, created_at "
-                f"FROM {schema}.config_sections WHERE id = %s",
-                (section_id,),
+                f"SELECT id, is_default, sort_order FROM {schema}.parameters "
+                f"WHERE parameter_type = %s ORDER BY sort_order ASC",
+                (body.parameter_type,),
             )
-            row = cur.fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail="Config section not found")
-            cols = [d[0] for d in cur.description]
-            entry = dict(zip(cols, row))
-        for ts_col in ("updated_at", "created_at"):
-            if entry.get(ts_col):
-                entry[ts_col] = entry[ts_col].isoformat()
-        if isinstance(entry.get("config"), str):
-            entry["config"] = json.loads(entry["config"])
-        return entry
-    finally:
-        conn.close()
-
-
-@app.put("/api/config/sections/{section_id}")
-async def update_config_section(section_id: int, body: ConfigSectionUpdate):
-    """Update a section's config JSONB in DB, then write-back to config.yaml."""
-    if not _DB_AVAILABLE:
-        raise HTTPException(status_code=503, detail="DB not available")
-
-    BLOCKED_KEYS = {'password', 'secret', 'token', 'account_key', 'connection_string', 'sslmode'}
-
-    config_path = Path(_api_config_path())
-    schema = get_schema(str(config_path))
-    conn = get_conn(str(config_path))
-    section_key = None
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT section FROM {schema}.config_sections WHERE id = %s",
-                (section_id,),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail="Config section not found")
-            section_key = row[0]
-
-            # Strip sensitive keys from DB write
-            safe_config = {k: v for k, v in body.config.items()
-                           if not any(bk in k.lower() for bk in BLOCKED_KEYS)}
-
-            cur.execute(
-                f"UPDATE {schema}.config_sections SET config = %s::jsonb, updated_at = NOW() WHERE id = %s",
-                (json.dumps(safe_config, default=str), section_id),
-            )
+            rows = cur.fetchall()
+            existing = {r[0]: r[1] for r in rows}
+            old_order = {r[0]: r[2] for r in rows}
+            if set(body.ordered_ids) != set(existing.keys()):
+                raise HTTPException(
+                    status_code=400,
+                    detail="ordered_ids must contain exactly all parameter IDs for this type",
+                )
+            # Default must be last
+            if existing.get(body.ordered_ids[-1]) is not True:
+                raise HTTPException(
+                    status_code=400,
+                    detail="The default parameter version must be last in the ordering",
+                )
+            # Update sort_order for each position
+            for idx, pid in enumerate(body.ordered_ids):
+                cur.execute(
+                    f"UPDATE {schema}.parameters SET sort_order = %s WHERE id = %s",
+                    (idx, pid),
+                )
+            # Audit the reorder as a single entry
+            new_order = {pid: idx for idx, pid in enumerate(body.ordered_ids)}
+            _audit_log(cur, schema, "parameter", None, "reorder",
+                       old_value={"parameter_type": body.parameter_type, "order": old_order},
+                       new_value={"parameter_type": body.parameter_type, "order": new_order})
         conn.commit()
+        return {"status": "ok", "parameter_type": body.parameter_type, "order": body.ordered_ids}
     except HTTPException:
         conn.rollback()
         raise
@@ -710,47 +734,347 @@ async def update_config_section(section_id: int, body: ConfigSectionUpdate):
     finally:
         conn.close()
 
-    # Backward compat: write section back to config.yaml
+
+@app.post("/api/parameters/resolve")
+async def resolve_parameters():
+    """Trigger parameter assignment resolution for all series."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
+    config_path = _api_config_path()
     try:
-        with open(config_path, "r") as fh:
-            full_cfg = yaml.safe_load(fh) or {}
-        # Preserve existing sensitive keys from YAML
-        existing_section = full_cfg.get(section_key, {})
-
-        def _collect_sensitive(d, prefix=""):
-            """Recursively collect sensitive key paths and values."""
-            result = {}
-            if isinstance(d, dict):
-                for k, v in d.items():
-                    if any(bk in k.lower() for bk in BLOCKED_KEYS):
-                        result[k] = v
-                    elif isinstance(v, dict):
-                        sub = _collect_sensitive(v, f"{prefix}{k}.")
-                        if sub:
-                            result[k] = sub
-            return result
-
-        sensitive = _collect_sensitive(existing_section)
-
-        def _deep_merge(base, override):
-            """Merge override into base, preserving base keys not in override."""
-            merged = dict(base)
-            for k, v in override.items():
-                if isinstance(v, dict) and isinstance(merged.get(k), dict):
-                    merged[k] = _deep_merge(merged[k], v)
-                else:
-                    merged[k] = v
-            return merged
-
-        full_cfg[section_key] = _deep_merge(body.config, sensitive)
-        with open(config_path, "w") as fh:
-            yaml.dump(full_cfg, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
-        data_cache["config"] = full_cfg
-        logger.info(f"Config section '{section_key}' (id={section_id}) saved to DB and YAML")
+        from segmentation.segmentation import SegmentationEngine
+        engine = SegmentationEngine(config_path)
+        count = engine.resolve_parameter_assignments()
+        return {"status": "ok", "resolved_series": count}
+    except ImportError:
+        raise HTTPException(status_code=500, detail="Segmentation engine not available")
     except Exception as exc:
-        logger.warning(f"YAML write-back failed (DB already updated): {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
-    return {"status": "ok", "section_id": section_id, "section": section_key}
+
+@app.get("/api/parameters/{param_id}")
+async def get_parameter(param_id: int):
+    """Get one parameter version by surrogate key."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
+    schema = get_schema(_api_config_path())
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, parameter_type, name, label, parameters_set, description, "
+                f"is_default, sort_order, updated_at, created_at "
+                f"FROM {schema}.parameters WHERE id = %s",
+                (param_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Parameter set not found")
+            cols = [d[0] for d in cur.description]
+            entry = _param_row_to_dict(cols, row)
+
+            cur.execute(
+                f"SELECT segment_id FROM {schema}.parameter_segment WHERE parameter_id = %s",
+                (param_id,),
+            )
+            entry["segment_ids"] = [r[0] for r in cur.fetchall()]
+        return entry
+    finally:
+        conn.close()
+
+
+@app.post("/api/parameters")
+async def create_parameter(body: ParameterCreate):
+    """Create a new parameter version for a given parameter_type."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
+
+    valid_types = {m["parameter_type"] for m in PARAMETER_REGISTRY}
+    if body.parameter_type not in valid_types:
+        raise HTTPException(status_code=400, detail=f"Invalid parameter_type. Must be one of: {sorted(valid_types)}")
+    if not body.name or not body.name.strip():
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    schema = get_schema(_api_config_path())
+    conn = get_conn(_api_config_path())
+    try:
+        params_set = body.parameters_set or {}
+
+        # Clone from existing version if requested
+        if body.clone_from_id is not None:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT parameters_set, parameter_type FROM {schema}.parameters WHERE id = %s",
+                    (body.clone_from_id,),
+                )
+                source = cur.fetchone()
+                if source is None:
+                    raise HTTPException(status_code=404, detail=f"Source parameter id={body.clone_from_id} not found")
+                if source[1] != body.parameter_type:
+                    raise HTTPException(status_code=400, detail="Cannot clone from a different parameter_type")
+                params_set = source[0] if isinstance(source[0], dict) else json.loads(source[0])
+
+        label = next((m["label"] for m in PARAMETER_REGISTRY if m["parameter_type"] == body.parameter_type), body.parameter_type)
+
+        with conn.cursor() as cur:
+            # Auto-assign sort_order: max non-default sort_order + 1 (before default)
+            cur.execute(
+                f"SELECT COALESCE(MAX(sort_order), 0) FROM {schema}.parameters "
+                f"WHERE parameter_type = %s AND is_default = FALSE",
+                (body.parameter_type,),
+            )
+            next_sort = cur.fetchone()[0] + 1
+
+            cur.execute(
+                f"""INSERT INTO {schema}.parameters
+                    (parameter_type, name, label, parameters_set, description, is_default, sort_order)
+                VALUES (%s, %s, %s, %s::jsonb, %s, FALSE, %s)
+                RETURNING id, parameter_type, name, label, parameters_set, description, is_default, sort_order, updated_at, created_at""",
+                (body.parameter_type, body.name.strip(), label,
+                 json.dumps(params_set, default=str), body.description, next_sort),
+            )
+            cols = [d[0] for d in cur.description]
+            row = cur.fetchone()
+            new_entry = _param_row_to_dict(cols, row)
+            _audit_log(cur, schema, "parameter", new_entry["id"], "create",
+                       new_value=new_entry)
+        conn.commit()
+
+        new_entry["segment_ids"] = []
+        return new_entry
+
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        if "duplicate key" in str(exc).lower() or "unique constraint" in str(exc).lower():
+            raise HTTPException(status_code=409, detail=f"A version named '{body.name}' already exists for {body.parameter_type}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.put("/api/parameters/{param_id}")
+async def update_parameter(param_id: int, body: ParameterUpdate):
+    """Update a parameter version's name, description, and/or parameters_set."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
+
+    config_path = Path(_api_config_path())
+    schema = get_schema(str(config_path))
+    conn = get_conn(str(config_path))
+    param_type = None
+    is_default_row = False
+    try:
+        with conn.cursor() as cur:
+            # Fetch full old row for audit
+            cur.execute(
+                f"SELECT id, parameter_type, name, label, parameters_set, description, "
+                f"is_default, sort_order, updated_at, created_at "
+                f"FROM {schema}.parameters WHERE id = %s",
+                (param_id,),
+            )
+            old_row = cur.fetchone()
+            if old_row is None:
+                raise HTTPException(status_code=404, detail="Parameter set not found")
+            old_cols = [d[0] for d in cur.description]
+            old_snapshot = _param_row_to_dict(old_cols, old_row)
+            param_type = old_snapshot["parameter_type"]
+            is_default_row = old_snapshot["is_default"]
+
+            # Prevent renaming default version
+            if body.name is not None and is_default_row and body.name != 'Default':
+                raise HTTPException(status_code=400, detail="Cannot rename the default version")
+
+            # Build SET clause dynamically
+            updates = []
+            values = []
+            if body.name is not None:
+                updates.append("name = %s")
+                values.append(body.name.strip())
+            if body.description is not None:
+                updates.append("description = %s")
+                values.append(body.description)
+            if body.parameters_set is not None:
+                safe_config = {k: v for k, v in body.parameters_set.items()
+                               if not any(bk in k.lower() for bk in _PARAM_BLOCKED_KEYS)}
+                updates.append("parameters_set = %s::jsonb")
+                values.append(json.dumps(safe_config, default=str))
+
+            if not updates:
+                raise HTTPException(status_code=400, detail="No fields to update")
+
+            updates.append("updated_at = NOW()")
+            values.append(param_id)
+
+            cur.execute(
+                f"UPDATE {schema}.parameters SET {', '.join(updates)} WHERE id = %s",
+                values,
+            )
+
+            # Fetch new row for audit
+            cur.execute(
+                f"SELECT id, parameter_type, name, label, parameters_set, description, "
+                f"is_default, sort_order, updated_at, created_at "
+                f"FROM {schema}.parameters WHERE id = %s",
+                (param_id,),
+            )
+            new_row = cur.fetchone()
+            new_snapshot = _param_row_to_dict([d[0] for d in cur.description], new_row)
+            _audit_log(cur, schema, "parameter", param_id, "update",
+                       old_value=old_snapshot, new_value=new_snapshot)
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        if "duplicate key" in str(exc).lower() or "unique constraint" in str(exc).lower():
+            raise HTTPException(status_code=409, detail=f"A version with that name already exists for this parameter type")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+    # Write-back to config.yaml only for default versions
+    if is_default_row and body.parameters_set is not None:
+        try:
+            with open(config_path, "r") as fh:
+                full_cfg = yaml.safe_load(fh) or {}
+            existing_section = full_cfg.get(param_type, {})
+
+            def _collect_sensitive(d, prefix=""):
+                result = {}
+                if isinstance(d, dict):
+                    for k, v in d.items():
+                        if any(bk in k.lower() for bk in _PARAM_BLOCKED_KEYS):
+                            result[k] = v
+                        elif isinstance(v, dict):
+                            sub = _collect_sensitive(v, f"{prefix}{k}.")
+                            if sub:
+                                result[k] = sub
+                return result
+
+            sensitive = _collect_sensitive(existing_section)
+
+            def _deep_merge(base, override):
+                merged = dict(base)
+                for k, v in override.items():
+                    if isinstance(v, dict) and isinstance(merged.get(k), dict):
+                        merged[k] = _deep_merge(merged[k], v)
+                    else:
+                        merged[k] = v
+                return merged
+
+            full_cfg[param_type] = _deep_merge(body.parameters_set, sensitive)
+            with open(config_path, "w") as fh:
+                yaml.dump(full_cfg, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            data_cache["config"] = full_cfg
+            logger.info(f"Parameter '{param_type}' (id={param_id}) saved to DB and YAML")
+        except Exception as exc:
+            logger.warning(f"YAML write-back failed (DB already updated): {exc}")
+
+    return {"status": "ok", "param_id": param_id, "parameter_type": param_type}
+
+
+@app.delete("/api/parameters/{param_id}")
+async def delete_parameter(param_id: int):
+    """Delete a parameter version. Cannot delete default versions."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
+    schema = get_schema(_api_config_path())
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            # Fetch full old row for audit
+            cur.execute(
+                f"SELECT id, parameter_type, name, label, parameters_set, description, "
+                f"is_default, sort_order, updated_at, created_at "
+                f"FROM {schema}.parameters WHERE id = %s",
+                (param_id,),
+            )
+            old_row = cur.fetchone()
+            if old_row is None:
+                raise HTTPException(status_code=404, detail="Parameter set not found")
+            old_cols = [d[0] for d in cur.description]
+            old_snapshot = _param_row_to_dict(old_cols, old_row)
+            if old_snapshot.get("is_default"):
+                raise HTTPException(status_code=400, detail="Cannot delete the default parameter version")
+            cur.execute(f"DELETE FROM {schema}.parameters WHERE id = %s", (param_id,))
+            _audit_log(cur, schema, "parameter", param_id, "delete",
+                       old_value=old_snapshot)
+        conn.commit()
+        return {"status": "ok", "deleted": param_id}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/parameters/{param_id}/segments")
+async def get_parameter_segments(param_id: int):
+    """Get segment IDs associated with a parameter version."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
+    schema = get_schema(_api_config_path())
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT segment_id FROM {schema}.parameter_segment WHERE parameter_id = %s",
+                (param_id,),
+            )
+            ids = [r[0] for r in cur.fetchall()]
+        return {"parameter_id": param_id, "segment_ids": ids}
+    finally:
+        conn.close()
+
+
+@app.put("/api/parameters/{param_id}/segments")
+async def set_parameter_segments(param_id: int, body: ParameterSegmentUpdate):
+    """Set the segment associations for a parameter version (replace all)."""
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
+    schema = get_schema(_api_config_path())
+    conn = get_conn(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT id FROM {schema}.parameters WHERE id = %s", (param_id,))
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Parameter set not found")
+            # Capture old segment associations for audit
+            cur.execute(
+                f"SELECT segment_id FROM {schema}.parameter_segment WHERE parameter_id = %s",
+                (param_id,),
+            )
+            old_segment_ids = sorted([r[0] for r in cur.fetchall()])
+            cur.execute(
+                f"DELETE FROM {schema}.parameter_segment WHERE parameter_id = %s",
+                (param_id,),
+            )
+            for sid in body.segment_ids:
+                cur.execute(
+                    f"INSERT INTO {schema}.parameter_segment (parameter_id, segment_id) "
+                    f"VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (param_id, sid),
+                )
+            _audit_log(cur, schema, "parameter_segment", param_id, "update",
+                       old_value={"parameter_id": param_id, "segment_ids": old_segment_ids},
+                       new_value={"parameter_id": param_id, "segment_ids": sorted(body.segment_ids)})
+        conn.commit()
+        return {"parameter_id": param_id, "segment_ids": body.segment_ids}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
 
 
 # API Endpoints
@@ -2436,6 +2760,43 @@ def _cleanup_stale_jobs():
                 pass
 
 
+def _mark_stale_db_steps():
+    """Mark any 'running' rows in process_log as 'interrupted'.
+
+    Called on API startup — if the server is (re)starting, any DB rows still
+    marked 'running' are from a previous session whose process is dead.
+    """
+    if not _DB_AVAILABLE:
+        return
+    try:
+        conn = get_conn(_api_config_path())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE zcube.process_log
+                       SET status        = 'interrupted',
+                           ended_at      = NOW(),
+                           error_message = COALESCE(error_message || ' | ', '')
+                                           || 'Process was interrupted (detected on server restart)'
+                     WHERE status = 'running'
+                    RETURNING id, run_id, step_name
+                    """
+                )
+                rows = cur.fetchall()
+            conn.commit()
+            if rows:
+                logger.warning(
+                    "Marked %d stale 'running' step(s) as 'interrupted': %s",
+                    len(rows),
+                    [(r[0], r[2]) for r in rows],
+                )
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("Failed to mark stale DB steps: %s", exc)
+
+
 PIPELINE_STEPS = {
     "etl":               {"label": "ETL",               "arg": "etl",               "desc": "Extract data from the source database into demand_actuals"},
     "outlier-detection": {"label": "Outlier Detection",  "arg": "outlier-detection", "desc": "Detect and correct outliers in the time series"},
@@ -2846,6 +3207,7 @@ async def delete_hyperparams(unique_id: str, method: Optional[str] = None):
 async def get_pipeline_jobs():
     """Return all recent pipeline jobs (latest first)."""
     with _pipeline_lock:
+        _cleanup_stale_jobs()
         jobs = list(_pipeline_jobs.values())
     return sorted(jobs, key=lambda j: j.get("started_at") or "", reverse=True)
 
@@ -3128,9 +3490,10 @@ async def get_process_log_runs():
                 MAX(COALESCE(ended_at, NOW())) AS run_ended_at,
                 SUM(COALESCE(duration_s, 0)) AS total_duration_s,
                 COUNT(*)         AS step_count,
-                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)   AS error_count,
-                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
-                SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count
+                SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)          AS error_count,
+                SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)        AS success_count,
+                SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END)        AS running_count,
+                SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END)    AS interrupted_count
             FROM zcube.process_log
             GROUP BY run_id
             ORDER BY MIN(started_at) DESC
@@ -3153,6 +3516,8 @@ async def get_process_log_runs():
             # Overall status
             if entry["running_count"] > 0:
                 entry["overall_status"] = "running"
+            elif entry.get("interrupted_count", 0) > 0:
+                entry["overall_status"] = "interrupted"
             elif entry["error_count"] > 0:
                 entry["overall_status"] = "error"
             else:
@@ -3297,8 +3662,11 @@ async def create_segment(body: SegmentIn):
             )
             cols = [d[0] for d in cur.description]
             row = cur.fetchone()
+            new_entry = _segment_row_to_dict(row, cols)
+            _audit_log(cur, schema, "segment", new_entry["id"], "create",
+                       new_value=new_entry)
         conn.commit()
-        return _segment_row_to_dict(row, cols)
+        return new_entry
     except Exception as exc:
         conn.rollback()
         logger.error(f"create_segment failed: {exc}")
@@ -3309,38 +3677,218 @@ async def create_segment(body: SegmentIn):
 
 # NOTE: /fields must be declared BEFORE /{segment_id} routes so FastAPI
 # matches the literal path segment "fields" before the int path parameter.
+def _pg_type_to_field_type(pg_type: str) -> str:
+    """Map a PostgreSQL data_type to a field type for the criteria builder."""
+    pg_type = pg_type.lower()
+    if pg_type in ("boolean",):
+        return "boolean"
+    if pg_type in ("integer", "bigint", "smallint", "serial",
+                    "numeric", "real", "double precision"):
+        return "number"
+    return "string"
+
+
+# Columns to skip when auto-discovering fields for the criteria builder
+_SKIP_ITEM_COLS = {"id", "attributes"}
+_SKIP_SITE_COLS = {"id", "attributes"}
+_SKIP_TSC_COLS  = {"id", "unique_id", "seasonal_periods", "recommended_methods"}
+
+# Known enum fields in time_series_characteristics (detected via DISTINCT queries below)
+_ENUM_FIELDS = {"abc_class", "complexity_level", "trend_direction"}
+
+# Maximum distinct count for auto-detecting enum-like columns in item/site tables
+_MAX_ENUM_DISTINCT = 50
+
+
 @app.get("/api/segments/fields")
 async def get_segment_fields():
     """
-    Return dynamic attribute key lists for item and site tables.
-    Used by the criteria builder to populate the field selector.
+    Return available fields for the segment criteria builder.
+
+    Detects columns dynamically from the item, site, and
+    time_series_characteristics tables, including JSONB attribute keys.
     """
     _require_db()
     conn = get_conn(_api_config_path())
     schema = get_schema(_api_config_path())
     try:
         with conn.cursor() as cur:
+            # ── 1. Detect table columns from information_schema ──────────
             cur.execute(
-                f"""
-                SELECT DISTINCT jsonb_object_keys(attributes)
-                FROM {schema}.item
-                WHERE attributes IS NOT NULL
-                ORDER BY 1
                 """
+                SELECT table_name, column_name, data_type
+                FROM information_schema.columns
+                WHERE table_schema = %s
+                  AND table_name IN ('item', 'site', 'time_series_characteristics',
+                                     'demand_actuals')
+                ORDER BY table_name, ordinal_position
+                """,
+                (schema,),
             )
-            item_attrs = [r[0] for r in cur.fetchall()]
+            col_rows = cur.fetchall()
 
-            cur.execute(
-                f"""
-                SELECT DISTINCT jsonb_object_keys(attributes)
-                FROM {schema}.site
-                WHERE attributes IS NOT NULL
-                ORDER BY 1
-                """
-            )
-            site_attrs = [r[0] for r in cur.fetchall()]
+            # Group by table
+            item_cols = []
+            site_cols = []
+            demand_cols = []
+            demand_actuals_extra = []  # e.g. channel
 
-        return {"item": item_attrs, "site": site_attrs}
+            for tbl, col, pg_type in col_rows:
+                ftype = _pg_type_to_field_type(pg_type)
+                if tbl == "item" and col not in _SKIP_ITEM_COLS:
+                    item_cols.append({"column": col, "type": ftype})
+                elif tbl == "site" and col not in _SKIP_SITE_COLS:
+                    site_cols.append({"column": col, "type": ftype})
+                elif tbl == "time_series_characteristics" and col not in _SKIP_TSC_COLS:
+                    demand_cols.append({"column": col, "type": ftype})
+                elif tbl == "demand_actuals" and col in ("channel",):
+                    demand_actuals_extra.append({"column": col, "type": ftype})
+
+            # ── 2. Detect JSONB attribute keys + their distinct values ────
+            item_attr_info = []   # list of {key, options?}
+            site_attr_info = []
+
+            for dim, attr_list in [("item", item_attr_info), ("site", site_attr_info)]:
+                try:
+                    cur.execute(
+                        f"""
+                        SELECT DISTINCT jsonb_object_keys(attributes)
+                        FROM {schema}.{dim}
+                        WHERE attributes IS NOT NULL
+                        ORDER BY 1
+                        """
+                    )
+                    attr_keys = [r[0] for r in cur.fetchall()]
+                except Exception:
+                    attr_keys = []
+
+                for akey in attr_keys:
+                    info = {"key": akey}
+                    # Count distinct first to avoid fetching thousands of values
+                    try:
+                        cur.execute(
+                            f"""
+                            SELECT COUNT(DISTINCT attributes->>%s)
+                            FROM {schema}.{dim}
+                            WHERE attributes->>%s IS NOT NULL
+                            """,
+                            (akey, akey),
+                        )
+                        n_distinct = cur.fetchone()[0]
+                        if 0 < n_distinct <= _MAX_ENUM_DISTINCT:
+                            cur.execute(
+                                f"""
+                                SELECT DISTINCT attributes->>%s AS v
+                                FROM {schema}.{dim}
+                                WHERE attributes->>%s IS NOT NULL
+                                ORDER BY 1
+                                """,
+                                (akey, akey),
+                            )
+                            info["options"] = [r[0] for r in cur.fetchall()]
+                    except Exception:
+                        pass
+                    attr_list.append(info)
+
+            item_attrs = [a["key"] for a in item_attr_info]
+            site_attrs = [a["key"] for a in site_attr_info]
+
+            # ── 3. Detect enum-like columns in item/site tables ──────────
+            for col_list, tbl_name in [(item_cols, "item"), (site_cols, "site")]:
+                for col_info in col_list:
+                    col_name = col_info["column"]
+                    # Skip string-type columns that are likely unique (name, xuid, description)
+                    if col_name in ("name", "xuid", "description"):
+                        continue
+                    try:
+                        cur.execute(
+                            f"""
+                            SELECT COUNT(DISTINCT {col_name})
+                            FROM {schema}.{tbl_name}
+                            WHERE {col_name} IS NOT NULL
+                            """
+                        )
+                        n_distinct = cur.fetchone()[0]
+                        if 0 < n_distinct <= _MAX_ENUM_DISTINCT:
+                            cur.execute(
+                                f"""
+                                SELECT DISTINCT {col_name}::text
+                                FROM {schema}.{tbl_name}
+                                WHERE {col_name} IS NOT NULL
+                                ORDER BY 1
+                                """
+                            )
+                            vals = [r[0] for r in cur.fetchall()]
+                            if vals:
+                                col_info["type"] = "enum"
+                                col_info["options"] = vals
+                    except Exception:
+                        pass
+
+            # ── 4. Detect enum options for known enum fields in TSC ───────
+            enum_options = {}
+            for enum_col in _ENUM_FIELDS:
+                try:
+                    cur.execute(
+                        f"""
+                        SELECT DISTINCT {enum_col}
+                        FROM {schema}.time_series_characteristics
+                        WHERE {enum_col} IS NOT NULL
+                        ORDER BY 1
+                        """
+                    )
+                    vals = [r[0] for r in cur.fetchall()]
+                    if vals:
+                        enum_options[enum_col] = vals
+                except Exception:
+                    pass  # column may not exist yet
+
+            # ── 5. Detect enum-like columns in demand_actuals extras ─────
+            for col_info in demand_actuals_extra:
+                col_name = col_info["column"]
+                try:
+                    cur.execute(
+                        f"""
+                        SELECT COUNT(DISTINCT {col_name})
+                        FROM {schema}.demand_actuals
+                        WHERE {col_name} IS NOT NULL
+                        """
+                    )
+                    n_distinct = cur.fetchone()[0]
+                    if 0 < n_distinct <= _MAX_ENUM_DISTINCT:
+                        cur.execute(
+                            f"""
+                            SELECT DISTINCT {col_name}::text
+                            FROM {schema}.demand_actuals
+                            WHERE {col_name} IS NOT NULL
+                            ORDER BY 1
+                            """
+                        )
+                        vals = [r[0] for r in cur.fetchall()]
+                        if vals:
+                            col_info["type"] = "enum"
+                            col_info["options"] = vals
+                except Exception:
+                    pass
+
+        # Patch demand_cols with enum info
+        for dc in demand_cols:
+            if dc["column"] in enum_options:
+                dc["type"] = "enum"
+                dc["options"] = enum_options[dc["column"]]
+
+        return {
+            # Backward compat (JSONB attribute key lists)
+            "item": item_attrs,
+            "site": site_attrs,
+            # Full column descriptors (auto-detected from DB)
+            "item_columns": item_cols,
+            "site_columns": site_cols,
+            "demand_columns": demand_cols + demand_actuals_extra,
+            # Attribute detail (keys + options when finite)
+            "item_attr_info": item_attr_info,
+            "site_attr_info": site_attr_info,
+        }
     except Exception as exc:
         logger.error(f"get_segment_fields failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -3355,17 +3903,22 @@ async def update_segment(segment_id: int, body: SegmentIn):
     conn = get_conn(_api_config_path())
     schema = get_schema(_api_config_path())
     try:
-        # Check if default
         with conn.cursor() as cur:
-            cur.execute(f"SELECT is_default FROM {schema}.segment WHERE id = %s", (segment_id,))
-            row = cur.fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
-        if row[0]:
-            raise HTTPException(status_code=400, detail="Cannot modify the default 'All' segment")
+            # Fetch full old row for audit
+            cur.execute(
+                f"SELECT id, name, description, criteria, is_default, created_at, updated_at "
+                f"FROM {schema}.segment WHERE id = %s",
+                (segment_id,),
+            )
+            old_row = cur.fetchone()
+            if old_row is None:
+                raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+            old_cols = [d[0] for d in cur.description]
+            old_snapshot = _segment_row_to_dict(old_row, old_cols)
+            if old_snapshot.get("is_default"):
+                raise HTTPException(status_code=400, detail="Cannot modify the default 'All' segment")
 
-        criteria_json = json.dumps(body.criteria or {})
-        with conn.cursor() as cur:
+            criteria_json = json.dumps(body.criteria or {})
             cur.execute(
                 f"""
                 UPDATE {schema}.segment
@@ -3377,8 +3930,11 @@ async def update_segment(segment_id: int, body: SegmentIn):
             )
             cols = [d[0] for d in cur.description]
             updated = cur.fetchone()
+            new_snapshot = _segment_row_to_dict(updated, cols)
+            _audit_log(cur, schema, "segment", segment_id, "update",
+                       old_value=old_snapshot, new_value=new_snapshot)
         conn.commit()
-        return _segment_row_to_dict(updated, cols)
+        return new_snapshot
     except HTTPException:
         raise
     except Exception as exc:
@@ -3397,14 +3953,22 @@ async def delete_segment(segment_id: int):
     schema = get_schema(_api_config_path())
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT is_default FROM {schema}.segment WHERE id = %s", (segment_id,))
-            row = cur.fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
-        if row[0]:
-            raise HTTPException(status_code=400, detail="Cannot delete the default 'All' segment")
-        with conn.cursor() as cur:
+            # Fetch full old row for audit
+            cur.execute(
+                f"SELECT id, name, description, criteria, is_default, created_at, updated_at "
+                f"FROM {schema}.segment WHERE id = %s",
+                (segment_id,),
+            )
+            old_row = cur.fetchone()
+            if old_row is None:
+                raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+            old_cols = [d[0] for d in cur.description]
+            old_snapshot = _segment_row_to_dict(old_row, old_cols)
+            if old_snapshot.get("is_default"):
+                raise HTTPException(status_code=400, detail="Cannot delete the default 'All' segment")
             cur.execute(f"DELETE FROM {schema}.segment WHERE id = %s", (segment_id,))
+            _audit_log(cur, schema, "segment", segment_id, "delete",
+                       old_value=old_snapshot)
         conn.commit()
         return {"status": "ok", "deleted": segment_id}
     except HTTPException:
@@ -3433,6 +3997,148 @@ async def get_segment_members(segment_id: int):
         return {"segment_id": segment_id, "members": members, "total": len(members)}
     except Exception as exc:
         logger.error(f"get_segment_members failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/audit-log")
+async def get_audit_log(
+    entity_type: Optional[str] = None,
+    entity_id: Optional[int] = None,
+    action: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """
+    Query the audit log with optional filters.
+
+    Query params:
+    - entity_type: 'parameter', 'segment', or 'parameter_segment'
+    - entity_id: PK of the changed entity
+    - action: 'create', 'update', 'delete', 'reorder'
+    - limit / offset: pagination (default 50 rows)
+    """
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        clauses = []
+        params = []
+        if entity_type:
+            clauses.append("entity_type = %s")
+            params.append(entity_type)
+        if entity_id is not None:
+            clauses.append("entity_id = %s")
+            params.append(entity_id)
+        if action:
+            clauses.append("action = %s")
+            params.append(action)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.extend([limit, offset])
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, entity_type, entity_id, action, old_value, new_value, "
+                f"changed_by, created_at "
+                f"FROM {schema}.audit_log{where} "
+                f"ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                params,
+            )
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        entries = []
+        for r in rows:
+            entry = dict(zip(cols, r))
+            if entry.get("created_at"):
+                entry["created_at"] = entry["created_at"].isoformat()
+            entries.append(entry)
+        return {"items": entries, "limit": limit, "offset": offset}
+    except Exception as exc:
+        logger.error(f"get_audit_log failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/segments/{segment_id}/details")
+async def get_segment_details(segment_id: int, limit: int = 200, offset: int = 0):
+    """
+    Return rich detail for a segment's members: item name, site name,
+    item/site attributes, plus the segment criteria.
+    """
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            # Segment info
+            cur.execute(
+                f"SELECT name, description, criteria FROM {schema}.segment WHERE id = %s",
+                (segment_id,),
+            )
+            seg_row = cur.fetchone()
+            if seg_row is None:
+                raise HTTPException(status_code=404, detail=f"Segment {segment_id} not found")
+            seg_name, seg_desc, seg_criteria = seg_row
+
+            # Total count
+            cur.execute(
+                f"SELECT COUNT(*) FROM {schema}.segment_membership WHERE segment_id = %s",
+                (segment_id,),
+            )
+            total = cur.fetchone()[0]
+
+            # Member details with item/site joins
+            cur.execute(
+                f"""
+                SELECT sm.unique_id,
+                       i.xuid   AS item_code,
+                       i.name   AS item_name,
+                       i.attributes AS item_attributes,
+                       s.xuid   AS site_code,
+                       s.name   AS site_name,
+                       s.attributes AS site_attributes
+                FROM {schema}.segment_membership sm
+                LEFT JOIN {schema}.demand_actuals da
+                       ON da.unique_id = sm.unique_id
+                LEFT JOIN {schema}.item i ON i.id = da.item_id
+                LEFT JOIN {schema}.site s ON s.id = da.site_id
+                WHERE sm.segment_id = %s
+                GROUP BY sm.unique_id, i.xuid, i.name, i.attributes,
+                         s.xuid, s.name, s.attributes
+                ORDER BY sm.unique_id
+                LIMIT %s OFFSET %s
+                """,
+                (segment_id, limit, offset),
+            )
+            rows = cur.fetchall()
+
+        members = []
+        for uid, ic, iname, iattr, sc, sname, sattr in rows:
+            members.append({
+                "unique_id": uid,
+                "item_code": ic,
+                "item_name": iname,
+                "item_attributes": iattr or {},
+                "site_code": sc,
+                "site_name": sname,
+                "site_attributes": sattr or {},
+            })
+
+        return {
+            "segment_id": segment_id,
+            "name": seg_name,
+            "description": seg_desc,
+            "criteria": seg_criteria or {},
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "members": members,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"get_segment_details failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         conn.close()

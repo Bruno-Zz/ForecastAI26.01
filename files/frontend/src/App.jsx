@@ -8,6 +8,7 @@ import Settings from './components/Settings';
 import Segments from './components/Segments';
 import Login from './components/Login';
 import UserManagement from './components/UserManagement';
+import AuditLog from './components/AuditLog';
 import ThemeToggle from './components/ThemeToggle';
 import { useAuth } from './contexts/AuthContext';
 import { useTour } from './tour/useTour';
@@ -84,6 +85,7 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
         {navLink('/pipeline', '⚙️', 'Pipeline', false, 'nav-pipeline')}
         {navLink('/logs', '📋', 'Process Log', false, 'nav-logs')}
         {navLink('/settings', '🔧', 'Settings', false, 'nav-settings')}
+        {navLink('/audit', '📝', 'Audit Log', false, 'nav-audit')}
         {isAdmin && navLink('/users', '👥', 'Users', false, 'nav-users')}
       </nav>
 
@@ -229,6 +231,7 @@ function App() {
             <Route path="/pipeline" element={<PipelineRunner />} />
             <Route path="/logs" element={<ProcessLog />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/audit" element={<AuditLog />} />
             <Route path="/users" element={<UserManagement />} />
             <Route path="/login" element={<Navigate to="/" replace />} />
           </Routes>

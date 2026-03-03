@@ -238,7 +238,155 @@ class SegmentationEngine:
             results[seg_name] = count
             logger.info("  Segment '%s': %d series", seg_name, count)
 
+        # Resolve parameter assignments after all segment memberships are set
+        logger.info("Segmentation: resolving parameter assignments …")
+        resolved = self.resolve_parameter_assignments()
+        logger.info("  Parameter assignments resolved for %d series", resolved)
+
         return results
+
+    def resolve_parameter_assignments(self) -> int:
+        """
+        Resolve which parameter version applies to each series per business type.
+
+        For each business type (forecasting, outlier_detection, characterization,
+        evaluation, best_method):
+          1. Fetch parameter versions ordered by sort_order ASC
+          2. For each version, get its linked segments via parameter_segment
+          3. Get series in those segments via segment_membership
+          4. Assign unassigned series to this version (first match wins)
+          5. Default version (last by sort_order) catches all remaining
+
+        Result: TRUNCATE + bulk INSERT into series_parameter_assignment.
+
+        Returns
+        -------
+        int  number of series resolved
+        """
+        from db.db import get_conn, get_schema
+        import psycopg2.extras
+
+        BUSINESS_TYPES = [
+            "forecasting",
+            "outlier_detection",
+            "characterization",
+            "evaluation",
+            "best_method",
+        ]
+
+        schema = get_schema(self.config_path)
+        conn = get_conn(self.config_path)
+        try:
+            # Get all series (unique_id, item_id, site_id)
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT DISTINCT unique_id, "
+                    f"CAST(item_id AS BIGINT), CAST(site_id AS BIGINT) "
+                    f"FROM {schema}.demand_actuals WHERE unique_id IS NOT NULL"
+                )
+                all_series = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+
+            if not all_series:
+                logger.warning("resolve_parameter_assignments: no series found")
+                return 0
+
+            # assignments[unique_id] = {btype_col: param_id, ...}
+            assignments: Dict[str, dict] = {
+                uid: {} for uid in all_series
+            }
+
+            for btype in BUSINESS_TYPES:
+                col_name = f"{btype}_parameter_id"
+
+                with conn.cursor() as cur:
+                    # Get versions for this type, ordered by priority
+                    cur.execute(
+                        f"SELECT id, is_default FROM {schema}.parameters "
+                        f"WHERE parameter_type = %s ORDER BY sort_order ASC",
+                        (btype,),
+                    )
+                    versions = cur.fetchall()
+
+                if not versions:
+                    logger.warning("No parameter versions for type '%s'", btype)
+                    continue
+
+                assigned_uids: set = set()
+
+                for param_id, is_default in versions:
+                    if is_default:
+                        # Default catches all remaining unassigned series
+                        for uid in all_series:
+                            if uid not in assigned_uids:
+                                assignments[uid][col_name] = param_id
+                                assigned_uids.add(uid)
+                        continue
+
+                    # Get segments linked to this parameter version
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"SELECT segment_id FROM {schema}.parameter_segment "
+                            f"WHERE parameter_id = %s",
+                            (param_id,),
+                        )
+                        seg_ids = [r[0] for r in cur.fetchall()]
+
+                    if not seg_ids:
+                        continue
+
+                    # Get series in those segments
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"SELECT DISTINCT unique_id FROM {schema}.segment_membership "
+                            f"WHERE segment_id = ANY(%s)",
+                            (seg_ids,),
+                        )
+                        member_uids = {r[0] for r in cur.fetchall()}
+
+                    # Assign unassigned series to this version (first match wins)
+                    for uid in member_uids:
+                        if uid in all_series and uid not in assigned_uids:
+                            assignments[uid][col_name] = param_id
+                            assigned_uids.add(uid)
+
+            # TRUNCATE + bulk INSERT
+            rows = []
+            for uid, cols in assignments.items():
+                item_id, site_id = all_series[uid]
+                rows.append((
+                    uid,
+                    item_id,
+                    site_id,
+                    cols.get("forecasting_parameter_id"),
+                    cols.get("outlier_detection_parameter_id"),
+                    cols.get("characterization_parameter_id"),
+                    cols.get("evaluation_parameter_id"),
+                    cols.get("best_method_parameter_id"),
+                ))
+
+            with conn.cursor() as cur:
+                cur.execute(f"TRUNCATE {schema}.series_parameter_assignment")
+                if rows:
+                    psycopg2.extras.execute_values(
+                        cur,
+                        f"""INSERT INTO {schema}.series_parameter_assignment
+                            (unique_id, item_id, site_id,
+                             forecasting_parameter_id, outlier_detection_parameter_id,
+                             characterization_parameter_id, evaluation_parameter_id,
+                             best_method_parameter_id)
+                        VALUES %s""",
+                        rows,
+                        page_size=2000,
+                    )
+            conn.commit()
+            logger.info("Resolved parameter assignments for %d series", len(rows))
+            return len(rows)
+
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     # ─────────────────────────────────────────────────────────────────────
     # Internal helpers
@@ -312,11 +460,14 @@ class SegmentationEngine:
         conn = get_conn(self.config_path)
         try:
             # Base: one row per unique_id with item / site / demand info
+            # Include all useful columns from each table so the criteria
+            # builder can reference any detected field.
             sql = f"""
                 SELECT
                     da.unique_id,
                     da.item_id,
                     da.site_id,
+                    da.channel,
                     i.name           AS item_name,
                     i.xuid           AS item_xuid,
                     i.description    AS item_description,
@@ -328,22 +479,35 @@ class SegmentationEngine:
                     s.type_id        AS site_type_id,
                     s.attributes     AS site_attributes,
                     tsc.n_observations,
+                    tsc.date_range_start,
+                    tsc.date_range_end,
                     tsc.mean,
                     tsc.std,
                     tsc.zero_ratio,
                     tsc.adi,
                     tsc.cov,
                     tsc.has_trend,
+                    tsc.trend_direction,
+                    tsc.trend_strength,
                     tsc.is_intermittent,
                     tsc.has_seasonality,
+                    tsc.seasonal_strength,
+                    tsc.is_stationary,
+                    tsc.adf_pvalue,
+                    tsc.complexity_score,
                     tsc.complexity_level,
+                    tsc.sufficient_for_ml,
+                    tsc.sufficient_for_deep_learning,
                     tsc.abc_class
                 FROM (
-                    SELECT DISTINCT unique_id,
+                    SELECT DISTINCT ON (unique_id)
+                           unique_id,
                            CAST(item_id AS BIGINT) AS item_id,
-                           CAST(site_id AS BIGINT) AS site_id
+                           CAST(site_id AS BIGINT) AS site_id,
+                           channel
                     FROM {schema}.demand_actuals
                     WHERE unique_id IS NOT NULL
+                    ORDER BY unique_id
                 ) da
                 LEFT JOIN {schema}.item i ON i.id = da.item_id
                 LEFT JOIN {schema}.site s ON s.id = da.site_id
@@ -502,6 +666,7 @@ class SegmentationEngine:
         demand.n_observations    → n_observations
         demand.abc_class         → abc_class
         demand.has_trend         → has_trend
+        demand.channel           → channel
         """
         if field.startswith("item.attributes."):
             key = field[len("item.attributes."):]
