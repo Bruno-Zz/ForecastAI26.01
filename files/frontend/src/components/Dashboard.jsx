@@ -4,15 +4,19 @@
  * Top-level view to review all parts/groups of time series.
  * Shows summary cards, filterable table, and aggregate charts.
  * All sections are individually collapsible.
+ * All charts use Plotly (no Vega-Lite dependency).
  */
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { VegaLite } from 'react-vega';
+import Plot from 'react-plotly.js';
 import { useLocale } from '../contexts/LocaleContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { formatNumber } from '../utils/formatting';
 import api from '../utils/api';
+
+const TABLEAU10 = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ac'];
+const ABC_COLORS = { A: '#22c55e', B: '#eab308', C: '#f97316', D: '#ef4444', X: '#3b82f6', Y: '#a855f7', Z: '#ec4899' };
 
 /** Collapsible section wrapper */
 const Section = ({ title, storageKey, defaultOpen = true, children, id }) => {
@@ -84,21 +88,23 @@ export const Dashboard = () => {
   const [accuracyPrecisionData, setAccuracyPrecisionData] = useState(null);
   const [selectedAccuracyMethod, setSelectedAccuracyMethod] = useState('');
 
+  // Aggregate demand data
+  const [aggregateDemand, setAggregateDemand] = useState(null);
+  const [aggLoading, setAggLoading] = useState(false);
+  const [aggError, setAggError] = useState(null);
+
+  // ABC classification configs (for dynamic columns)
+  const [abcConfigs, setAbcConfigs] = useState([]);
+
   // Filters
   const [search, setSearch] = useState('');
   const [complexityFilter, setComplexityFilter] = useState('');
   const [intermittentFilter, setIntermittentFilter] = useState('');
   const [bestMethodFilter, setBestMethodFilter] = useState('');
+  const [classificationFilters, setClassificationFilters] = useState({}); // { configName: 'A' }
   const [sortField, setSortField] = useState('unique_id');
   const [sortDir, setSortDir] = useState('asc');
   const [accuracyZoom, setAccuracyZoom] = useState(null);
-
-  // Brush overlay refs for accuracy/precision chart (direct DOM — no re-renders during drag)
-  const apChartRef = useRef(null);
-  const apViewRef = useRef(null);
-  const apBrushRef = useRef(null);    // the overlay div
-  const apDragRef = useRef({ active: false, x0: 0, y0: 0 });
-  const apDomainsRef = useRef({ x: [0, 1], y: [0, 1] }); // data domains for pixel↔data conversion
 
   // Pagination
   const [page, setPage] = useState(0);
@@ -112,9 +118,10 @@ export const Dashboard = () => {
     setLoading(true);
     setError(null);
     try {
-      const [seriesRes, analyticsRes] = await Promise.allSettled([
+      const [seriesRes, analyticsRes, abcRes] = await Promise.allSettled([
         api.get('/series', { params: { limit: 50000 } }),
         api.get('/analytics'),
+        api.get('/abc/configurations'),
       ]);
       if (seriesRes.status === 'fulfilled') {
         setSeries(seriesRes.value.data || []);
@@ -125,6 +132,9 @@ export const Dashboard = () => {
         setAnalytics(analyticsRes.value.data);
       } else {
         console.error('Failed to load analytics:', analyticsRes.reason);
+      }
+      if (abcRes.status === 'fulfilled') {
+        setAbcConfigs((abcRes.value.data || []).filter(c => c.is_active));
       }
     } catch (err) {
       console.error('Dashboard load error:', err);
@@ -161,12 +171,19 @@ export const Dashboard = () => {
       result = result.filter(s => s.is_intermittent === isInt);
     }
     if (bestMethodFilter) result = result.filter(s => s.best_method === bestMethodFilter);
-    
+
+    // Apply classification filters
+    for (const [cfgName, classVal] of Object.entries(classificationFilters)) {
+      if (classVal) {
+        result = result.filter(s => s.classifications?.[cfgName] === classVal);
+      }
+    }
+
     // Apply accuracy/precision zoom filter
     if (accuracyZoom && accuracyPrecisionData?.points) {
       const zoomedIds = new Set(
         accuracyPrecisionData.points
-          .filter(d => 
+          .filter(d =>
             d.accuracy >= accuracyZoom.x[0] && d.accuracy <= accuracyZoom.x[1] &&
             d.precision >= accuracyZoom.y[0] && d.precision <= accuracyZoom.y[1]
           )
@@ -174,9 +191,16 @@ export const Dashboard = () => {
       );
       result = result.filter(s => zoomedIds.has(s.unique_id));
     }
-    
+
     result.sort((a, b) => {
-      let va = a[sortField], vb = b[sortField];
+      let va, vb;
+      if (sortField.startsWith('classifications.')) {
+        const cfgName = sortField.slice('classifications.'.length);
+        va = a.classifications?.[cfgName] ?? '';
+        vb = b.classifications?.[cfgName] ?? '';
+      } else {
+        va = a[sortField]; vb = b[sortField];
+      }
       if (typeof va === 'string') va = va.toLowerCase();
       if (typeof vb === 'string') vb = vb.toLowerCase();
       if (va < vb) return sortDir === 'asc' ? -1 : 1;
@@ -184,7 +208,37 @@ export const Dashboard = () => {
       return 0;
     });
     return result;
-  }, [series, search, complexityFilter, intermittentFilter, bestMethodFilter, sortField, sortDir, accuracyZoom, accuracyPrecisionData]);
+  }, [series, search, complexityFilter, intermittentFilter, bestMethodFilter, classificationFilters, sortField, sortDir, accuracyZoom, accuracyPrecisionData]);
+
+  // Reload aggregate demand when filtered series change (debounced 400ms)
+  const aggTimerRef = useRef(null);
+  useEffect(() => {
+    if (aggTimerRef.current) clearTimeout(aggTimerRef.current);
+    setAggLoading(true);
+    setAggError(null);
+    aggTimerRef.current = setTimeout(async () => {
+      try {
+        const ids = filteredSeries.map(s => s.unique_id);
+        console.log(`[Dashboard] aggregate-demand: filteredSeries=${ids.length}, series=${series?.length}, accuracyZoom=${!!accuracyZoom}, bestMethodFilter=${bestMethodFilter || 'none'}`);
+        let res;
+        // Use POST when sending many ids to avoid URL length limits
+        if (ids.length > 0 && ids.length < (series?.length || 0)) {
+          res = await api.post('/analytics/aggregate-demand', { unique_ids: ids });
+        } else {
+          res = await api.get('/analytics/aggregate-demand');
+        }
+        console.log(`[Dashboard] aggregate-demand response: hist=${res.data?.historical?.length}, fc=${res.data?.forecast?.length}`);
+        setAggregateDemand(res.data);
+      } catch (err) {
+        console.error('Failed to load aggregate demand:', err);
+        setAggError(err.response?.data?.detail || err.message || 'Unknown error');
+        setAggregateDemand(null);
+      } finally {
+        setAggLoading(false);
+      }
+    }, 400);
+    return () => { if (aggTimerRef.current) clearTimeout(aggTimerRef.current); };
+  }, [filteredSeries, series]);
 
   const pagedSeries = filteredSeries.slice(page * pageSize, (page + 1) * pageSize);
   const totalPages = Math.ceil(filteredSeries.length / pageSize);
@@ -209,199 +263,203 @@ export const Dashboard = () => {
   };
   const sortIndicator = (field) => sortField === field ? (sortDir === 'asc' ? ' \u25B2' : ' \u25BC') : '';
 
-  // Vega theme for dark mode
-  const vegaConfig = useMemo(() => ({
-    background: isDark ? '#1f2937' : '#ffffff',
-    axis: {
-      labelColor: isDark ? '#d1d5db' : '#374151',
-      titleColor: isDark ? '#e5e7eb' : '#111827',
-      gridColor: isDark ? '#374151' : '#e5e7eb',
-      tickColor: isDark ? '#4b5563' : '#d1d5db',
-      domainColor: isDark ? '#4b5563' : '#d1d5db',
+  // ─── Plotly base layout (dark-mode aware) ─────────────────────────
+  const plotlyBase = useMemo(() => ({
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { color: isDark ? '#d1d5db' : '#374151', size: 11 },
+    margin: { t: 30, r: 10, b: 40, l: 10, pad: 4 },
+    xaxis: {
+      gridcolor: isDark ? '#374151' : '#e5e7eb',
+      zerolinecolor: isDark ? '#4b5563' : '#d1d5db',
+      color: isDark ? '#d1d5db' : '#374151',
     },
-    legend: {
-      labelColor: isDark ? '#d1d5db' : '#374151',
-      titleColor: isDark ? '#e5e7eb' : '#111827',
+    yaxis: {
+      gridcolor: isDark ? '#374151' : '#e5e7eb',
+      zerolinecolor: isDark ? '#4b5563' : '#d1d5db',
+      color: isDark ? '#d1d5db' : '#374151',
     },
-    title: { color: isDark ? '#e5e7eb' : '#111827' },
   }), [isDark]);
 
-  const complexitySpec = useMemo(() => {
-    if (!analytics?.complexity_distribution) return null;
-    const data = Object.entries(analytics.complexity_distribution).map(([k, v]) => ({ level: k, count: v }));
-    const encoding = {
-      theta: { field: 'count', type: 'quantitative' },
-      color: {
-        field: 'level', type: 'nominal',
-        scale: { domain: ['low', 'medium', 'high'], range: ['#4ade80', '#facc15', '#f87171'] },
-        legend: { title: 'Complexity' }
+  // ─── Best Method Bar (Plotly) — recomputed from filteredSeries ────
+  const bestMethodChart = useMemo(() => {
+    // Count best_method distribution from the currently filtered series
+    const withMethod = filteredSeries.filter(s => s.best_method);
+    if (withMethod.length === 0) return null;
+    const dist = {};
+    withMethod.forEach(s => { dist[s.best_method] = (dist[s.best_method] || 0) + 1; });
+    const entries = Object.entries(dist).sort((a, b) => a[1] - b[1]); // ascending for horizontal
+    const methods = entries.map(([m]) => m);
+    const counts = entries.map(([, c]) => c);
+    const colors = methods.map((m, i) => {
+      const base = TABLEAU10[i % TABLEAU10.length];
+      if (bestMethodFilter && m !== bestMethodFilter) {
+        const r = parseInt(base.slice(1,3),16), g = parseInt(base.slice(3,5),16), b = parseInt(base.slice(5,7),16);
+        return `rgba(${r},${g},${b},0.3)`;
+      }
+      return base;
+    });
+    return {
+      data: [{ type: 'bar', y: methods, x: counts, orientation: 'h', marker: { color: colors }, hovertemplate: '%{y}: %{x} series<extra></extra>' }],
+      layout: {
+        ...plotlyBase,
+        height: Math.max(200, methods.length * 32),
+        margin: { t: 30, r: 10, b: 30, l: 120 },
+        title: { text: `Best method across ${formatNumber(withMethod.length, locale, 0)} backtested series`, font: { size: 12 } },
+        yaxis: { ...plotlyBase.yaxis, automargin: true },
+        xaxis: { ...plotlyBase.xaxis, title: 'Series Won' },
       },
-      tooltip: [
-        { field: 'level', type: 'nominal', title: 'Complexity' },
-        { field: 'count', type: 'quantitative', title: 'Count' }
-      ]
     };
-    if (complexityFilter) {
-      encoding.opacity = {
-        condition: { test: `datum.level === '${complexityFilter}'`, value: 1 },
-        value: 0.3
-      };
-      encoding.stroke = {
-        condition: { test: `datum.level === '${complexityFilter}'`, value: isDark ? '#e5e7eb' : '#1f2937' },
-        value: null
-      };
-      encoding.strokeWidth = {
-        condition: { test: `datum.level === '${complexityFilter}'`, value: 2 },
-        value: 0
-      };
-    }
-    return {
-      $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
-      width: 280, height: 200,
-      config: vegaConfig,
-      data: { values: data },
-      mark: { type: 'arc', cursor: 'pointer' },
-      encoding
-    };
-  }, [analytics, vegaConfig, complexityFilter, isDark]);
+  }, [filteredSeries, plotlyBase, locale, bestMethodFilter]);
 
-  const bestMethodSpec = useMemo(() => {
-    if (!analytics?.best_method_distribution) return null;
-    const data = Object.entries(analytics.best_method_distribution)
-      .map(([k, v]) => ({ method: k, count: v }))
-      .sort((a, b) => b.count - a.count);
-    const encoding = {
-      y: { field: 'method', type: 'nominal', sort: '-x', title: 'Method' },
-      x: { field: 'count', type: 'quantitative', title: 'Series Won' },
-      color: { field: 'method', type: 'nominal', legend: null, scale: { scheme: 'tableau10' } },
-      tooltip: [
-        { field: 'method', type: 'nominal', title: 'Method' },
-        { field: 'count', type: 'quantitative', title: 'Series Won' }
-      ]
-    };
-    if (bestMethodFilter) {
-      encoding.opacity = {
-        condition: { test: `datum.method === '${bestMethodFilter}'`, value: 1 },
-        value: 0.3
-      };
-      encoding.stroke = {
-        condition: { test: `datum.method === '${bestMethodFilter}'`, value: isDark ? '#e5e7eb' : '#1f2937' },
-        value: null
-      };
-      encoding.strokeWidth = {
-        condition: { test: `datum.method === '${bestMethodFilter}'`, value: 2 },
-        value: 0
-      };
-    }
-    return {
-      $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
-      width: 'container', height: 250,
-      config: vegaConfig,
-      title: { text: `Best method across ${formatNumber(analytics.best_method_total_series || 0, locale, 0)} backtested series`, fontSize: 12 },
-      data: { values: data },
-      mark: { type: 'bar', cornerRadiusEnd: 4, cursor: 'pointer' },
-      encoding
-    };
-  }, [analytics, vegaConfig, locale, bestMethodFilter, isDark]);
-
-  const accuracyPrecisionSpec = useMemo(() => {
+  // ─── Accuracy vs Precision Scatter (Plotly) ───────────────────────
+  const accuracyChart = useMemo(() => {
     try {
       if (!accuracyPrecisionData?.points || accuracyPrecisionData.points.length === 0) return null;
       let data = accuracyPrecisionData.points;
-      
-      // Apply zoom filter if active
       if (accuracyZoom) {
-        data = data.filter(d => 
+        data = data.filter(d =>
           d.accuracy >= accuracyZoom.x[0] && d.accuracy <= accuracyZoom.x[1] &&
           d.precision >= accuracyZoom.y[0] && d.precision <= accuracyZoom.y[1]
         );
       }
-      
       if (data.length === 0) return null;
-      
-      const maxAccuracy = Math.max(...data.map(d => d.accuracy || 0), 1);
-      const maxPrecision = Math.max(...data.map(d => d.precision || 0), 1);
-      const avgAccuracy = accuracyPrecisionData.summary?.avg_accuracy || 0;
-      const avgPrecision = accuracyPrecisionData.summary?.avg_precision || 0;
-      
-      // Get unique methods for color scale, sorted by count (same order as best method chart)
-      const methodCounts = {};
-      data.forEach(d => { if (d.method) methodCounts[d.method] = (methodCounts[d.method] || 0) + 1; });
-      const methods = Object.entries(methodCounts).sort((a, b) => b[1] - a[1]).map(([m]) => m);
-      
-      const xDom = [0, maxAccuracy * 1.1];
-      const yDom = [0, maxPrecision * 1.1];
-      apDomainsRef.current = { x: xDom, y: yDom };
-      const xScale = { domain: xDom };
-      const yScale = { domain: yDom };
+
+      const maxAcc = Math.max(...data.map(d => d.accuracy || 0), 1);
+      const maxPrec = Math.max(...data.map(d => d.precision || 0), 1);
+      const avgAcc = accuracyPrecisionData.summary?.avg_accuracy || 0;
+      const avgPrec = accuracyPrecisionData.summary?.avg_precision || 0;
+
+      // Group points by method
+      const byMethod = {};
+      data.forEach(d => {
+        if (!byMethod[d.method]) byMethod[d.method] = { x: [], y: [], ids: [], text: [] };
+        byMethod[d.method].x.push(d.accuracy);
+        byMethod[d.method].y.push(d.precision);
+        byMethod[d.method].ids.push(d.unique_id);
+        byMethod[d.method].text.push(d.unique_id);
+      });
+      // Sort methods by count (desc) for legend order
+      const methodOrder = Object.entries(byMethod).sort((a, b) => b[1].x.length - a[1].x.length).map(([m]) => m);
+
+      const traces = methodOrder.map((m, i) => ({
+        type: 'scatter', mode: 'markers', name: m,
+        x: byMethod[m].x, y: byMethod[m].y,
+        customdata: byMethod[m].ids,
+        text: byMethod[m].text,
+        marker: { size: 8, color: TABLEAU10[i % TABLEAU10.length], opacity: 0.8 },
+        hovertemplate: '<b>%{text}</b><br>|Bias|: %{x:.2f}<br>RMSE: %{y:.2f}<extra>%{fullData.name}</extra>',
+      }));
+
+      const xMax = maxAcc * 1.1;
+      const yMax = maxPrec * 1.1;
 
       return {
-        $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
-        width: 'container', height: 350,
-        config: { ...vegaConfig, legend: { labelColor: isDark ? '#e5e7eb' : '#374151', titleColor: isDark ? '#e5e7eb' : '#374151' } },
-        title: {
-          text: `Accuracy vs Precision (${formatNumber(data.length, locale, 0)} series${accuracyZoom ? ' (filtered)' : ''})`,
-          fontSize: 14,
-          color: isDark ? '#e5e7eb' : '#111827'
+        data: traces,
+        layout: {
+          ...plotlyBase,
+          height: 350,
+          margin: { t: 35, r: 10, b: 50, l: 60 },
+          title: { text: `Accuracy vs Precision (${formatNumber(data.length, locale, 0)} series${accuracyZoom ? ' \u2014 filtered' : ''})`, font: { size: 13 } },
+          dragmode: 'select',
+          selectdirection: 'any',
+          xaxis: { ...plotlyBase.xaxis, title: '|Bias| (Accuracy)', range: [0, xMax], zeroline: false },
+          yaxis: { ...plotlyBase.yaxis, title: 'RMSE (Precision)', range: [0, yMax], zeroline: false },
+          legend: { orientation: 'v', x: 1.02, y: 1, font: { size: 10 } },
+          shapes: [
+            // Green "best" quadrant
+            { type: 'rect', x0: 0, y0: 0, x1: avgAcc, y1: avgPrec, fillcolor: isDark ? 'rgba(34,197,94,0.1)' : 'rgba(22,163,106,0.06)', line: { width: 0 }, layer: 'below' },
+            // Average lines
+            { type: 'line', x0: avgAcc, x1: avgAcc, y0: 0, y1: yMax, line: { dash: 'dash', color: isDark ? '#60a5fa' : '#3b82f6', width: 1.5 } },
+            { type: 'line', x0: 0, x1: xMax, y0: avgPrec, y1: avgPrec, line: { dash: 'dash', color: isDark ? '#60a5fa' : '#3b82f6', width: 1.5 } },
+          ],
+          annotations: [
+            { x: xMax * 0.02, y: yMax * 0.02, text: 'Best', showarrow: false, font: { size: 11, color: isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.2)', weight: 'bold' } },
+            { x: xMax * 0.98, y: yMax * 0.02, text: 'Biased', showarrow: false, xanchor: 'right', font: { size: 11, color: isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.2)', weight: 'bold' } },
+            { x: xMax * 0.02, y: yMax * 0.98, text: 'Noisy', showarrow: false, yanchor: 'top', font: { size: 11, color: isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.2)', weight: 'bold' } },
+            { x: xMax * 0.98, y: yMax * 0.98, text: 'Worst', showarrow: false, xanchor: 'right', yanchor: 'top', font: { size: 11, color: isDark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.2)', weight: 'bold' } },
+          ],
         },
-        data: { values: data },
-        layer: [
-          // Green quadrant (best)
-          { data: { values: [{ x: 0, y: 0, x2: avgAccuracy, y2: avgPrecision }] },
-            mark: { type: 'rect', opacity: isDark ? 0.1 : 0.06, color: isDark ? '#22c55e' : '#16a34a' },
-            encoding: {
-              x: { field: 'x', type: 'quantitative', scale: xScale, title: '|Bias| (Accuracy)' },
-              x2: { field: 'x2' },
-              y: { field: 'y', type: 'quantitative', scale: yScale, title: 'RMSE (Precision)' },
-              y2: { field: 'y2' }
-            }
-          },
-          // Average lines
-          { data: { values: [{ x: avgAccuracy }] },
-            mark: { type: 'rule', strokeDash: [4, 4], color: isDark ? '#60a5fa' : '#3b82f6', strokeWidth: 1.5 },
-            encoding: { x: { field: 'x', type: 'quantitative', scale: xScale } }
-          },
-          { data: { values: [{ y: avgPrecision }] },
-            mark: { type: 'rule', strokeDash: [4, 4], color: isDark ? '#60a5fa' : '#3b82f6', strokeWidth: 1.5 },
-            encoding: { y: { field: 'y', type: 'quantitative', scale: yScale } }
-          },
-          // Labels
-          { data: { values: [
-            { x: maxAccuracy * 0.02, y: maxPrecision * 0.02, label: 'Best' },
-            { x: maxAccuracy * 0.98, y: maxPrecision * 0.02, label: 'Biased' },
-            { x: maxAccuracy * 0.02, y: maxPrecision * 0.98, label: 'Noisy' },
-            { x: maxAccuracy * 0.98, y: maxPrecision * 0.98, label: 'Worst' }
-          ]},
-            mark: { type: 'text', fontSize: 11, fontWeight: 'bold', opacity: isDark ? 0.4 : 0.25 },
-            encoding: { x: { field: 'x', type: 'quantitative', scale: xScale }, y: { field: 'y', type: 'quantitative', scale: yScale }, text: { field: 'label', type: 'nominal' } }
-          },
-          // Points colored by method
-          { data: { values: data },
-            mark: { type: 'point', filled: true, size: 80, opacity: 0.8 },
-            encoding: {
-              x: { field: 'accuracy', type: 'quantitative', scale: xScale, title: '|Bias| (Accuracy)' },
-              y: { field: 'precision', type: 'quantitative', scale: yScale, title: 'RMSE (Precision)' },
-              color: {
-                field: 'method',
-                type: 'nominal',
-                scale: { scheme: 'tableau10', domain: methods },
-                legend: { title: 'Method', orient: 'right' }
-              },
-              tooltip: [
-                { field: 'unique_id', type: 'nominal', title: 'Series' },
-                { field: 'method', type: 'nominal', title: 'Method' },
-                { field: 'accuracy', type: 'quantitative', title: '|Bias|', format: ',.2f' },
-                { field: 'precision', type: 'quantitative', title: 'RMSE', format: ',.2f' }
-              ]
-            }
-          }
-        ]
       };
     } catch (err) {
-      console.error('Error building accuracyPrecisionSpec:', err);
+      console.error('Error building accuracy chart:', err);
       return null;
     }
-  }, [accuracyPrecisionData, vegaConfig, locale, isDark, accuracyZoom]);
+  }, [accuracyPrecisionData, plotlyBase, locale, isDark, accuracyZoom]);
+
+  // ─── Aggregate Demand Chart (Plotly) ──────────────────────────────
+  const demandChart = useMemo(() => {
+    if (!aggregateDemand) return null;
+    const hist = aggregateDemand.historical || [];
+    const fc = aggregateDemand.forecast || [];
+    if (hist.length === 0 && fc.length === 0) return null;
+
+    const traces = [];
+    const shapes = [];
+    const annotations = [];
+
+    // ── Historical demand bars ──
+    if (hist.length > 0) {
+      traces.push({
+        type: 'bar', name: 'Historical Demand',
+        x: hist.map(d => d.date), y: hist.map(d => d.value),
+        marker: { color: isDark ? '#9ca3af' : '#374151', opacity: 0.55 },
+        hovertemplate: '%{x|%b %Y}<br>Demand: %{y:,.0f}<extra>Historical</extra>',
+      });
+    }
+
+    // ── Forecast line + markers ──
+    if (fc.length > 0) {
+      // Bridge: connect last historical point to first forecast for continuity
+      const bridgeX = [], bridgeY = [];
+      if (hist.length > 0) {
+        bridgeX.push(hist[hist.length - 1].date);
+        bridgeY.push(hist[hist.length - 1].value);
+      }
+      fc.forEach(d => { bridgeX.push(d.date); bridgeY.push(d.value); });
+
+      traces.push({
+        type: 'scatter', mode: 'lines+markers', name: 'Forecast (best method / series)',
+        x: bridgeX, y: bridgeY,
+        line: { color: '#2563eb', width: 2.5, dash: 'dash' },
+        marker: { color: '#2563eb', size: 5, symbol: 'circle' },
+        hovertemplate: '%{x|%b %Y}<br>Forecast: %{y:,.0f}<extra>Forecast</extra>',
+      });
+
+      // Vertical boundary line between historical and forecast
+      if (hist.length > 0) {
+        const boundary = hist[hist.length - 1].date;
+        shapes.push({
+          type: 'line', xref: 'x', yref: 'paper',
+          x0: boundary, x1: boundary, y0: 0, y1: 1,
+          line: { color: isDark ? '#6b7280' : '#9ca3af', width: 1.5, dash: 'dot' },
+        });
+        annotations.push({
+          x: boundary, y: 1, xref: 'x', yref: 'paper',
+          text: 'Forecast \u2192', showarrow: false,
+          xanchor: 'left', yanchor: 'bottom',
+          xshift: 6,
+          font: { size: 10, color: '#2563eb' },
+        });
+      }
+    }
+
+    return {
+      data: traces,
+      layout: {
+        ...plotlyBase,
+        height: 320,
+        margin: { t: 20, r: 20, b: 45, l: 70 },
+        xaxis: { ...plotlyBase.xaxis, type: 'date', tickformat: '%b %Y', tickangle: -30 },
+        yaxis: { ...plotlyBase.yaxis, title: { text: 'Total Demand', standoff: 10 }, rangemode: 'tozero' },
+        legend: { orientation: 'h', y: -0.18, font: { size: 10 } },
+        barmode: 'overlay',
+        shapes,
+        annotations,
+        hovermode: 'x unified',
+      },
+    };
+  }, [aggregateDemand, plotlyBase, isDark]);
 
   if (loading) return <div className="flex items-center justify-center h-64"><div className="text-xl text-gray-500 dark:text-gray-400 animate-pulse">Loading dashboard...</div></div>;
   if (error) return <div className="flex items-center justify-center h-64"><div className="text-xl text-red-600 dark:text-red-400">Error: {error}</div></div>;
@@ -417,10 +475,19 @@ export const Dashboard = () => {
   }
 
   // Table column definitions with responsive visibility
+  const abcColumns = abcConfigs.map(cfg => ({
+    field: `classifications.${cfg.name}`,
+    label: cfg.name,
+    hideClass: 'hidden md:table-cell',
+    isClassification: true,
+    classLabels: cfg.class_labels || [],
+  }));
+
   const columns = [
     { field: 'unique_id', label: 'Series ID', hideClass: '' },
     { field: 'n_observations', label: 'Obs', hideClass: '' },
     { field: 'complexity_level', label: 'Complexity', hideClass: 'hidden sm:table-cell' },
+    ...abcColumns,
     { field: 'is_intermittent', label: 'Interm.', hideClass: 'hidden md:table-cell' },
     { field: 'has_seasonality', label: 'Seasonal', hideClass: 'hidden md:table-cell' },
     { field: 'has_trend', label: 'Trend', hideClass: 'hidden lg:table-cell' },
@@ -429,6 +496,15 @@ export const Dashboard = () => {
     { field: 'n_outliers', label: 'Adj.', hideClass: 'hidden lg:table-cell' },
     { field: 'best_method', label: 'Best Method', hideClass: '' },
   ];
+
+  const plotlyConfig = {
+    responsive: true,
+    displayModeBar: 'hover',
+    displaylogo: false,
+    modeBarButtonsToRemove: ['toImage', 'lasso2d', 'select2d'],
+  };
+  // AP chart keeps modebar hidden — it has its own Reset Zoom button + drag-select
+  const apPlotlyConfig = { responsive: true, displayModeBar: false };
 
   return (
     <div className="p-4 sm:p-6">
@@ -457,160 +533,103 @@ export const Dashboard = () => {
       )}
 
       {/* Charts */}
-      {(accuracyPrecisionSpec || bestMethodSpec) && (
+      {(accuracyChart || bestMethodChart) && (
         <Section title="Charts" storageKey="dash_charts_open" id="dash-charts">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {accuracyPrecisionSpec && (
+            {accuracyChart && (
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-400">Accuracy vs Precision</h3>
-                  <select
-                    value={selectedAccuracyMethod}
-                    onChange={(e) => { setSelectedAccuracyMethod(e.target.value); setPage(0); }}
-                    className="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 dark:text-gray-200"
-                  >
-                    <option value="">All Methods</option>
-                    {analytics?.best_method_distribution && Object.keys(analytics.best_method_distribution).map(m => (
-                      <option key={m} value={m}>{m}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="flex items-center gap-2 mb-2">
-                  <div
-                    ref={apChartRef}
-                    className="w-full overflow-x-auto relative select-none"
-                    style={{ cursor: 'crosshair' }}
-                    onMouseDown={(e) => {
-                      if (e.button !== 0) return;
-                      const rect = apChartRef.current.getBoundingClientRect();
-                      apDragRef.current = { active: true, x0: e.clientX - rect.left, y0: e.clientY - rect.top };
-                      if (apBrushRef.current) {
-                        const b = apBrushRef.current;
-                        b.style.display = 'block';
-                        b.style.left = `${apDragRef.current.x0}px`;
-                        b.style.top = `${apDragRef.current.y0}px`;
-                        b.style.width = '0px';
-                        b.style.height = '0px';
-                      }
-                    }}
-                    onMouseMove={(e) => {
-                      if (!apDragRef.current.active) return;
-                      const rect = apChartRef.current.getBoundingClientRect();
-                      const { x0, y0 } = apDragRef.current;
-                      const cx = e.clientX - rect.left;
-                      const cy = e.clientY - rect.top;
-                      if (apBrushRef.current) {
-                        const b = apBrushRef.current;
-                        b.style.left = `${Math.min(x0, cx)}px`;
-                        b.style.top = `${Math.min(y0, cy)}px`;
-                        b.style.width = `${Math.abs(cx - x0)}px`;
-                        b.style.height = `${Math.abs(cy - y0)}px`;
-                      }
-                    }}
-                    onMouseUp={(e) => {
-                      if (!apDragRef.current.active) return;
-                      apDragRef.current.active = false;
-                      if (apBrushRef.current) apBrushRef.current.style.display = 'none';
-                      const divRect = apChartRef.current.getBoundingClientRect();
-                      const { x0, y0 } = apDragRef.current;
-                      const cx = e.clientX - divRect.left;
-                      const cy = e.clientY - divRect.top;
-                      // Ignore clicks (require at least 10px drag)
-                      if (Math.abs(cx - x0) < 10 || Math.abs(cy - y0) < 10) return;
-                      const view = apViewRef.current;
-                      if (!view) return;
-                      try {
-                        // Get the SVG element inside the wrapper to compute the offset
-                        const svgEl = apChartRef.current.querySelector('svg');
-                        if (!svgEl) return;
-                        const svgRect = svgEl.getBoundingClientRect();
-                        const svgOffX = svgRect.left - divRect.left;
-                        const svgOffY = svgRect.top - divRect.top;
-                        // Vega origin = pixel offset of the plot area within the SVG
-                        const origin = view.origin();
-                        const plotW = view.width();
-                        const plotH = view.height();
-                        if (plotW <= 0 || plotH <= 0) return;
-                        // Convert div-relative px → plot-area-relative px
-                        const pxLeft  = Math.min(x0, cx) - svgOffX - origin[0];
-                        const pxRight = Math.max(x0, cx) - svgOffX - origin[0];
-                        const pxTop   = Math.min(y0, cy) - svgOffY - origin[1];
-                        const pxBot   = Math.max(y0, cy) - svgOffY - origin[1];
-                        // Clamp to plot area
-                        const cL = Math.max(0, Math.min(plotW, pxLeft));
-                        const cR = Math.max(0, Math.min(plotW, pxRight));
-                        const cT = Math.max(0, Math.min(plotH, pxTop));
-                        const cB = Math.max(0, Math.min(plotH, pxBot));
-                        // Linear interpolation using the known data domains
-                        const { x: xDom, y: yDom } = apDomainsRef.current;
-                        const dataX1 = xDom[0] + (cL / plotW) * (xDom[1] - xDom[0]);
-                        const dataX2 = xDom[0] + (cR / plotW) * (xDom[1] - xDom[0]);
-                        // Y axis is inverted: top pixel → high data value
-                        const dataY2 = yDom[1] - (cT / plotH) * (yDom[1] - yDom[0]);
-                        const dataY1 = yDom[1] - (cB / plotH) * (yDom[1] - yDom[0]);
-                        if (dataX2 > dataX1 && dataY2 > dataY1) {
-                          setAccuracyZoom({ x: [dataX1, dataX2], y: [dataY1, dataY2] });
-                          setPage(0);
-                        }
-                      } catch (err) { console.warn('brush zoom failed:', err); }
-                    }}
-                    onMouseLeave={() => {
-                      if (apDragRef.current.active) {
-                        apDragRef.current.active = false;
-                        if (apBrushRef.current) apBrushRef.current.style.display = 'none';
-                      }
-                    }}
-                  >
-                    <VegaLite
-                      spec={accuracyPrecisionSpec}
-                      actions={false}
-                      renderer="svg"
-                      style={{width: '100%'}}
-                      onNewView={(v) => { apViewRef.current = v; }}
-                    />
-                    {/* Brush selection rectangle (CSS overlay — no React re-renders) */}
-                    <div
-                      ref={apBrushRef}
-                      style={{ display: 'none', position: 'absolute', background: 'rgba(59,130,246,0.15)',
-                               border: '1px solid rgba(59,130,246,0.5)', borderRadius: 2,
-                               pointerEvents: 'none', zIndex: 10 }}
-                    />
-                  </div>
-                  {accuracyZoom && (
-                    <button
-                      onClick={() => setAccuracyZoom(null)}
-                      className="flex-shrink-0 text-xs px-2 py-1 bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 rounded text-gray-700 dark:text-gray-200"
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={selectedAccuracyMethod}
+                      onChange={(e) => { setSelectedAccuracyMethod(e.target.value); setPage(0); }}
+                      className="text-xs border border-gray-300 dark:border-gray-600 rounded px-2 py-1 bg-white dark:bg-gray-700 dark:text-gray-200"
                     >
-                      Reset Zoom
-                    </button>
-                  )}
+                      <option value="">All Methods</option>
+                      {analytics?.best_method_distribution && Object.keys(analytics.best_method_distribution).map(m => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                    {accuracyZoom && (
+                      <button
+                        onClick={() => setAccuracyZoom(null)}
+                        className="text-xs px-2 py-1 bg-gray-200 dark:bg-gray-600 hover:bg-gray-300 dark:hover:bg-gray-500 rounded text-gray-700 dark:text-gray-200"
+                      >
+                        Reset Zoom
+                      </button>
+                    )}
+                  </div>
                 </div>
+                <Plot
+                  data={accuracyChart.data}
+                  layout={accuracyChart.layout}
+                  config={apPlotlyConfig}
+                  useResizeHandler
+                  style={{ width: '100%' }}
+                  onSelected={(event) => {
+                    console.log('[Dashboard] onSelected event:', JSON.stringify(event?.range), 'points:', event?.points?.length);
+                    if (event?.range?.x && event?.range?.y) {
+                      setAccuracyZoom({ x: event.range.x, y: event.range.y });
+                      setPage(0);
+                    }
+                  }}
+                  onDeselect={() => { console.log('[Dashboard] onDeselect fired'); }}
+                />
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Drag to select a region and filter the table below.</p>
               </div>
             )}
-            {bestMethodSpec && (
+            {bestMethodChart && (
               <div>
                 <h3 className="text-sm font-semibold text-gray-600 dark:text-gray-400 mb-2">Best Method Distribution</h3>
-                <div className="w-full overflow-x-auto">
-                  <VegaLite
-                    spec={bestMethodSpec}
-                    actions={false}
-                    renderer="svg"
-                    style={{width:'100%'}}
-                    onNewView={(view) => {
-                      view.addEventListener('click', (event, item) => {
-                        if (item?.datum?.method) {
-                          const method = item.datum.method;
-                          setBestMethodFilter(prev => { setPage(0); return prev === method ? '' : method; });
-                        }
-                      });
-                    }}
-                  />
-                </div>
+                <Plot
+                  data={bestMethodChart.data}
+                  layout={bestMethodChart.layout}
+                  config={plotlyConfig}
+                  useResizeHandler
+                  style={{ width: '100%' }}
+                  onClick={(event) => {
+                    const pt = event?.points?.[0];
+                    if (pt?.y) {
+                      const method = pt.y;
+                      setBestMethodFilter(prev => { setPage(0); return prev === method ? '' : method; });
+                    }
+                  }}
+                />
               </div>
             )}
           </div>
         </Section>
       )}
+
+      {/* Aggregate Demand & Forecast */}
+      <Section
+        title={`Demand & Forecast${filteredSeries.length < (series?.length || 0) ? ` (${formatNumber(filteredSeries.length, locale, 0)} of ${formatNumber(series.length, locale, 0)} series)` : ` (${formatNumber(series.length, locale, 0)} series)`}`}
+        storageKey="dash_demand_open"
+        id="dash-demand"
+      >
+        {aggLoading ? (
+          <div className="flex items-center justify-center h-40 gap-3">
+            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600" />
+            <span className="text-sm text-gray-400 dark:text-gray-500">Loading demand data…</span>
+          </div>
+        ) : aggError ? (
+          <div className="flex items-center justify-center h-32 text-red-500 dark:text-red-400 text-sm">
+            Error loading demand: {aggError}
+          </div>
+        ) : demandChart ? (
+          <Plot data={demandChart.data} layout={demandChart.layout} config={plotlyConfig} useResizeHandler style={{ width: '100%' }} />
+        ) : (
+          <div className="flex items-center justify-center h-32 text-gray-400 dark:text-gray-500 text-sm">
+            No demand data available for the current filter.
+          </div>
+        )}
+        {(accuracyZoom || bestMethodFilter) && (
+          <p className="text-xs text-blue-500 dark:text-blue-400 mt-1">
+            Filtered by{accuracyZoom ? ' accuracy/precision selection' : ''}{accuracyZoom && bestMethodFilter ? ' + ' : ''}{bestMethodFilter ? ` method: ${bestMethodFilter}` : ''}
+          </p>
+        )}
+      </Section>
 
       {/* Series Table */}
       <Section title={`Series Table (${formatNumber(filteredSeries.length, locale, 0)} series)`} storageKey="dash_table_open" id="dash-table">
@@ -642,6 +661,17 @@ export const Dashboard = () => {
             <option value="true">Intermittent</option>
             <option value="false">Non-Intermittent</option>
           </select>
+          {abcConfigs.map(cfg => (
+            <select
+              key={cfg.id}
+              value={classificationFilters[cfg.name] || ''}
+              onChange={e => { setClassificationFilters(prev => ({ ...prev, [cfg.name]: e.target.value })); setPage(0); }}
+              className="border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
+            >
+              <option value="">All {cfg.name}</option>
+              {(cfg.class_labels || []).map(lbl => <option key={lbl} value={lbl}>{lbl}</option>)}
+            </select>
+          ))}
           {bestMethodFilter && (
             <button
               onClick={() => { setBestMethodFilter(''); setPage(0); }}
@@ -651,9 +681,9 @@ export const Dashboard = () => {
               <span className="text-xs">{'\u2715'}</span>
             </button>
           )}
-          {(complexityFilter || intermittentFilter || bestMethodFilter || search) && (
+          {(complexityFilter || intermittentFilter || bestMethodFilter || search || Object.values(classificationFilters).some(v => v)) && (
             <button
-              onClick={() => { setSearch(''); setComplexityFilter(''); setIntermittentFilter(''); setBestMethodFilter(''); setPage(0); }}
+              onClick={() => { setSearch(''); setComplexityFilter(''); setIntermittentFilter(''); setBestMethodFilter(''); setClassificationFilters({}); setPage(0); }}
               className="px-3 py-2 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 text-sm transition-colors"
             >
               Clear all
@@ -695,6 +725,21 @@ export const Dashboard = () => {
                       {s.complexity_level}
                     </span>
                   </td>
+                  {abcConfigs.map(cfg => {
+                    const cls = s.classifications?.[cfg.name];
+                    return (
+                      <td key={cfg.id} className="px-3 py-2 text-center hidden md:table-cell">
+                        {cls ? (
+                          <span
+                            className="inline-flex items-center justify-center w-6 h-6 rounded text-xs font-bold text-white"
+                            style={{ backgroundColor: ABC_COLORS[cls] || '#6b7280' }}
+                          >
+                            {cls}
+                          </span>
+                        ) : <span className="text-gray-300 dark:text-gray-600">-</span>}
+                      </td>
+                    );
+                  })}
                   <td className="px-3 py-2 text-center hidden md:table-cell text-gray-600 dark:text-gray-400">{s.is_intermittent ? '\u2713' : '-'}</td>
                   <td className="px-3 py-2 text-center hidden md:table-cell text-gray-600 dark:text-gray-400">{s.has_seasonality ? '\u2713' : '-'}</td>
                   <td className="px-3 py-2 text-center hidden lg:table-cell text-gray-600 dark:text-gray-400">{s.has_trend ? '\u2713' : '-'}</td>

@@ -18,9 +18,8 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          // Heavy charting libs — cached independently from app code
+          // Heavy charting lib — cached independently from app code
           'vendor-plotly': ['plotly.js-dist-min', 'react-plotly.js'],
-          'vendor-vega': ['vega', 'vega-lite', 'react-vega'],
           // React core — rarely changes
           'vendor-react': ['react', 'react-dom', 'react-router-dom'],
         },

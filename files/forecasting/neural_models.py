@@ -324,7 +324,8 @@ class NeuralForecaster:
     def forecast_multiple_series(self,
                                 df: pd.DataFrame,
                                 characteristics_df: pd.DataFrame,
-                                overrides_map: dict = None) -> pd.DataFrame:
+                                overrides_map: dict = None,
+                                show_progress: bool = True) -> pd.DataFrame:
         """
         Generate neural forecasts for multiple time series.
 
@@ -348,7 +349,8 @@ class NeuralForecaster:
         for _, char_row in tqdm(valid_chars.iterrows(),
                                 total=len(valid_chars),
                                 desc="  Neural forecasting",
-                                unit="series"):
+                                unit="series",
+                                disable=not show_progress):
             unique_id = char_row['unique_id']
 
             # Get neural methods from recommended

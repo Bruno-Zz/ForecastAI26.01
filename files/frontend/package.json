@@ -18,10 +18,7 @@
     "react-dom": "^18.2.0",
     "react-plotly.js": "^2.6.0",
     "react-router-dom": "^6.20.0",
-    "react-vega": "^7.6.0",
-    "shepherd.js": "^15.2.1",
-    "vega": "^5.25.0",
-    "vega-lite": "^5.16.0"
+    "shepherd.js": "^15.2.1"
   },
   "devDependencies": {
     "@types/react": "^18.2.0",

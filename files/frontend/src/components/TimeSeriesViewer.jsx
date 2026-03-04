@@ -10,7 +10,8 @@
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { VegaLite } from 'react-vega';
+// VegaLite removed — all charts now use Plotly (imported below)
+
 import Plot from 'react-plotly.js';
 import { useLocale } from '../contexts/LocaleContext';
 import { useTheme } from '../contexts/ThemeContext';
@@ -1978,55 +1979,51 @@ export const TimeSeriesViewer = () => {
     if (outlierDates.length > 0) { setOutlierZoomStart(0); setOutlierZoomEnd(outlierDates.length - 1); }
   }, [outlierDates.length]);
 
-  /* ---------- Vega theme for dark mode ---------- */
-  const vegaThemeConfig = useMemo(() => ({
-    background: isDark ? '#1f2937' : '#ffffff',
-    view: { stroke: isDark ? '#374151' : null },
-    axis: {
-      labelColor: isDark ? '#d1d5db' : '#374151',
-      titleColor: isDark ? '#e5e7eb' : '#111827',
-      gridColor: isDark ? '#374151' : '#e5e7eb',
-      tickColor: isDark ? '#4b5563' : '#d1d5db',
-      domainColor: isDark ? '#4b5563' : '#d1d5db',
-    },
-    legend: { labelColor: isDark ? '#d1d5db' : '#374151', titleColor: isDark ? '#e5e7eb' : '#111827' },
-    title: { color: isDark ? '#e5e7eb' : '#111827' },
+  /* ---------- Plotly base layout for dark mode ---------- */
+  const plotlyBase = useMemo(() => ({
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { color: isDark ? '#d1d5db' : '#374151', size: 11 },
+    margin: { t: 10, r: 10, b: 40, l: 60, pad: 4 },
+    xaxis: { gridcolor: isDark ? '#374151' : '#e5e7eb', zerolinecolor: isDark ? '#4b5563' : '#d1d5db', color: isDark ? '#d1d5db' : '#374151' },
+    yaxis: { gridcolor: isDark ? '#374151' : '#e5e7eb', zerolinecolor: isDark ? '#4b5563' : '#d1d5db', color: isDark ? '#d1d5db' : '#374151' },
   }), [isDark]);
+  const plotlyConfig = {
+    responsive: true,
+    displayModeBar: 'hover',
+    displaylogo: false,
+    modeBarButtonsToRemove: ['toImage', 'lasso2d', 'select2d'],
+  };
 
-  /* ---------- chart specs ---------- */
+  /* ---------- chart data (Plotly) ---------- */
   const outlierChartSpec = useMemo(() => {
     if (outlierChartData.length === 0 || outlierDates.length === 0) return null;
     const minDate = outlierDates[outlierZoomStart] || outlierDates[0];
     const maxDate = outlierDates[outlierZoomEnd] || outlierDates[outlierDates.length - 1];
     const filtered = outlierChartData.filter(d => d.date >= minDate && d.date <= maxDate);
     if (filtered.length === 0) return null;
-    // Stacked bar: each date has Corrected + optional Adjustment stack
+    // Group by series type for stacked bar
+    const seriesMap = { 'Corrected': { color: '#2563eb' }, 'Clipped \u2193': { color: '#ef4444' }, 'Filled \u2191': { color: '#f59e0b' } };
+    const traces = Object.entries(seriesMap).map(([name, cfg]) => {
+      const rows = filtered.filter(d => d.series === name);
+      return {
+        type: 'bar', name,
+        x: rows.map(d => d.date), y: rows.map(d => d.value),
+        marker: { color: cfg.color, opacity: rows.map(d => d.isOutlier ? 1.0 : 0.75) },
+        customdata: rows.map(d => [d.corrVal, d.origVal, d.delta]),
+        hovertemplate: '%{x|%Y-%m}<br>Corrected: %{customdata[0]:,.0f}<br>Original: %{customdata[1]:,.0f}<br>\u0394: %{customdata[2]:,.0f}<extra>%{fullData.name}</extra>',
+      };
+    }).filter(t => t.x.length > 0);
     return {
-      $schema: 'https://vega.github.io/schema/vega-lite/v5.json',
-      width: 'container', height: 300,
-      autosize: { type: 'fit', contains: 'padding' },
-      data: { values: filtered },
-      mark: { type: 'bar', binSpacing: 1 },
-      encoding: {
-        x: { field: 'date', type: 'temporal', title: 'Date', axis: { format: '%Y-%m', labelAngle: -30, labelFontSize: 10 } },
-        y: { field: 'value', type: 'quantitative', title: 'Demand', stack: 'zero' },
-        color: {
-          field: 'series', type: 'nominal',
-          scale: { domain: ['Corrected', 'Clipped ↓', 'Filled ↑'], range: ['#2563eb', '#ef4444', '#f59e0b'] },
-          legend: { title: null, orient: 'top', direction: 'horizontal' }
-        },
-        opacity: { condition: { test: "datum.isOutlier", value: 1.0 }, value: 0.75 },
-        tooltip: [
-          { field: 'date', type: 'temporal', title: 'Date' },
-          { field: 'series', type: 'nominal', title: 'Type' },
-          { field: 'corrVal', type: 'quantitative', title: 'Corrected', format: ',.0f' },
-          { field: 'origVal', type: 'quantitative', title: 'Original', format: ',.0f' },
-          { field: 'delta', type: 'quantitative', title: 'Δ Adjustment', format: ',.0f' },
-        ]
+      data: traces,
+      layout: {
+        ...plotlyBase, height: 300, barmode: 'stack',
+        xaxis: { ...plotlyBase.xaxis, type: 'date', tickformat: '%Y-%m', tickangle: -30 },
+        yaxis: { ...plotlyBase.yaxis, title: 'Demand' },
+        legend: { orientation: 'h', y: 1.08 },
       },
-      config: vegaThemeConfig
     };
-  }, [outlierChartData, outlierDates, outlierZoomStart, outlierZoomEnd]);
+  }, [outlierChartData, outlierDates, outlierZoomStart, outlierZoomEnd, plotlyBase]);
 
   const mainChartSpec = useMemo(() => {
     if (allData.length === 0 || allDates.length === 0) return null;
@@ -2034,147 +2031,151 @@ export const TimeSeriesViewer = () => {
     const maxDate = allDates[Math.min(zoomEnd, allDates.length - 1)] || allDates[allDates.length - 1];
     const filtered = allData.filter(d => {
       if (d.type !== 'Actual' && d.method !== 'Historical' && visibleMethods[d.method] === false) return false;
-      // Filter bands by bandVisibleMethods
       if (d.layer === 'band' && bandVisibleMethods[d.method] === false) return false;
       return d.date >= minDate && d.date <= maxDate;
     });
     if (filtered.length === 0) return null;
-    const colorScale = { field: 'method', type: 'nominal', scale: activeMethodDomain, legend: { title: 'Method' } };
-    const hasBands = filtered.some(d => d.layer === 'band');
-    const hasBars  = filtered.some(d => d.layer === 'bar');
-    const layers = [];
 
-    // Axis date format: fine for weekly/daily, coarse for monthly+
-    const axisDateFmt = daysPerPeriod <= 10 ? '%b %d %Y' : (daysPerPeriod <= 95 ? '%b %Y' : '%Y');
-    const ttipDateFmt = daysPerPeriod <= 10 ? '%Y-%m-%d' : '%Y-%m';
+    const methodColorMap = {};
+    activeMethodDomain.domain.forEach((m, i) => { methodColorMap[m] = activeMethodDomain.range[i]; });
+    const tickfmt = daysPerPeriod <= 10 ? '%b %d %Y' : (daysPerPeriod <= 95 ? '%b %Y' : '%Y');
+    const traces = [];
 
-    // ---- Demand bars (historical only) ----
-    // NOTE: no timeUnit — Vega-Lite's timeUnit:'yearmonth' would collapse weekly
-    //       bars into monthly buckets, which is exactly what we want to avoid.
-    //       Data is already at the correct granularity (weekly, monthly, etc.)
-    //       via dispHistData / displayAgg aggregation done in JavaScript.
-    if (hasBars) {
-      layers.push({
-        transform: [{ filter: "datum.layer === 'bar'" }],
-        mark: { type: 'bar', tooltip: true, color: isDark ? '#9ca3af' : '#374151', opacity: 0.55 },
-        encoding: {
-          x: { field: 'date', type: 'temporal', title: 'Date',
-               axis: { format: axisDateFmt, labelAngle: -30 } },
-          y: { field: 'value', type: 'quantitative', title: 'Demand' },
-          tooltip: [
-            { field: 'date', type: 'temporal', title: 'Date', format: ttipDateFmt },
-            { field: 'value', type: 'quantitative', title: 'Demand', format: ',.0f' },
-          ]
-        }
+    // ── Historical demand bars ──
+    const barRows = filtered.filter(d => d.layer === 'bar');
+    if (barRows.length > 0) {
+      traces.push({
+        type: 'bar', name: 'Historical', legendgroup: 'Historical', showlegend: false,
+        x: barRows.map(d => d.date), y: barRows.map(d => d.value),
+        marker: { color: isDark ? '#9ca3af' : '#374151', opacity: 0.55 },
+        hovertemplate: '%{x|%Y-%m}<br>Demand: %{y:,.0f}<extra>Historical</extra>',
       });
     }
 
-    // ---- Confidence bands (behind forecast lines) ----
-    if (hasBands) {
-      layers.push({ transform: [{ filter: "datum.layer === 'band'" }], mark: { type: 'area', opacity: 0.12 }, encoding: { x: { field: 'date', type: 'temporal' }, y: { field: 'lo90', type: 'quantitative' }, y2: { field: 'hi90' }, color: { ...colorScale, legend: null } } });
-      layers.push({ transform: [{ filter: "datum.layer === 'band'" }], mark: { type: 'area', opacity: 0.25 }, encoding: { x: { field: 'date', type: 'temporal' }, y: { field: 'lo50', type: 'quantitative' }, y2: { field: 'hi50' }, color: { ...colorScale, legend: null } } });
-    }
-
-    // ---- Forecast method lines (excluding Historical which is now bars) ----
-    layers.push({
-      transform: [{ filter: "datum.layer === 'line'" }],
-      mark: { type: 'line', point: false, strokeWidth: 2 },
-      encoding: {
-        x: { field: 'date', type: 'temporal', title: 'Date', axis: { format: axisDateFmt, labelAngle: -30 } },
-        y: { field: 'value', type: 'quantitative', title: 'Demand', scale: { zero: false } },
-        color: colorScale,
-        strokeDash: { field: 'type', type: 'nominal',
-          scale: { domain: ['Actual', 'Forecast'], range: [[1, 0], [5, 5]] }, legend: null },
-        opacity: { value: 0.85 },
-        tooltip: [
-          { field: 'date', type: 'temporal', title: 'Date' },
-          { field: 'value', type: 'quantitative', title: 'Value', format: ',.0f' },
-          { field: 'method', type: 'nominal', title: 'Method' },
-          { field: 'type', type: 'nominal', title: 'Type' },
-        ]
+    // ── Confidence bands (90% then 50%) ──
+    const bandRows = filtered.filter(d => d.layer === 'band');
+    const bandMethods = [...new Set(bandRows.map(d => d.method))];
+    bandMethods.forEach(m => {
+      const rows = bandRows.filter(d => d.method === m).sort((a, b) => a.date.localeCompare(b.date));
+      if (rows.length === 0) return;
+      const color = methodColorMap[m] || '#6b7280';
+      const r = parseInt(color.slice(1,3),16), g = parseInt(color.slice(3,5),16), b = parseInt(color.slice(5,7),16);
+      // 90% band
+      if (rows[0].hi90 != null) {
+        traces.push({ type: 'scatter', mode: 'lines', name: `${m} 90%`, legendgroup: m, showlegend: false,
+          x: [...rows.map(d => d.date), ...rows.map(d => d.date).reverse()],
+          y: [...rows.map(d => d.hi90), ...rows.map(d => d.lo90).reverse()],
+          fill: 'toself', fillcolor: `rgba(${r},${g},${b},0.1)`, line: { width: 0 }, hoverinfo: 'skip' });
+      }
+      // 50% band
+      if (rows[0].hi50 != null) {
+        traces.push({ type: 'scatter', mode: 'lines', name: `${m} 50%`, legendgroup: m, showlegend: false,
+          x: [...rows.map(d => d.date), ...rows.map(d => d.date).reverse()],
+          y: [...rows.map(d => d.hi50), ...rows.map(d => d.lo50).reverse()],
+          fill: 'toself', fillcolor: `rgba(${r},${g},${b},0.22)`, line: { width: 0 }, hoverinfo: 'skip' });
       }
     });
 
-    // "Final Forecast" line — only drawn when any adjustments/overrides exist.
-    // It uses the best-method forecast as base, applies adjustments/overrides.
-    const hasFinalOverlay = filtered.some(d => d.type === 'Adjustment' || d.type === 'Override');
-    if (hasFinalOverlay) {
-      // Build the final-forecast line from the existing marker values
-      // (they already have the final value baked in from allData memo)
-      const finalLineData = filtered
-        .filter(d => d.type === 'Adjustment' || d.type === 'Override')
-        .map(d => ({ date: d.date, value: d.value, type: 'Final Forecast', method: 'Final Forecast' }));
-      if (finalLineData.length > 0) {
-        layers.push({
-          data: { values: finalLineData },
-          mark: { type: 'line', strokeWidth: 2.5, strokeDash: [3, 2], color: '#7c3aed', point: false },
-          encoding: {
-            x: { field: 'date', type: 'temporal' },
-            y: { field: 'value', type: 'quantitative' },
-            tooltip: [
-              { field: 'date', type: 'temporal', title: 'Date', format: '%Y-%m-%d' },
-              { field: 'value', type: 'quantitative', title: 'Final forecast', format: ',.0f' },
-            ]
-          }
-        });
+    // ── Forecast/Actual lines per method ──
+    const lineRows = filtered.filter(d => d.layer === 'line');
+    const lineMethods = [...new Set(lineRows.map(d => d.method))];
+    lineMethods.forEach(m => {
+      const rows = lineRows.filter(d => d.method === m).sort((a, b) => a.date.localeCompare(b.date));
+      // Split into Actual (solid) and Forecast (dash) segments
+      const actRows = rows.filter(d => d.type === 'Actual');
+      const fcRows = rows.filter(d => d.type === 'Forecast');
+      const color = methodColorMap[m] || '#6b7280';
+      if (actRows.length > 0) {
+        traces.push({ type: 'scatter', mode: 'lines', name: m, legendgroup: m,
+          x: actRows.map(d => d.date), y: actRows.map(d => d.value),
+          line: { color, width: 2 }, opacity: 0.85,
+          hovertemplate: `%{x|%Y-%m-%d}<br>Value: %{y:,.0f}<extra>${m} (Actual)</extra>` });
       }
+      if (fcRows.length > 0) {
+        // Connect to last actual point for continuity
+        const bridge = actRows.length > 0 ? [actRows[actRows.length - 1]] : [];
+        const pts = [...bridge, ...fcRows];
+        traces.push({ type: 'scatter', mode: 'lines', name: m, legendgroup: m, showlegend: actRows.length === 0,
+          x: pts.map(d => d.date), y: pts.map(d => d.value),
+          line: { color, width: 2, dash: 'dash' }, opacity: 0.85,
+          hovertemplate: `%{x|%Y-%m-%d}<br>Value: %{y:,.0f}<extra>${m} (Forecast)</extra>` });
+      }
+    });
+
+    // ── Final Forecast overlay line ──
+    const adjOvRows = filtered.filter(d => d.type === 'Adjustment' || d.type === 'Override').sort((a, b) => a.date.localeCompare(b.date));
+    if (adjOvRows.length > 0) {
+      traces.push({ type: 'scatter', mode: 'lines', name: 'Final Forecast', legendgroup: 'Final',
+        x: adjOvRows.map(d => d.date), y: adjOvRows.map(d => d.value),
+        line: { color: '#7c3aed', width: 2.5, dash: 'dot' },
+        hovertemplate: '%{x|%Y-%m-%d}<br>Final: %{y:,.0f}<extra>Final Forecast</extra>' });
     }
 
-    // Adjustment markers (orange circle ●) — use transform filter on shared data
-    const hasAdjMarkers = filtered.some(d => d.type === 'Adjustment');
-    if (hasAdjMarkers) {
-      layers.push({
-        transform: [{ filter: "datum.type === 'Adjustment'" }],
-        mark: { type: 'point', shape: 'triangle-up', size: 160, filled: true, opacity: 1 },
-        encoding: {
-          x: { field: 'date', type: 'temporal' },
-          y: { field: 'value', type: 'quantitative' },
-          color: { value: '#f97316' },
-          tooltip: [
-            { field: 'date', type: 'temporal', title: 'Date', format: '%Y-%m-%d' },
-            { field: 'value', type: 'quantitative', title: 'Adjusted forecast', format: ',.0f' },
-            { field: 'adjDelta', type: 'quantitative', title: 'Δ (delta)', format: '+,.0f' },
-            { field: 'adjNote', type: 'nominal', title: 'Note' },
-          ]
-        }
-      });
+    // ── Adjustment markers (orange triangle-up) ──
+    const adjRows = filtered.filter(d => d.type === 'Adjustment');
+    if (adjRows.length > 0) {
+      traces.push({ type: 'scatter', mode: 'markers', name: 'Adjustments', legendgroup: 'Adj',
+        x: adjRows.map(d => d.date), y: adjRows.map(d => d.value),
+        marker: { color: '#f97316', symbol: 'triangle-up', size: 10 },
+        customdata: adjRows.map(d => [d.adjDelta, d.adjNote || '']),
+        hovertemplate: '%{x|%Y-%m-%d}<br>Adjusted: %{y:,.0f}<br>\u0394: %{customdata[0]:+,.0f}<br>%{customdata[1]}<extra>Adjustment</extra>' });
     }
 
-    // Override markers (red square ■) — use transform filter on shared data
-    const hasOvMarkers = filtered.some(d => d.type === 'Override');
-    if (hasOvMarkers) {
-      layers.push({
-        transform: [{ filter: "datum.type === 'Override'" }],
-        mark: { type: 'point', shape: 'square', size: 160, filled: true, opacity: 1 },
-        encoding: {
-          x: { field: 'date', type: 'temporal' },
-          y: { field: 'value', type: 'quantitative' },
-          color: { value: '#dc2626' },
-          tooltip: [
-            { field: 'date', type: 'temporal', title: 'Date', format: '%Y-%m-%d' },
-            { field: 'value', type: 'quantitative', title: 'Override value', format: ',.0f' },
-            { field: 'adjNote', type: 'nominal', title: 'Note' },
-          ]
-        }
-      });
+    // ── Override markers (red square) ──
+    const ovRows = filtered.filter(d => d.type === 'Override');
+    if (ovRows.length > 0) {
+      traces.push({ type: 'scatter', mode: 'markers', name: 'Overrides', legendgroup: 'Ov',
+        x: ovRows.map(d => d.date), y: ovRows.map(d => d.value),
+        marker: { color: '#dc2626', symbol: 'square', size: 9 },
+        customdata: ovRows.map(d => [d.adjNote || '']),
+        hovertemplate: '%{x|%Y-%m-%d}<br>Override: %{y:,.0f}<br>%{customdata[0]}<extra>Override</extra>' });
     }
 
-    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: 380, autosize: { type: 'fit', contains: 'padding' }, data: { values: filtered }, layer: layers, config: vegaThemeConfig };
-  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, bandVisibleMethods, activeMethodDomain, daysPerPeriod, vegaThemeConfig, isDark]);
+    return {
+      data: traces,
+      layout: {
+        ...plotlyBase, height: 380,
+        xaxis: { ...plotlyBase.xaxis, type: 'date', tickformat: tickfmt, tickangle: -30 },
+        yaxis: { ...plotlyBase.yaxis, title: 'Demand', rangemode: 'normal' },
+        barmode: 'overlay',
+        legend: { orientation: 'h', y: 1.05, font: { size: 10 } },
+        hovermode: 'closest',
+      },
+    };
+  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, bandVisibleMethods, activeMethodDomain, daysPerPeriod, plotlyBase, isDark]);
 
   const racingBarsSpec = useMemo(() => {
     const src = originForecasts?.forecasts?.length > 0 ? originForecasts.forecasts : activeForecasts;
     if (!src || src.length === 0) return null;
-    const barData = src.filter(f => visibleMethods[f.method] !== false).map(f => ({ method: f.method, value: f.point_forecast[selectedPeriod - 1] || 0, actual: f.actual?.[selectedPeriod - 1] || null })).sort((a, b) => b.value - a.value);
+    const barData = src.filter(f => visibleMethods[f.method] !== false).map(f => ({ method: f.method, value: f.point_forecast[selectedPeriod - 1] || 0, actual: f.actual?.[selectedPeriod - 1] || null })).sort((a, b) => a.value - b.value); // ascending for horizontal bar
     if (barData.length === 0) return null;
-    const layers = [{ mark: { type: 'bar', cornerRadiusEnd: 4 }, encoding: { y: { field: 'method', type: 'nominal', sort: '-x', title: 'Method' }, x: { field: 'value', type: 'quantitative', title: `Forecast (Month ${selectedPeriod})` }, color: { field: 'method', type: 'nominal', legend: null, scale: activeMethodDomain }, tooltip: [{ field: 'method', type: 'nominal', title: 'Method' }, { field: 'value', type: 'quantitative', title: 'Forecast', format: ',.0f' }, { field: 'actual', type: 'quantitative', title: 'Actual', format: ',.0f' }] } }];
+    const methodColorMap = {};
+    activeMethodDomain.domain.forEach((m, i) => { methodColorMap[m] = activeMethodDomain.range[i]; });
     const actualVal = barData.find(d => d.actual !== null)?.actual;
+    const shapes = [];
+    const annotations = [];
     if (actualVal != null) {
-      layers.push({ mark: { type: 'rule', color: '#e11d48', strokeWidth: 2, strokeDash: [6, 4] }, encoding: { x: { datum: actualVal } } });
-      layers.push({ mark: { type: 'text', align: 'left', dx: 4, dy: -8, color: '#e11d48', fontSize: 11, fontWeight: 'bold' }, encoding: { x: { datum: actualVal }, text: { value: `Actual: ${formatNumber(actualVal, locale, 0)}` } } });
+      shapes.push({ type: 'line', x0: actualVal, x1: actualVal, y0: -0.5, y1: barData.length - 0.5, line: { color: '#e11d48', width: 2, dash: 'dashdot' } });
+      annotations.push({ x: actualVal, y: barData.length - 0.8, text: `Actual: ${formatNumber(actualVal, locale, 0)}`, showarrow: false, font: { color: '#e11d48', size: 11, weight: 'bold' }, xanchor: 'left', xshift: 4 });
     }
-    return { $schema: 'https://vega.github.io/schema/vega-lite/v5.json', width: 'container', height: Math.max(150, barData.length * 40), autosize: { type: 'fit', contains: 'padding' }, data: { values: barData }, layer: layers, config: vegaThemeConfig };
-  }, [originForecasts, activeForecasts, selectedPeriod, visibleMethods, activeMethodDomain, vegaThemeConfig]);
+    return {
+      data: [{
+        type: 'bar', orientation: 'h',
+        y: barData.map(d => d.method), x: barData.map(d => d.value),
+        marker: { color: barData.map(d => methodColorMap[d.method] || '#6b7280') },
+        customdata: barData.map(d => [d.actual]),
+        hovertemplate: '%{y}<br>Forecast: %{x:,.0f}<br>Actual: %{customdata[0]:,.0f}<extra></extra>',
+      }],
+      layout: {
+        ...plotlyBase,
+        height: Math.max(150, barData.length * 40),
+        margin: { t: 10, r: 10, b: 40, l: 120 },
+        xaxis: { ...plotlyBase.xaxis, title: `Forecast (Month ${selectedPeriod})` },
+        yaxis: { ...plotlyBase.yaxis, automargin: true },
+        shapes, annotations,
+      },
+    };
+  }, [originForecasts, activeForecasts, selectedPeriod, visibleMethods, activeMethodDomain, plotlyBase, locale]);
 
   // ---- Forecast Convergence chart (Plotly grouped bars) ----
   const convergenceChart = useMemo(() => {
@@ -2845,7 +2846,7 @@ export const TimeSeriesViewer = () => {
               Detected via <span className="font-medium">{outlierInfo?.detection_method || 'IQR'}</span>, corrected with <span className="font-medium">{outlierInfo?.correction_method || 'clip'}</span>.
               Gray dashed = original, blue solid = corrected, red dots = outlier points.
             </p>
-            <div className="w-full overflow-x-auto"><VegaLite spec={outlierChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+            <div className="w-full overflow-x-auto"><Plot data={outlierChartSpec.data} layout={outlierChartSpec.layout} config={plotlyConfig} useResizeHandler style={{width:'100%'}} /></div>
             <ZoomSlider dates={outlierDates} start={outlierZoomStart} end={outlierZoomEnd} onStartChange={setOutlierZoomStart} onEndChange={setOutlierZoomEnd} />
           </Section>
         ) : null;
@@ -2855,7 +2856,7 @@ export const TimeSeriesViewer = () => {
           <Section key="main_chart" id="tsv-main-chart" title={`Historical Data & Forecasts${horizonLength ? ` (${horizonLength}-${periodLabel} horizon)` : ''}`} storageKey="tsv_main_chart_open" {...dp('main_chart')}>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">Shaded bands: 50% (dark) and 90% (light) prediction intervals.</p>
             {mainChartSpec ? (
-              <div className="w-full overflow-x-auto"><VegaLite spec={mainChartSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+              <div className="w-full overflow-x-auto"><Plot data={mainChartSpec.data} layout={mainChartSpec.layout} config={plotlyConfig} useResizeHandler style={{width:'100%'}} /></div>
             ) : <div className="text-gray-400 dark:text-gray-500 py-8 text-center">No data available</div>}
             <ZoomSlider dates={allDates} start={zoomStart} end={zoomEnd} onStartChange={setZoomStart} onEndChange={setZoomEnd} />
           </Section>
@@ -3773,7 +3774,7 @@ export const TimeSeriesViewer = () => {
                       <Plot
                         data={convergenceChart.traces}
                         layout={{ ...convergenceChart.layout, title: { text: `Forecast Convergence — ${convergenceChart.method}`, font: { size: 14 } } }}
-                        config={{ responsive: true, displayModeBar: false }}
+                        config={plotlyConfig}
                         style={{ width: '100%', height: '100%' }}
                         useResizeHandler
                       />
@@ -3826,7 +3827,7 @@ export const TimeSeriesViewer = () => {
                       }
                     </div>
                     {racingBarsSpec
-                      ? <div className="w-full overflow-x-auto"><VegaLite spec={racingBarsSpec} actions={false} renderer="svg" style={{width:'100%'}} /></div>
+                      ? <div className="w-full overflow-x-auto"><Plot data={racingBarsSpec.data} layout={racingBarsSpec.layout} config={plotlyConfig} useResizeHandler style={{width:'100%'}} /></div>
                       : <div className="text-gray-400 dark:text-gray-500 py-4 text-center text-sm">No comparison data</div>
                     }
                   </div>

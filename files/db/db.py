@@ -462,6 +462,41 @@ def init_schema(config_path: Union[str, Path]) -> None:
         updated_at                      TIMESTAMPTZ DEFAULT NOW()
     );
 
+    -- ─── ABC Classification ──────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS {schema}.abc_configuration (
+        id              SERIAL PRIMARY KEY,
+        name            TEXT NOT NULL UNIQUE,
+        metric          TEXT NOT NULL CHECK (metric IN ('hits', 'demand', 'value')),
+        lookback_months INTEGER NOT NULL DEFAULT 12,
+        granularity     TEXT NOT NULL DEFAULT 'item_site'
+                        CHECK (granularity IN ('item_site', 'item')),
+        method          TEXT NOT NULL DEFAULT 'cumulative_pct'
+                        CHECK (method IN ('cumulative_pct', 'rank_pct', 'rank_absolute')),
+        class_labels    JSONB NOT NULL DEFAULT '["A","B","C"]'::jsonb,
+        thresholds      JSONB NOT NULL DEFAULT '[80, 95]'::jsonb,
+        segment_id      INTEGER REFERENCES {schema}.segment(id) ON DELETE SET NULL,
+        is_active       BOOLEAN DEFAULT TRUE,
+        created_at      TIMESTAMPTZ DEFAULT NOW(),
+        updated_at      TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS {schema}.abc_results (
+        id              SERIAL PRIMARY KEY,
+        config_id       INTEGER NOT NULL REFERENCES {schema}.abc_configuration(id) ON DELETE CASCADE,
+        unique_id       TEXT NOT NULL,
+        class_label     TEXT NOT NULL,
+        metric_value    DOUBLE PRECISION,
+        rank            INTEGER,
+        cumulative_pct  DOUBLE PRECISION,
+        computed_at     TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (config_id, unique_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_abc_results_config
+        ON {schema}.abc_results (config_id);
+    CREATE INDEX IF NOT EXISTS idx_abc_results_uid
+        ON {schema}.abc_results (unique_id);
+
     -- ─── Audit log ────────────────────────────────────────────────────
 
     CREATE TABLE IF NOT EXISTS {schema}.audit_log (

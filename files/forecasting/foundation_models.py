@@ -183,7 +183,8 @@ class FoundationForecaster:
     
     def forecast_multiple_series(self,
                                 df: pd.DataFrame,
-                                characteristics_df: pd.DataFrame) -> pd.DataFrame:
+                                characteristics_df: pd.DataFrame,
+                                show_progress: bool = True) -> pd.DataFrame:
         """
         Generate TimesFM forecasts for multiple time series.
         
@@ -205,7 +206,8 @@ class FoundationForecaster:
         for _, char_row in tqdm(characteristics_df.iterrows(),
                                 total=len(characteristics_df),
                                 desc="  Foundation forecasting",
-                                unit="series"):
+                                unit="series",
+                                disable=not show_progress):
             unique_id = char_row['unique_id']
 
             # Get series data

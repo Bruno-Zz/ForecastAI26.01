@@ -229,6 +229,27 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
         print(f"Segmentation complete: {len(results)} segments processed")
         return
 
+    if step == 'classification':
+        from classification.abc import ABCClassifier
+        handler = ListHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+        logging.getLogger().addHandler(handler)
+        log_id = pl.start_step('classification')
+        try:
+            classifier = ABCClassifier(config_path)
+            summaries = classifier.run_all_active()
+            total = sum(s.get("total", 0) for s in summaries)
+            for s in summaries:
+                print(f"  '{s['name']}': {s['total']} series — {s.get('per_class', {})}")
+            pl.end_step(log_id, 'success', rows=total, log_tail=handler.get_tail())
+        except Exception as exc:
+            pl.end_step(log_id, 'error', error=str(exc), log_tail=handler.get_tail())
+            raise
+        finally:
+            logging.getLogger().removeHandler(handler)
+        print(f"Classification complete: {len(summaries)} configurations processed, {total} total results")
+        return
+
     if step == 'etl':
         handler = ListHandler()
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
@@ -449,7 +470,7 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
 
     else:
         print(f"Unknown step: {step}")
-        print("Available steps: etl, outlier-detection, characterize, forecast, backtest, best-method, distributions")
+        print("Available steps: etl, outlier-detection, segmentation, classification, characterize, forecast, backtest, best-method, distributions")
         sys.exit(1)
 
 
@@ -477,6 +498,7 @@ Examples:
     parser.add_argument('--skip-etl', action='store_true', help='Skip ETL step')
     parser.add_argument('--skip-outlier-detection', action='store_true', help='Skip outlier detection step')
     parser.add_argument('--skip-segmentation', action='store_true', help='Skip segmentation step')
+    parser.add_argument('--skip-classification', action='store_true', help='Skip classification step')
     parser.add_argument('--skip-characterization', action='store_true', help='Skip characterization step')
     parser.add_argument('--skip-forecasting', action='store_true', help='Skip forecasting step')
     parser.add_argument('--skip-backtest', action='store_true', help='Skip backtesting step')
@@ -486,8 +508,8 @@ Examples:
     # Single step mode
     parser.add_argument(
         '--only', type=str, default=None,
-        choices=['etl', 'outlier-detection', 'segmentation', 'characterize',
-                 'forecast', 'backtest', 'best-method', 'distributions'],
+        choices=['etl', 'outlier-detection', 'segmentation', 'classification',
+                 'characterize', 'forecast', 'backtest', 'best-method', 'distributions'],
         help='Run only a single step'
     )
 
@@ -573,6 +595,7 @@ Examples:
         skip_etl=args.skip_etl,
         skip_outlier_detection=args.skip_outlier_detection,
         skip_segmentation=args.skip_segmentation,
+        skip_classification=args.skip_classification,
         skip_characterization=args.skip_characterization,
         skip_forecasting=args.skip_forecasting,
         skip_backtest=args.skip_backtest,

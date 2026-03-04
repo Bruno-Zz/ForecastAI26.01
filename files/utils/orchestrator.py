@@ -79,7 +79,8 @@ def _dask_forecast_batch(config_path: str,
         stat_forecaster = StatisticalForecaster(config_path, config_override=config_override)
         stat_forecasts = stat_forecaster.forecast_multiple_series(
             df=batch_df,
-            characteristics_df=batch_chars
+            characteristics_df=batch_chars,
+            show_progress=False,
         )
         if not stat_forecasts.empty:
             all_forecasts.append(stat_forecasts)
@@ -114,7 +115,8 @@ def _dask_forecast_batch(config_path: str,
             ml_forecaster = MLForecaster(config_path, config_override=config_override)
             ml_forecasts = ml_forecaster.forecast_multiple_series(
                 df=batch_df,
-                characteristics_df=ml_eligible
+                characteristics_df=ml_eligible,
+                show_progress=False,
             )
             if not ml_forecasts.empty:
                 all_forecasts.append(ml_forecasts)
@@ -739,6 +741,28 @@ class ForecastOrchestrator:
             self.logger.info(f"  '{seg_name}': {count} series")
         return results
 
+    def step_classification(self) -> list:
+        """
+        Step 1d: Run all active configurable ABC/XYZ classifications.
+
+        Returns:
+            List of summary dicts (one per active configuration)
+        """
+        self.logger.info("=" * 80)
+        self.logger.info("STEP 1d: Configurable Classifications (ABC/XYZ)")
+        self.logger.info("=" * 80)
+
+        from classification.abc import ABCClassifier
+        classifier = ABCClassifier(self.config_path)
+        summaries = classifier.run_all_active()
+        for s in summaries:
+            self.logger.info(
+                "  '%s': %d series — %s",
+                s["name"], s["total"],
+                ", ".join(f"{k}={v}" for k, v in sorted(s.get("per_class", {}).items())),
+            )
+        return summaries
+
     def step_characterize(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Step 2: Analyze time series characteristics.
@@ -830,7 +854,8 @@ class ForecastOrchestrator:
         try:
             stat_forecasts = _stat_fc.forecast_multiple_series(
                 df=df,
-                characteristics_df=characteristics_df
+                characteristics_df=characteristics_df,
+                show_progress=False,
             )
             if not stat_forecasts.empty:
                 all_forecasts.append(stat_forecasts)
@@ -856,7 +881,8 @@ class ForecastOrchestrator:
                 ml_fc = _ml_fc_fn()
                 ml_forecasts = ml_fc.forecast_multiple_series(
                     df=df,
-                    characteristics_df=ml_eligible
+                    characteristics_df=ml_eligible,
+                    show_progress=False,
                 )
                 if not ml_forecasts.empty:
                     all_forecasts.append(ml_forecasts)
@@ -877,7 +903,8 @@ class ForecastOrchestrator:
                 neural_fc = _neural_fc_fn()
                 neural_forecasts = neural_fc.forecast_multiple_series(
                     df=df,
-                    characteristics_df=neural_eligible
+                    characteristics_df=neural_eligible,
+                    show_progress=False,
                 )
                 if not neural_forecasts.empty:
                     all_forecasts.append(neural_forecasts)
@@ -891,7 +918,8 @@ class ForecastOrchestrator:
             if found_fc.model is not None:
                 foundation_forecasts = found_fc.forecast_multiple_series(
                     df=df,
-                    characteristics_df=characteristics_df
+                    characteristics_df=characteristics_df,
+                    show_progress=False,
                 )
                 if not foundation_forecasts.empty:
                     all_forecasts.append(foundation_forecasts)
@@ -1437,6 +1465,7 @@ class ForecastOrchestrator:
                               skip_etl: bool = False,
                               skip_outlier_detection: bool = False,
                               skip_segmentation: bool = False,
+                              skip_classification: bool = False,
                               skip_characterization: bool = False,
                               skip_forecasting: bool = False,
                               skip_backtest: bool = False,
@@ -1506,6 +1535,13 @@ class ForecastOrchestrator:
                 output_paths['segmentation'] = 'PostgreSQL: segment_membership'
             else:
                 self.logger.info("Skipping segmentation step")
+
+            # Step 1d: Classification (configurable ABC/XYZ)
+            if not skip_classification:
+                self._run_step(pl, "classification", self.step_classification)
+                output_paths['classification'] = 'PostgreSQL: abc_results'
+            else:
+                self.logger.info("Skipping classification step")
 
             # Step 2: Characterization
             if skip_characterization:

@@ -377,19 +377,43 @@ class MLForecaster:
         # horizon step.
         last_features = features_df.iloc[[-1]]
 
+        # Early skip: if features can't support at least half the horizon
+        # with the minimum 10 supervised samples, skip entirely.
+        min_supervised = 10
+        max_trainable_h = max(len(features_df) - min_supervised, 0)
+        if max_trainable_h < self.horizon // 2:
+            self.logger.warning(
+                f"{unique_id}/{method}: Only {len(features_df)} usable feature rows "
+                f"after engineering — can train at most {max_trainable_h}/{self.horizon} "
+                f"horizon steps. Skipping method (need at least {self.horizon // 2})."
+            )
+            # Return a result with all-NaN forecasts so downstream knows it was attempted
+            return ForecastResult(
+                unique_id=unique_id,
+                method=method,
+                point_forecast=point_forecasts * np.nan,
+                quantiles={q: arr * np.nan for q, arr in quantile_forecasts.items()},
+                fitted_values=None,
+                residuals=None,
+                hyperparameters={'method': method, 'method_family': 'ML', 'skipped': True,
+                                 'skip_reason': f'insufficient features ({len(features_df)} rows) for horizon {self.horizon}'},
+                training_time=time.time() - start_time,
+                insample_actual=series.values,
+            )
+
         # Validation split ratio — per-series override or config default
         _val_split = (overrides or {}).get('val_split', self.val_split)
+
+        # Track horizon steps skipped due to insufficient samples
+        skipped_steps = []
 
         for h in range(1, self.horizon + 1):
             X_train, y_train = self._build_supervised_dataset(
                 features_df, target, horizon_step=h
             )
 
-            if len(X_train) < 10:
-                self.logger.warning(
-                    f"{unique_id}/{method}: Not enough supervised samples "
-                    f"for horizon step {h} (got {len(X_train)}). Filling with NaN."
-                )
+            if len(X_train) < min_supervised:
+                skipped_steps.append((h, len(X_train)))
                 point_forecasts[h - 1] = np.nan
                 for q in self.quantile_levels:
                     quantile_forecasts[q][h - 1] = np.nan
@@ -487,6 +511,16 @@ class MLForecaster:
                         f"{unique_id}/{method}: Quantile {q} failed at h={h}: {e}"
                     )
                     quantile_forecasts[q][h - 1] = np.nan
+
+        # --- Log a single condensed warning for all skipped horizon steps ---
+        if skipped_steps:
+            first_h = skipped_steps[0][0]
+            last_h = skipped_steps[-1][0]
+            self.logger.warning(
+                f"{unique_id}/{method}: Insufficient supervised samples for "
+                f"{len(skipped_steps)}/{self.horizon} horizon steps "
+                f"(h={first_h}..{last_h}). Filled with NaN."
+            )
 
         # --- Post-processing: enforce quantile monotonicity ---
         quantile_forecasts = self._enforce_quantile_monotonicity(quantile_forecasts)
@@ -813,7 +847,8 @@ class MLForecaster:
     def forecast_multiple_series(self,
                                  df: pd.DataFrame,
                                  characteristics_df: pd.DataFrame,
-                                 overrides_map: dict = None) -> pd.DataFrame:
+                                 overrides_map: dict = None,
+                                 show_progress: bool = True) -> pd.DataFrame:
         """
         Generate ML forecasts for multiple time series.
 
@@ -845,7 +880,8 @@ class MLForecaster:
         for _, char_row in tqdm(valid_chars.iterrows(),
                                 total=len(valid_chars),
                                 desc="  ML forecasting",
-                                unit="series"):
+                                unit="series",
+                                disable=not show_progress):
             unique_id = char_row['unique_id']
 
             # Extract ML methods from recommended methods

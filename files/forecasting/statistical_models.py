@@ -593,7 +593,8 @@ class StatisticalForecaster:
                                 df: pd.DataFrame,
                                 characteristics_df: pd.DataFrame,
                                 parallel: bool = False,
-                                overrides_map: dict = None) -> pd.DataFrame:
+                                overrides_map: dict = None,
+                                show_progress: bool = True) -> pd.DataFrame:
         """
         Generate forecasts for a batch of time series sequentially.
         Parallelism across series is handled externally by the Dask orchestrator,
@@ -620,7 +621,8 @@ class StatisticalForecaster:
         for _, char_row in tqdm(characteristics_df.iterrows(),
                                 total=len(characteristics_df),
                                 desc="  Statistical forecasting",
-                                unit="series"):
+                                unit="series",
+                                disable=not show_progress):
             unique_id = char_row['unique_id']
             all_methods = char_row['recommended_methods']
 

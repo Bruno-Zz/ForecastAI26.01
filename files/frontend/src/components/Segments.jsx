@@ -111,6 +111,18 @@ function buildFieldsFromApi(fieldsData) {
     );
   }
 
+  // ── Dynamic ABC classification fields ──
+  if (fieldsData.classification_fields?.length) {
+    for (const cf of fieldsData.classification_fields) {
+      result.push({
+        key: cf.field_key,
+        label: `Class: ${cf.column}`,
+        type: 'enum',
+        options: cf.options || [],
+      });
+    }
+  }
+
   return result;
 }
 

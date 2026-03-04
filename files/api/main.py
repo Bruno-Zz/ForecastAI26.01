@@ -209,6 +209,7 @@ class TimeSeriesInfo(BaseModel):
     n_outliers: Optional[int] = 0
     best_method: Optional[str] = None
     best_method_source: Optional[str] = None  # 'backtested' or 'recommended'
+    classifications: Optional[Dict[str, str]] = None  # { "config_name": "A", ... }
 
 
 class ForecastData(BaseModel):
@@ -1432,6 +1433,25 @@ async def get_series_list(
         for _, bm_row in _compute(data_cache["best_methods"]).iterrows():
             backtested_map[bm_row["unique_id"]] = str(bm_row["best_method"])
 
+    # Build classification lookup: { unique_id: { config_name: class_label } }
+    classifications_map: Dict[str, Dict[str, str]] = {}
+    try:
+        conn = get_conn(_api_config_path())
+        schema = get_schema(_api_config_path())
+        cls_df = pd.read_sql(
+            f"""
+            SELECT r.unique_id, c.name AS config_name, r.class_label
+            FROM {schema}.abc_results r
+            JOIN {schema}.abc_configuration c ON c.id = r.config_id AND c.is_active = TRUE
+            """,
+            conn,
+        )
+        conn.close()
+        for _, cr in cls_df.iterrows():
+            classifications_map.setdefault(cr["unique_id"], {})[cr["config_name"]] = cr["class_label"]
+    except Exception:
+        pass  # abc tables may not exist yet
+
     # Convert to response model
     series_list = []
     for _, row in df.iterrows():
@@ -1466,6 +1486,7 @@ async def get_series_list(
                 n_outliers=n_out,
                 best_method=best_method_val,
                 best_method_source=best_method_source_val,
+                classifications=classifications_map.get(uid),
             )
         )
 
@@ -2044,6 +2065,171 @@ async def get_accuracy_precision(
             else 0,
         },
     }
+
+
+def _build_aggregate_demand(uid_set: set | None = None):
+    """
+    Core logic for aggregated historical demand + best-method forecast.
+    Optimised with vectorised pandas (no per-uid DataFrame filtering).
+    """
+    if data_cache["time_series"] is None:
+        raise HTTPException(status_code=503, detail="Data not loaded")
+
+    ts_df = _compute(data_cache["time_series"])  # unique_id, date, y
+
+    if uid_set:
+        ts_df = ts_df[ts_df["unique_id"].isin(uid_set)]
+
+    if ts_df.empty:
+        logger.warning("aggregate-demand: ts_df is empty after filtering")
+        return {"historical": [], "forecast": []}
+
+    included_uids = set(ts_df["unique_id"].unique())
+
+    # ── Historical: sum by month (vectorised) ──
+    hist_agg = (
+        ts_df
+        .assign(month=ts_df["date"].dt.to_period("M"))
+        .groupby("month")["y"].sum()
+        .reset_index()
+    )
+    hist_agg["date"] = hist_agg["month"].dt.to_timestamp()
+    hist_agg = hist_agg.sort_values("date")
+    historical = [
+        {"date": row["date"].strftime("%Y-%m-%d"), "value": round(float(row["y"]), 2)}
+        for _, row in hist_agg.iterrows()
+    ]
+
+    # ── Forecast: sum best-method point_forecast by month ──
+    forecast = []
+    has_fc = data_cache.get("forecasts") is not None
+    has_bm = data_cache.get("best_methods") is not None
+    if not has_fc or not has_bm:
+        logger.warning(f"aggregate-demand: skipping forecast — forecasts loaded={has_fc}, best_methods loaded={has_bm}")
+    elif has_fc and has_bm:
+        fc_df = _compute(data_cache["forecasts"])
+        best_df = _compute(data_cache["best_methods"])
+        logger.info(
+            f"aggregate-demand: fc_df={len(fc_df)} rows cols={list(fc_df.columns)}, "
+            f"best_df={len(best_df)} rows cols={list(best_df.columns)}, "
+            f"included_uids={len(included_uids)}"
+        )
+
+        # Pre-build lookup dicts once (avoid repeated DataFrame filtering)
+        best_map = best_df.set_index("unique_id")["best_method"].to_dict()
+        last_dates = ts_df.groupby("unique_id")["date"].max().to_dict()
+
+        chars_map = {}
+        if data_cache.get("characteristics") is not None:
+            chars_df = _compute(data_cache["characteristics"])
+            if "date_range_end" in chars_df.columns:
+                chars_map = (
+                    chars_df[["unique_id", "date_range_end"]]
+                    .dropna(subset=["date_range_end"])
+                    .set_index("unique_id")["date_range_end"]
+                    .to_dict()
+                )
+
+        # Build a fast fc lookup: (unique_id, method) → point_forecast
+        fc_subset = fc_df[fc_df["unique_id"].isin(included_uids)]
+        fc_lookup = {}
+        for _, row in fc_subset.iterrows():
+            pf_raw = row.get("point_forecast")
+            # Defensive: JSONB may arrive as a JSON string from some DB drivers
+            if isinstance(pf_raw, str):
+                try:
+                    pf_raw = json.loads(pf_raw)
+                except (json.JSONDecodeError, TypeError):
+                    pf_raw = None
+            fc_lookup[(row["unique_id"], row["method"])] = pf_raw
+
+        # Diagnostic: sample one entry to show what point_forecast looks like
+        if fc_lookup:
+            sample_key = next(iter(fc_lookup))
+            sample_val = fc_lookup[sample_key]
+            logger.info(
+                f"aggregate-demand: fc_lookup has {len(fc_lookup)} entries, "
+                f"sample key={sample_key}, sample type={type(sample_val).__name__}, "
+                f"sample val={str(sample_val)[:120]}"
+            )
+
+        # Count at each filtering step
+        n_no_bm, n_no_fc, n_bad_type, n_no_date, n_date_err, n_ok = 0, 0, 0, 0, 0, 0
+
+        date_sums = {}
+        for uid in included_uids:
+            bm = best_map.get(uid)
+            if bm is None:
+                n_no_bm += 1
+                continue
+            pf = fc_lookup.get((uid, bm))
+            if pf is None:
+                n_no_fc += 1
+                continue
+            if isinstance(pf, (list, np.ndarray)):
+                pf = list(pf)
+            else:
+                n_bad_type += 1
+                continue
+
+            last_date = last_dates.get(uid)
+            if last_date is None or pd.isna(last_date):
+                n_no_date += 1
+                continue
+            dre = chars_map.get(uid)
+            if dre is not None:
+                last_date = pd.Timestamp(dre)
+
+            uid_ok = False
+            for i, val in enumerate(pf):
+                try:
+                    fc_date = (last_date + pd.DateOffset(months=i + 1)).strftime("%Y-%m-%d")
+                    date_sums[fc_date] = date_sums.get(fc_date, 0) + float(val)
+                    uid_ok = True
+                except Exception as e:
+                    n_date_err += 1
+                    if n_date_err <= 3:
+                        logger.warning(f"aggregate-demand: date calc error uid={uid} i={i} last_date={last_date}: {e}")
+            if uid_ok:
+                n_ok += 1
+
+        logger.info(
+            f"aggregate-demand: pipeline — {len(included_uids)} total, "
+            f"{n_ok} ok, {n_no_bm} no_best_method, {n_no_fc} no_forecast_match, "
+            f"{n_bad_type} bad_pf_type, {n_no_date} no_last_date, {n_date_err} date_errors"
+        )
+
+        forecast = [
+            {"date": d, "value": round(v, 2)}
+            for d, v in sorted(date_sums.items())
+        ]
+
+    logger.info(
+        f"aggregate-demand: result — {len(included_uids)} series, "
+        f"{len(historical)} hist months, {len(forecast)} fc months"
+    )
+    return {"historical": historical, "forecast": forecast}
+
+
+@app.get("/api/analytics/aggregate-demand")
+async def get_aggregate_demand(
+    unique_ids: str = Query(None, description="Comma-separated unique_ids to include (default: all)"),
+):
+    """GET variant — filter via query param (for small sets or no filter)."""
+    uid_set = None
+    if unique_ids:
+        uid_set = set(uid.strip() for uid in unique_ids.split(",") if uid.strip())
+    return _build_aggregate_demand(uid_set)
+
+
+class AggregateDemandRequest(BaseModel):
+    unique_ids: list[str] = []
+
+@app.post("/api/analytics/aggregate-demand")
+async def post_aggregate_demand(body: AggregateDemandRequest):
+    """POST variant — accepts large unique_id lists in the request body."""
+    uid_set = set(body.unique_ids) if body.unique_ids else None
+    return _build_aggregate_demand(uid_set)
 
 
 @app.get("/api/best-methods")
@@ -3338,6 +3524,11 @@ PIPELINE_STEPS = {
         "arg": "segmentation",
         "desc": "Compute ABC classification and assign series to segments",
     },
+    "classification": {
+        "label": "Classification",
+        "arg": "classification",
+        "desc": "Run configurable ABC/XYZ classifications on demand data",
+    },
     "characterization": {
         "label": "Characterization",
         "arg": "characterize",
@@ -3370,6 +3561,7 @@ PIPELINE_STEP_ORDER = [
     "etl",
     "outlier-detection",
     "segmentation",
+    "classification",
     "characterization",
     "forecast",
     "backtest",
@@ -4233,6 +4425,295 @@ async def get_step_log_tail(step_id: int):
 
 
 # ===========================================================================
+# ABC CLASSIFICATION endpoints
+# ===========================================================================
+
+
+class ABCConfigIn(BaseModel):
+    name: str
+    metric: str = "demand"               # hits | demand | value
+    lookback_months: int = 12
+    granularity: str = "item_site"        # item_site | item
+    method: str = "cumulative_pct"        # cumulative_pct | rank_pct | rank_absolute
+    class_labels: List[str] = ["A", "B", "C"]
+    thresholds: List[float] = [80, 95]
+    segment_id: Optional[int] = None
+    is_active: bool = True
+
+
+@app.get("/api/abc/configurations")
+async def list_abc_configurations():
+    """List all ABC configurations with result summary counts."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT c.*,
+                       COUNT(r.id) AS result_count,
+                       MAX(r.computed_at) AS last_run
+                FROM {schema}.abc_configuration c
+                LEFT JOIN {schema}.abc_results r ON r.config_id = c.id
+                GROUP BY c.id
+                ORDER BY c.id
+            """)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        configs = []
+        for row in rows:
+            entry = dict(zip(cols, row))
+            for k in ("created_at", "updated_at", "last_run"):
+                if entry.get(k) is not None:
+                    entry[k] = entry[k].isoformat()
+            for k in ("class_labels", "thresholds"):
+                if isinstance(entry.get(k), str):
+                    entry[k] = json.loads(entry[k])
+            configs.append(entry)
+        return configs
+    finally:
+        conn.close()
+
+
+@app.post("/api/abc/configurations")
+async def create_abc_configuration(body: ABCConfigIn):
+    """Create a new ABC configuration."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {schema}.abc_configuration
+                    (name, metric, lookback_months, granularity, method,
+                     class_labels, thresholds, segment_id, is_active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    body.name, body.metric, body.lookback_months,
+                    body.granularity, body.method,
+                    json.dumps(body.class_labels), json.dumps(body.thresholds),
+                    body.segment_id, body.is_active,
+                ),
+            )
+            new_id = cur.fetchone()[0]
+        conn.commit()
+        return {"id": new_id, "name": body.name}
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/abc/configurations/{config_id}")
+async def get_abc_configuration(config_id: int):
+    """Get a single ABC configuration with result stats."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT c.*,
+                       COUNT(r.id) AS result_count,
+                       MAX(r.computed_at) AS last_run
+                FROM {schema}.abc_configuration c
+                LEFT JOIN {schema}.abc_results r ON r.config_id = c.id
+                WHERE c.id = %s
+                GROUP BY c.id
+            """, (config_id,))
+            cols = [d[0] for d in cur.description]
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Config {config_id} not found")
+        entry = dict(zip(cols, row))
+        for k in ("created_at", "updated_at", "last_run"):
+            if entry.get(k) is not None:
+                entry[k] = entry[k].isoformat()
+        for k in ("class_labels", "thresholds"):
+            if isinstance(entry.get(k), str):
+                entry[k] = json.loads(entry[k])
+        return entry
+    finally:
+        conn.close()
+
+
+@app.put("/api/abc/configurations/{config_id}")
+async def update_abc_configuration(config_id: int, body: ABCConfigIn):
+    """Update an ABC configuration."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE {schema}.abc_configuration SET
+                    name = %s, metric = %s, lookback_months = %s,
+                    granularity = %s, method = %s,
+                    class_labels = %s, thresholds = %s,
+                    segment_id = %s, is_active = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    body.name, body.metric, body.lookback_months,
+                    body.granularity, body.method,
+                    json.dumps(body.class_labels), json.dumps(body.thresholds),
+                    body.segment_id, body.is_active,
+                    config_id,
+                ),
+            )
+        conn.commit()
+        return {"id": config_id, "name": body.name, "updated": True}
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/abc/configurations/{config_id}")
+async def delete_abc_configuration(config_id: int):
+    """Delete an ABC configuration and its results (CASCADE)."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {schema}.abc_configuration WHERE id = %s RETURNING id",
+                (config_id,),
+            )
+            deleted = cur.fetchone()
+        conn.commit()
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Config {config_id} not found")
+        return {"deleted": True, "id": config_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/abc/run/{config_id}")
+async def run_abc_classification(config_id: int):
+    """Run a single ABC classification."""
+    _require_db()
+    from classification.abc import ABCClassifier
+    classifier = ABCClassifier(_api_config_path())
+    try:
+        summary = classifier.run_classification(config_id)
+        return summary
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/abc/run-all")
+async def run_all_abc_classifications():
+    """Run all active ABC classifications."""
+    _require_db()
+    from classification.abc import ABCClassifier
+    classifier = ABCClassifier(_api_config_path())
+    summaries = classifier.run_all_active()
+    return {"ran": len(summaries), "summaries": summaries}
+
+
+@app.get("/api/abc/results/{config_id}")
+async def get_abc_results(config_id: int, limit: int = 5000, offset: int = 0):
+    """Get classification results for a config."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        df = pd.read_sql(
+            f"""
+            SELECT unique_id, class_label, metric_value, rank, cumulative_pct, computed_at
+            FROM {schema}.abc_results
+            WHERE config_id = %s
+            ORDER BY rank
+            LIMIT %s OFFSET %s
+            """,
+            conn,
+            params=(config_id, limit, offset),
+        )
+        return df.to_dict(orient="records")
+    finally:
+        conn.close()
+
+
+@app.get("/api/abc/results/by-series/{unique_id}")
+async def get_abc_results_by_series(unique_id: str):
+    """Get all classification results for a single series."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT c.id AS config_id, c.name AS config_name,
+                       r.class_label, r.metric_value, r.rank, r.cumulative_pct
+                FROM {schema}.abc_results r
+                JOIN {schema}.abc_configuration c ON c.id = r.config_id
+                WHERE r.unique_id = %s
+                ORDER BY c.id
+            """, (unique_id,))
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+        return rows
+    finally:
+        conn.close()
+
+
+@app.get("/api/abc/summary/{config_id}")
+async def get_abc_summary(config_id: int):
+    """Distribution summary for a classification config."""
+    _require_db()
+    conn = get_conn(_api_config_path())
+    schema = get_schema(_api_config_path())
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT class_label,
+                       COUNT(*) AS count,
+                       SUM(metric_value) AS total_metric,
+                       MIN(metric_value) AS min_metric,
+                       MAX(metric_value) AS max_metric,
+                       AVG(metric_value) AS avg_metric
+                FROM {schema}.abc_results
+                WHERE config_id = %s
+                GROUP BY class_label
+                ORDER BY MIN(rank)
+            """, (config_id,))
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+        # Compute percentages
+        grand_total = sum(r["total_metric"] or 0 for r in rows)
+        grand_count = sum(r["count"] for r in rows)
+        for r in rows:
+            r["pct_count"] = round(100 * r["count"] / grand_count, 1) if grand_count else 0
+            r["pct_metric"] = round(100 * (r["total_metric"] or 0) / grand_total, 1) if grand_total else 0
+        return {"config_id": config_id, "classes": rows, "total_series": grand_count, "total_metric": grand_total}
+    finally:
+        conn.close()
+
+
+@app.get("/api/abc/price-available")
+async def check_price_available():
+    """Check if price data is available for the 'value' metric."""
+    _require_db()
+    from classification.abc import ABCClassifier
+    classifier = ABCClassifier(_api_config_path())
+    return classifier.check_price_available()
+
+
+# ===========================================================================
 # SEGMENTS endpoints
 # ===========================================================================
 
@@ -4584,6 +5065,30 @@ async def get_segment_fields():
                 ic["options"] = [it["name"] for it in item_type_options]
                 ic["options_by_id"] = {it["name"]: it["id"] for it in item_type_options}
 
+        # ── 8. Dynamic ABC classification fields ──────────────────────────
+        classification_fields = []
+        try:
+            with conn.cursor() as cur_abc:
+                cur_abc.execute(
+                    f"""
+                    SELECT c.id, c.name, c.class_labels
+                    FROM {schema}.abc_configuration c
+                    WHERE c.is_active = TRUE
+                    ORDER BY c.id
+                    """
+                )
+                for cid, cname, clabels in cur_abc.fetchall():
+                    labels = clabels if isinstance(clabels, list) else json.loads(clabels)
+                    classification_fields.append({
+                        "column": cname,
+                        "field_key": f"classification.{cname}",
+                        "type": "enum",
+                        "options": labels,
+                        "config_id": cid,
+                    })
+        except Exception:
+            pass  # abc tables may not exist yet
+
         return {
             # Backward compat (JSONB attribute key lists)
             "item": item_attrs,
@@ -4599,6 +5104,8 @@ async def get_segment_fields():
             "site_type_options": site_type_options,
             # Item type options for type_id dropdown
             "item_type_options": item_type_options,
+            # Dynamic ABC classification fields
+            "classification_fields": classification_fields,
         }
     except Exception as exc:
         logger.error(f"get_segment_fields failed: {exc}")

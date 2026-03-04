@@ -14,6 +14,7 @@ const Settings = lazy(() => import('./components/Settings'));
 const Segments = lazy(() => import('./components/Segments'));
 const UserManagement = lazy(() => import('./components/UserManagement'));
 const AuditLog = lazy(() => import('./components/AuditLog'));
+const ABCClassification = lazy(() => import('./components/ABCClassification'));
 
 /** Shared loading fallback shown while a lazy chunk downloads */
 const PageSpinner = () => (
@@ -91,6 +92,7 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
           : navLink('/', '📈', 'Time Series', true, 'nav-series')
         }
         {navLink('/segments', '🗂️', 'Segments', false, 'nav-segments')}
+        {navLink('/abc', '🏷️', 'Classifications', false, 'nav-abc')}
         {navLink('/pipeline', '⚙️', 'Pipeline', false, 'nav-pipeline')}
         {navLink('/logs', '📋', 'Process Log', false, 'nav-logs')}
         {navLink('/settings', '🔧', 'Settings', false, 'nav-settings')}
@@ -238,6 +240,7 @@ function App() {
               <Route path="/" element={<Dashboard />} />
               <Route path="/series/:uniqueId" element={<TimeSeriesViewer />} />
               <Route path="/segments" element={<Segments />} />
+              <Route path="/abc" element={<ABCClassification />} />
               <Route path="/pipeline" element={<PipelineRunner />} />
               <Route path="/logs" element={<ProcessLog />} />
               <Route path="/settings" element={<Settings />} />

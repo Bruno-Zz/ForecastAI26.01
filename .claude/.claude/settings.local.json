@@ -27,7 +27,18 @@
       "Bash(nslookup:*)",
       "Bash(npm run build:*)",
       "Bash(claude --resume:*)",
-      "Bash(where:*)"
+      "Bash(where:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(cmd.exe /c \"cd C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\frontend && npm run build\")",
+      "Bash(cmd.exe /c \"cd /d C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\frontend && npm run build\")",
+      "Bash(powershell.exe -Command \"Set-Location ''C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\frontend''; npm run build\")",
+      "Bash(powershell.exe -Command \"try { \\(Invoke-WebRequest -Uri ''http://localhost:8002/api/analytics/aggregate-demand'' -TimeoutSec 10 -UseBasicParsing\\).StatusCode } catch { $_Exception.Message }\")",
+      "Bash(powershell.exe -NoProfile -Command \"Invoke-WebRequest -Uri ''http://localhost:8002/api/analytics/aggregate-demand'' -TimeoutSec 10 -UseBasicParsing | Select-Object -ExpandProperty StatusCode\")",
+      "Bash(powershell.exe -NoProfile -Command \"Set-Location ''C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\frontend''; npm run build\")",
+      "Bash(powershell.exe -NoProfile -Command:*)",
+      "mcp__Kapture_Browser_Automation__list_tabs",
+      "mcp__Kapture_Browser_Automation__new_tab",
+      "Bash(pip show:*)"
     ],
     "defaultMode": "bypassPermissions"
   }

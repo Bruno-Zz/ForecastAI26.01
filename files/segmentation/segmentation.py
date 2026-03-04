@@ -26,6 +26,7 @@ Available field keys:
   demand.zero_ratio, demand.adi, demand.cov
   demand.has_trend, demand.is_intermittent, demand.has_seasonality
   demand.complexity_level, demand.abc_class
+  classification.{config_name}   (dynamic ABC classification labels)
 """
 
 import logging
@@ -519,6 +520,35 @@ class SegmentationEngine:
                        ON tsc.unique_id = da.unique_id
             """
             df = pd.read_sql(sql, conn)
+
+            # ── Append dynamic classification columns ──
+            # LEFT JOIN abc_results + abc_configuration to create columns like
+            # "classification.Demand Volume" → class_label for each active config.
+            try:
+                cls_df = pd.read_sql(
+                    f"""
+                    SELECT ar.unique_id,
+                           ac.name AS config_name,
+                           ar.class_label
+                    FROM {schema}.abc_results ar
+                    JOIN {schema}.abc_configuration ac ON ac.id = ar.config_id
+                    WHERE ac.is_active = TRUE
+                    """,
+                    conn,
+                )
+                if not cls_df.empty:
+                    # Pivot: rows = unique_id, cols = config_name, values = class_label
+                    cls_pivot = cls_df.pivot_table(
+                        index="unique_id",
+                        columns="config_name",
+                        values="class_label",
+                        aggfunc="first",
+                    )
+                    cls_pivot.columns = [f"classification.{c}" for c in cls_pivot.columns]
+                    df = df.merge(cls_pivot, left_on="unique_id", right_index=True, how="left")
+            except Exception as exc:
+                # Tables may not exist yet on first run — safe to skip
+                logger.debug("Could not load ABC classifications for segmentation: %s", exc)
         finally:
             conn.close()
 
@@ -692,4 +722,7 @@ class SegmentationEngine:
             return f"site_{sub}"
         if field.startswith("demand."):
             return field[len("demand."):]
+        # classification.{config_name} → "classification.{config_name}" (kept as-is)
+        if field.startswith("classification."):
+            return field
         return field
