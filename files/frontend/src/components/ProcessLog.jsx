@@ -3,6 +3,33 @@ import { useLocale } from '../contexts/LocaleContext';
 import { formatDateTime } from '../utils/formatting';
 import api from '../utils/api';
 
+const INDETERMINATE_STYLE = `
+  @keyframes pl-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(500%); }
+  }
+  .pl-slide { animation: pl-slide 1.4s ease-in-out infinite; }
+`;
+
+function ElapsedTimer({ startedAt }) {
+  const [sec, setSec] = useState(0);
+  useEffect(() => {
+    if (!startedAt) return;
+    const base = new Date(startedAt.endsWith('Z') ? startedAt : startedAt + 'Z').getTime();
+    const tick = () => setSec(Math.max(0, Math.floor((Date.now() - base) / 1000)));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [startedAt]);
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return (
+    <span className="tabular-nums font-mono">
+      {m > 0 ? `${m}m ` : ''}{String(s).padStart(2, '0')}s
+    </span>
+  );
+}
+
 /* ─── Helpers ─── */
 const STATUS_CFG = {
   success:     { bg: 'bg-emerald-100 dark:bg-emerald-900/30', text: 'text-emerald-700 dark:text-emerald-400', icon: '\u2713', dot: 'bg-emerald-500' },
@@ -44,6 +71,36 @@ function fmtDuration(sec) {
 function fmtTime(iso, locale) {
   if (!iso) return '\u2014';
   return formatDateTime(iso, locale);
+}
+
+
+/* ─── Forecast / Backtest progress bar ─── */
+function ProgressBar({ progress }) {
+  if (!progress || !progress.total) return null;
+  const { completed = 0, total, batches_done, batches_total, pct = 0, current_step } = progress;
+  const label = current_step === 'forecast' ? '📊 Forecast' : current_step === 'backtest' ? '🔁 Backtest' : '⚙️ Processing';
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="font-medium text-blue-600 dark:text-blue-400">{label}</span>
+        <span className="text-gray-500 dark:text-gray-400 tabular-nums">
+          {completed.toLocaleString()} / {total.toLocaleString()} series
+        </span>
+        {batches_total != null && batches_total > 1 && (
+          <span className="text-gray-400 dark:text-gray-500 tabular-nums">
+            batch {batches_done}/{batches_total}
+          </span>
+        )}
+        <span className="font-semibold text-blue-600 dark:text-blue-400 tabular-nums">{pct}%</span>
+      </div>
+      <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
+        <div
+          className="bg-blue-500 dark:bg-blue-400 h-1.5 rounded-full transition-all duration-500"
+          style={{ width: `${Math.min(100, pct)}%` }}
+        />
+      </div>
+    </div>
+  );
 }
 
 
@@ -159,14 +216,30 @@ function RunSteps({ runId, locale }) {
 function LiveJobDetail({ job }) {
   if (!job) return null;
   const lines = job.log_lines || [];
+  const progress = job.progress;
+  const hasProgress = progress && progress.total > 0;
+  const isRunning = job.status === 'running' || job.status === 'pending';
   return (
-    <div className="mt-2">
+    <div className="mt-2 space-y-2">
       {job.current_step && (
-        <div className="mb-2 flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
+        <div className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400">
           <Spinner cls="w-3 h-3" />
           <span>Currently running: <strong>{job.current_step}</strong></span>
         </div>
       )}
+      {hasProgress ? (
+        <ProgressBar progress={progress} />
+      ) : isRunning ? (
+        <div>
+          <div className="flex justify-between items-center text-xs text-gray-400 dark:text-gray-500 mb-1">
+            <span>Running…</span>
+            <ElapsedTimer startedAt={job.started_at} />
+          </div>
+          <div className="relative w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
+            <div className="absolute inset-y-0 left-0 w-1/4 bg-blue-500 dark:bg-blue-400 rounded-full pl-slide" />
+          </div>
+        </div>
+      ) : null}
       <LogViewer lines={lines} />
     </div>
   );
@@ -222,6 +295,8 @@ const ProcessLog = () => {
   );
 
   return (
+    <>
+    <style>{INDETERMINATE_STYLE}</style>
     <div id="logs-page" className="p-4 sm:p-6 max-w-4xl mx-auto">
       <div id="logs-header" className="flex items-center justify-between mb-6">
         <div>
@@ -258,44 +333,90 @@ const ProcessLog = () => {
             Live Processes
           </h2>
           <div className="space-y-3">
-            {activeLiveJobs.map(job => (
-              <div key={job.job_id} className="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900/30 border border-blue-200 dark:border-blue-800/50 overflow-hidden">
-                <button
-                  onClick={() => setExpandedLive(expandedLive === job.job_id ? null : job.job_id)}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
-                >
-                  <StatusBadge status={job.status} />
-                  <div className="flex-1 min-w-0">
-                    <span className="text-sm font-medium text-gray-900 dark:text-white">
-                      {job.step_label || job.step || 'Pipeline'}
-                    </span>
-                    {job.current_step && (
-                      <span className="ml-2 text-xs text-blue-500 dark:text-blue-400">
-                        {'\u25B6'} {job.current_step}
+            {activeLiveJobs.map(job => {
+              const prog = job.progress;
+              const hasProg = prog && prog.total > 0;
+              const progPct = hasProg ? Math.min(100, prog.pct || 0) : 0;
+              return (
+                <div key={job.job_id} className="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900/30 border border-blue-200 dark:border-blue-800/50 overflow-hidden">
+                  <button
+                    onClick={() => setExpandedLive(expandedLive === job.job_id ? null : job.job_id)}
+                    className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
+                  >
+                    <StatusBadge status={job.status} />
+                    <div className="flex-1 min-w-0">
+                      <span className="text-sm font-medium text-gray-900 dark:text-white">
+                        {job.step_label || job.step || 'Pipeline'}
+                      </span>
+                      {job.current_step && (
+                        <span className="ml-2 text-xs text-blue-500 dark:text-blue-400">
+                          {'\u25B6'} {job.current_step}
+                        </span>
+                      )}
+                    </div>
+                    {hasProg && (
+                      <span className="text-xs font-semibold text-blue-600 dark:text-blue-400 tabular-nums flex-shrink-0">
+                        {progPct}%
                       </span>
                     )}
-                  </div>
-                  <span className="text-[10px] font-mono text-gray-400 dark:text-gray-500">{job.job_id}</span>
-                  {job.started_at && (
-                    <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums hidden sm:block">
-                      {fmtTime(job.started_at, locale)}
+                    <span className="text-[10px] font-mono text-gray-400 dark:text-gray-500">{job.job_id}</span>
+                    {job.started_at && (
+                      <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums hidden sm:block">
+                        {fmtTime(job.started_at, locale)}
+                      </span>
+                    )}
+                    <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums">
+                      {job.log_lines ? `${job.log_lines.length} lines` : ''}
                     </span>
+                    <svg className={`w-4 h-4 text-gray-400 flex-shrink-0 transition-transform ${expandedLive === job.job_id ? 'rotate-180' : ''}`}
+                      fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+
+                  {/* Progress bar — always visible while running */}
+                  {(job.status === 'running' || job.status === 'pending' || hasProg) && (
+                    <div className="px-4 pb-2 -mt-1">
+                      {hasProg ? (
+                        /* Series-count bar for forecast / backtest */
+                        <>
+                          <div className="flex items-center justify-between text-[10px] text-gray-400 dark:text-gray-500 mb-0.5">
+                            <span>
+                              {prog.current_step === 'forecast' ? '📊 Forecast' : prog.current_step === 'backtest' ? '🔁 Backtest' : '⚙️ Processing'}
+                              {prog.batches_total > 1 && ` · batch ${prog.batches_done}/${prog.batches_total}`}
+                            </span>
+                            <span className="tabular-nums">{(prog.completed || 0).toLocaleString()} / {prog.total.toLocaleString()} series</span>
+                          </div>
+                          <div className="w-full bg-gray-100 dark:bg-gray-700 rounded-full h-1 overflow-hidden">
+                            <div
+                              className="bg-blue-500 dark:bg-blue-400 h-1 rounded-full transition-all duration-500"
+                              style={{ width: `${progPct}%` }}
+                            />
+                          </div>
+                        </>
+                      ) : (
+                        /* Indeterminate bar for all other running steps */
+                        <>
+                          <div className="flex items-center justify-between text-[10px] text-gray-400 dark:text-gray-500 mb-0.5">
+                            <span>Running…</span>
+                            <ElapsedTimer startedAt={job.started_at} />
+                          </div>
+                          <div className="relative w-full bg-gray-100 dark:bg-gray-700 rounded-full h-1 overflow-hidden">
+                            <div className="absolute inset-y-0 left-0 w-1/4 bg-blue-500 dark:bg-blue-400 rounded-full pl-slide" />
+                          </div>
+                        </>
+                      )}
+                    </div>
                   )}
-                  <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums">
-                    {job.log_lines ? `${job.log_lines.length} lines` : ''}
-                  </span>
-                  <svg className={`w-4 h-4 text-gray-400 flex-shrink-0 transition-transform ${expandedLive === job.job_id ? 'rotate-180' : ''}`}
-                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
-                {expandedLive === job.job_id && (
-                  <div className="px-4 pb-4 border-t border-gray-100 dark:border-gray-700">
-                    <LiveJobDetail job={job} />
-                  </div>
-                )}
-              </div>
-            ))}
+
+                  {expandedLive === job.job_id && (
+                    <div className="px-4 pb-4 border-t border-gray-100 dark:border-gray-700">
+                      <LiveJobDetail job={job} />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -395,6 +516,7 @@ const ProcessLog = () => {
         )}
       </div>
     </div>
+    </>
   );
 };
 

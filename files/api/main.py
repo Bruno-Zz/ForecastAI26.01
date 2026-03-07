@@ -4018,11 +4018,16 @@ async def delete_hyperparams(unique_id: str, method: Optional[str] = None):
 
 @app.get("/api/pipeline/jobs")
 async def get_pipeline_jobs():
-    """Return all recent pipeline jobs (latest first)."""
+    """Return all recent pipeline jobs (latest first), each enriched with parsed progress."""
     with _pipeline_lock:
         _cleanup_stale_jobs()
         jobs = list(_pipeline_jobs.values())
-    return sorted(jobs, key=lambda j: j.get("started_at") or "", reverse=True)
+    enriched = []
+    for job in jobs:
+        j = dict(job)
+        j["progress"] = _extract_progress(j.get("log_lines", []))
+        enriched.append(j)
+    return sorted(enriched, key=lambda j: j.get("started_at") or "", reverse=True)
 
 
 def _extract_progress(log_lines: list) -> dict:
@@ -4101,6 +4106,21 @@ def _extract_progress(log_lines: list) -> dict:
         progress["overall_pct"] = 97
     else:
         progress["overall_pct"] = progress.get("pct", 0)
+
+    # 4) Include nested keys matching the SSE-parsed structure so the frontend
+    #    can use the same ForecastProgressBar component whether data comes via
+    #    SSE or polling.
+    if progress.get("total"):
+        nested = {
+            "completed": progress.get("completed", 0),
+            "total": progress["total"],
+            "batches_done": progress.get("batches_done"),
+            "batches_total": progress.get("batches_total"),
+        }
+        if step == "forecast":
+            progress["FORECAST_PROGRESS"] = nested
+        elif step == "backtest":
+            progress["BACKTEST_PROGRESS"] = nested
 
     return progress
 

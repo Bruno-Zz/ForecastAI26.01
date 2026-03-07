@@ -65,6 +65,35 @@ const Spinner = ({ cls = 'w-4 h-4' }) => (
   </svg>
 );
 
+/** Ticking elapsed-time label — updates every second while mounted */
+const ElapsedTimer = ({ startedAt }) => {
+  const [sec, setSec] = React.useState(0);
+  React.useEffect(() => {
+    if (!startedAt) return;
+    const base = parseUTC(startedAt).getTime();
+    const tick = () => setSec(Math.max(0, Math.floor((Date.now() - base) / 1000)));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [startedAt]);
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return (
+    <span className="tabular-nums font-mono">
+      {m > 0 ? `${m}m ` : ''}{String(s).padStart(2, '0')}s
+    </span>
+  );
+};
+
+/** Indeterminate sliding progress bar (CSS animation injected once) */
+const INDETERMINATE_STYLE = `
+  @keyframes pr-slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(500%); }
+  }
+  .pr-slide { animation: pr-slide 1.4s ease-in-out infinite; }
+`;
+
 /** Status badge */
 const StatusBadge = ({ status }) => {
   const map = {
@@ -232,23 +261,39 @@ const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs, l
           />
         )}
 
-        {/* Live series progress while forecast or backtest is active */}
-        {isRunning && (job?.progress?.FORECAST_PROGRESS || job?.progress?.BACKTEST_PROGRESS) && (
-          <div className="mt-2 space-y-1.5">
-            {job.progress?.FORECAST_PROGRESS && (
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-16 flex-shrink-0">📊 Forecast</span>
-                <div className="flex-1"><ForecastProgressBar progress={job.progress.FORECAST_PROGRESS} label="series" /></div>
-              </div>
-            )}
-            {job.progress?.BACKTEST_PROGRESS && (
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-16 flex-shrink-0">🔁 Backtest</span>
-                <div className="flex-1"><ForecastProgressBar progress={job.progress.BACKTEST_PROGRESS} label="series" /></div>
-              </div>
-            )}
-          </div>
-        )}
+        {/* Progress block — indeterminate while running any step; series bars for forecast/backtest */}
+        {job && (() => {
+          const fp = job.progress?.FORECAST_PROGRESS;
+          const bp = job.progress?.BACKTEST_PROGRESS;
+          const hasSeriesData = fp || bp;
+          return (
+            <div className="mt-2 space-y-1.5">
+              {fp && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-16 flex-shrink-0">📊 Forecast</span>
+                  <div className="flex-1"><ForecastProgressBar progress={fp} label="series" /></div>
+                </div>
+              )}
+              {bp && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-16 flex-shrink-0">🔁 Backtest</span>
+                  <div className="flex-1"><ForecastProgressBar progress={bp} label="series" /></div>
+                </div>
+              )}
+              {isRunning && !hasSeriesData && (
+                <div>
+                  <div className="flex justify-between items-center text-xs text-gray-400 dark:text-gray-500 mb-1">
+                    <span>{job.current_step ? `Running: ${job.current_step}…` : 'Pipeline running…'}</span>
+                    <ElapsedTimer startedAt={job.started_at} />
+                  </div>
+                  <div className="relative w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
+                    <div className="absolute inset-y-0 left-0 w-1/4 bg-blue-500 dark:bg-blue-400 rounded-full pr-slide" />
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Timing */}
         {job?.started_at && (
@@ -346,13 +391,27 @@ const StepCard = ({ step, onRun, onKill, activeJob, onToggleLogs, showLogs, isFu
           </div>
         )}
 
-        {/* Live series progress for forecast and backtest steps */}
-        {step.id === 'forecast' && activeJob?.progress?.FORECAST_PROGRESS && (
-          <ForecastProgressBar progress={activeJob.progress.FORECAST_PROGRESS} label="series" />
-        )}
-        {step.id === 'backtest' && activeJob?.progress?.BACKTEST_PROGRESS && (
-          <ForecastProgressBar progress={activeJob.progress.BACKTEST_PROGRESS} label="series" />
-        )}
+        {/* Progress block — always visible while running; stays after completion for forecast/backtest */}
+        {(isRunning || isDone) && (() => {
+          const fp = step.id === 'forecast' && activeJob?.progress?.FORECAST_PROGRESS;
+          const bp = step.id === 'backtest' && activeJob?.progress?.BACKTEST_PROGRESS;
+          // Specific series-count bar (forecast / backtest with data)
+          if (fp) return <div className="mt-2"><ForecastProgressBar progress={fp} label="series" /></div>;
+          if (bp) return <div className="mt-2"><ForecastProgressBar progress={bp} label="series" /></div>;
+          // Indeterminate bar while running (no series data yet or step has none)
+          if (isRunning) return (
+            <div className="mt-2">
+              <div className="flex justify-between items-center text-xs text-gray-400 dark:text-gray-500 mb-1">
+                <span>Running…</span>
+                <ElapsedTimer startedAt={activeJob?.started_at} />
+              </div>
+              <div className="relative w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 overflow-hidden">
+                <div className="absolute inset-y-0 left-0 w-1/4 bg-blue-500 dark:bg-blue-400 rounded-full pr-slide" />
+              </div>
+            </div>
+          );
+          return null;
+        })()}
 
         {/* Log toggle */}
         {hasJob && (
@@ -457,6 +516,23 @@ export const PipelineRunner = () => {
       } catch { /* ignore */ }
       es.close();
       delete eventSources.current[key];
+      // Confirm final status from server — SSE may fire before the backend fully
+      // settles, causing a transient mismatch (e.g. "error" in runner vs "running" in log).
+      setTimeout(async () => {
+        try {
+          const r = await api.get(`/pipeline/jobs/${jobId}`);
+          setter(prev => {
+            if (prev && typeof prev === 'object' && !prev.job_id) {
+              const job = prev[key];
+              if (!job || job.job_id !== jobId) return prev;
+              return { ...prev, [key]: r.data };
+            } else {
+              if (!prev || prev.job_id !== jobId) return prev;
+              return r.data;
+            }
+          });
+        } catch { /* ignore */ }
+      }, 2000);
     });
 
     es.onerror = () => { es.close(); delete eventSources.current[key]; };
@@ -534,19 +610,25 @@ export const PipelineRunner = () => {
     }
   }, [fullJob, jobs, openSSE]);
 
-  // Poll all running jobs
+  // Poll running jobs, plus recently-ended jobs (for status/progress sync)
   useEffect(() => {
     const interval = setInterval(async () => {
+      const nowMs = Date.now();
+      const isLiveJob = (j) =>
+        j.status === 'running' || j.status === 'pending' ||
+        // Re-poll for up to 8s after completion to catch server-side status corrections
+        (j.ended_at && nowMs - new Date(j.ended_at).getTime() < 8000);
+
       // Individual step jobs
-      const runningEntries = Object.entries(jobs).filter(([, j]) => j.status === 'running' || j.status === 'pending');
-      for (const [stepId, job] of runningEntries) {
+      const liveEntries = Object.entries(jobs).filter(([, j]) => isLiveJob(j));
+      for (const [stepId, job] of liveEntries) {
         try {
           const r = await api.get(`/pipeline/jobs/${job.job_id}`);
           setJobs(prev => ({ ...prev, [stepId]: r.data }));
         } catch { /* ignore */ }
       }
       // Full-pipeline job
-      if (fullJob && (fullJob.status === 'running' || fullJob.status === 'pending')) {
+      if (fullJob && isLiveJob(fullJob)) {
         try {
           const r = await api.get(`/pipeline/jobs/${fullJob.job_id}`);
           setFullJob(r.data);
@@ -614,6 +696,8 @@ export const PipelineRunner = () => {
   const anyRunning = isFullPipelineRunning || Object.values(jobs).some(j => j.status === 'running');
 
   return (
+    <>
+    <style>{INDETERMINATE_STYLE}</style>
     <div className="p-4 sm:p-6 max-w-3xl mx-auto">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Pipeline Runner</h1>
@@ -715,6 +799,7 @@ export const PipelineRunner = () => {
         </ul>
       </div>
     </div>
+    </>
   );
 };
 
