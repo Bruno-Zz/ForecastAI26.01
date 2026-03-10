@@ -52,8 +52,8 @@ class ParameterResolver:
     into memory for fast lookup during pipeline execution.
     """
 
-    def __init__(self, config_path: Union[str, Path]):
-        self.config_path = str(config_path)
+    def __init__(self, config_path=None):
+        self.config_path = str(config_path) if config_path else None
         # {unique_id: {btype: param_id}}
         self._assignment_map: Dict[str, Dict[str, Optional[int]]] = {}
         # {param_id: parameters_set dict}
@@ -73,8 +73,8 @@ class ParameterResolver:
         """Load all three tables in a single DB connection."""
         from db.db import get_conn, get_schema
 
-        schema = get_schema(self.config_path)
-        conn = get_conn(self.config_path)
+        schema = get_schema()
+        conn = get_conn()
         try:
             with conn.cursor() as cur:
                 # 1. series_parameter_assignment
@@ -226,7 +226,7 @@ class ParameterResolver:
         a component constructor as config_override, or None if using defaults.
         """
         if param_id is None:
-            # Default parameter set — component will read from config.yaml as-is
+            # Default parameter set — component loads defaults from DB
             return None
 
         params_set = self._param_by_id.get(param_id)

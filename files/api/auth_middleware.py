@@ -32,11 +32,11 @@ PUBLIC_PREFIXES = (
 class JWTAuthMiddleware(BaseHTTPMiddleware):
     """Validate Bearer JWT on every request (except whitelisted public paths)."""
 
-    def __init__(self, app, secret_key: str, schema: str, config_path: str):
+    def __init__(self, app, secret_key: str, schema: str, config_path=None):
         super().__init__(app)
         self.secret_key = secret_key
         self.schema = schema
-        self.config_path = config_path
+        # config_path accepted but unused — DB credentials come from env vars
 
     async def dispatch(self, request, call_next):
         path = request.url.path
@@ -80,7 +80,7 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
             try:
                 from db.db import get_conn
 
-                conn = get_conn(self.config_path)
+                conn = get_conn()
                 try:
                     with conn.cursor() as cur:
                         cur.execute(

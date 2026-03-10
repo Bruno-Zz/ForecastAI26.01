@@ -18,9 +18,6 @@ Usage:
     # Only run characterization (requires demand_actuals in DB)
     python run_pipeline.py --only characterize
 
-    # Custom config and output
-    python run_pipeline.py --config ./config/config.yaml --output ./output
-
     # Discover database schema
     python run_pipeline.py --discover-schema
 """
@@ -50,7 +47,8 @@ def setup_logging(level: str = "INFO", log_file: str = None):
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=handlers
+        handlers=handlers,
+        force=True,  # override any handlers set by imported libraries
     )
 
 
@@ -159,11 +157,18 @@ def _load_segment_series(segment_id: int, config_path: str):
         conn.close()
 
 
-def _collect_all_methods(config_path: str) -> list:
-    """Gather the union of ALL methods from every method_selection category in config."""
-    import yaml
-    with open(config_path, 'r') as f:
-        cfg = yaml.safe_load(f)
+def _collect_all_methods(config_path: str = None) -> list:
+    """Gather the union of ALL methods from every method_selection category in DB config."""
+    try:
+        if config_path:
+            import yaml
+            with open(config_path, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+        else:
+            raise FileNotFoundError
+    except (FileNotFoundError, OSError):
+        from db.db import load_config_from_db
+        cfg = load_config_from_db()
     method_lists = cfg.get('forecasting', {}).get('method_selection', {})
     all_methods = set()
     for methods in method_lists.values():
@@ -490,8 +495,8 @@ Examples:
     )
 
     parser.add_argument(
-        '--config', type=str, default='config/config.yaml',
-        help='Path to config.yaml (default: config/config.yaml)'
+        '--config', type=str, default=None,
+        help='Optional path to a YAML config file (legacy; configuration is loaded from DB by default)'
     )
 
     # Step control
@@ -549,11 +554,12 @@ Examples:
     log_file = args.log_file
     if log_file is None:
         try:
-            import yaml
-            with open(args.config, 'r') as f:
-                cfg = yaml.safe_load(f)
+            from db.db import load_config_from_db
+            cfg = load_config_from_db()
             log_file = cfg.get('logging', {}).get('file')
         except Exception:
+            pass
+        if not log_file:
             log_file = './logs/forecasting.log'
 
     setup_logging(args.log_level, log_file)

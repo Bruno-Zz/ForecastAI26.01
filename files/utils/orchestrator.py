@@ -91,9 +91,16 @@ def _dask_forecast_batch(config_path: str,
     # Recompute eligibility from current config thresholds so we don't rely on
     # stale booleans that may have been stored with different threshold settings.
     try:
-        import yaml as _yaml
-        with open(config_path, 'r') as _fh:
-            _cfg = _yaml.safe_load(_fh)
+        if config_path:
+            import yaml as _yaml
+            with open(config_path, 'r') as _fh:
+                _cfg = _yaml.safe_load(_fh) or {}
+        else:
+            raise FileNotFoundError
+    except (FileNotFoundError, OSError):
+        from db.db import load_config_from_db
+        _cfg = load_config_from_db()
+    try:
         if config_override:
             from utils.parameter_resolver import ParameterResolver
             _cfg = ParameterResolver.deep_merge(_cfg, config_override)
@@ -385,11 +392,19 @@ class ForecastOrchestrator:
     Orchestrates the full forecasting pipeline from ETL through distribution fitting.
     """
 
-    def __init__(self, config_path: str = "config/config.yaml"):
+    def __init__(self, config_path: str = None):
         """Initialize orchestrator with configuration."""
+        try:
+            if config_path:
+                with open(config_path, 'r') as f:
+                    self.config = yaml.safe_load(f) or {}
+            else:
+                raise FileNotFoundError
+        except (FileNotFoundError, OSError):
+            from db.db import load_config_from_db
+            self.config = load_config_from_db()
+        # Keep config_path so it can be passed to Dask worker functions (picklable)
         self.config_path = config_path
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
 
         self.parallel_config = self.config['parallel']
         self.output_config = self.config['output']
@@ -963,7 +978,7 @@ class ForecastOrchestrator:
             # Serial mode — iterate over parameter groups
             n_series = len(characteristics_df)
             self.logger.info("Running forecasting in serial mode...")
-            self.logger.info(f"[FORECAST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total=1")
+            print(f"[FORECAST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total=1", flush=True)
             group_results = []
             for config_override, uids in param_groups:
                 grp_chars = characteristics_df[characteristics_df['unique_id'].isin(uids)]
@@ -972,7 +987,7 @@ class ForecastOrchestrator:
                 if not grp_fc.empty:
                     group_results.append(grp_fc)
             forecasts_df = pd.concat(group_results, ignore_index=True) if group_results else pd.DataFrame()
-            self.logger.info(f"[FORECAST_PROGRESS] completed={n_series} total={n_series} batches_done=1 batches_total=1")
+            print(f"[FORECAST_PROGRESS] completed={n_series} total={n_series} batches_done=1 batches_total=1", flush=True)
         else:
             # Parallel with Dask — each parameter group is sub-batched separately
             self.logger.info(f"Running parallel forecasting with Dask, batch_size={batch_size}...")
@@ -1000,7 +1015,7 @@ class ForecastOrchestrator:
 
             n_batches = len(futures)
             self.logger.info(f"  {n_series} series → {n_batches} batches")
-            self.logger.info(f"[FORECAST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total={n_batches}")
+            print(f"[FORECAST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total={n_batches}", flush=True)
 
             results = []
             completed_series = 0
@@ -1023,9 +1038,10 @@ class ForecastOrchestrator:
                     completed_series = min(completed_batches * batch_size, n_series)
                 pbar.update(1)
                 pbar.set_postfix_str(f"{completed_series}/{n_series} series", refresh=False)
-                self.logger.info(
+                print(
                     f"[FORECAST_PROGRESS] completed={completed_series} total={n_series} "
-                    f"batches_done={completed_batches} batches_total={n_batches}"
+                    f"batches_done={completed_batches} batches_total={n_batches}",
+                    flush=True,
                 )
             pbar.close()
 
@@ -1145,7 +1161,7 @@ class ForecastOrchestrator:
                 f"Running parallel backtesting with Dask "
                 f"({n_series} series → {n_batches} batches of ~{batch_size})..."
             )
-            self.logger.info(f"[BACKTEST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total={n_batches}")
+            print(f"[BACKTEST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total={n_batches}", flush=True)
 
             futures = []
             for b in range(n_batches):
@@ -1183,9 +1199,10 @@ class ForecastOrchestrator:
                     self.logger.warning(f"Backtest batch failed: {e}")
                 pbar.update(1)
                 pbar.set_postfix_str(f"{completed_series}/{n_series} series", refresh=False)
-                self.logger.info(
+                print(
                     f"[BACKTEST_PROGRESS] completed={completed_series} total={n_series} "
-                    f"batches_done={completed_batches} batches_total={n_batches}"
+                    f"batches_done={completed_batches} batches_total={n_batches}",
+                    flush=True,
                 )
             pbar.close()
 
@@ -1194,7 +1211,7 @@ class ForecastOrchestrator:
         else:
             # ---- Serial fallback ----
             self.logger.info(f"Running serial backtesting ({n_series} series)...")
-            self.logger.info(f"[BACKTEST_PROGRESS] completed=0 total={n_series}")
+            print(f"[BACKTEST_PROGRESS] completed=0 total={n_series}", flush=True)
 
             # Build a combined forecast function that delegates to the right forecaster
             def _combined_forecast_fn(df, unique_id, methods, characteristics, **kw):
@@ -1248,7 +1265,7 @@ class ForecastOrchestrator:
                         all_metrics.append(metrics)
                 except Exception as e:
                     self.logger.warning(f"Backtest failed for {unique_id}: {e}")
-                self.logger.info(f"[BACKTEST_PROGRESS] completed={idx+1} total={n_series}")
+                print(f"[BACKTEST_PROGRESS] completed={idx+1} total={n_series}", flush=True)
 
         # Combine metrics
         metrics_df = pd.concat(all_metrics, ignore_index=True) if all_metrics else pd.DataFrame()

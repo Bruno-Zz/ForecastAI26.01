@@ -2,22 +2,41 @@
 Database helpers for the ForecastAI PostgreSQL backend (zcube schema).
 
 Provides:
-    get_conn(config_path)    – returns a psycopg2 connection
-    init_schema(config_path) – creates the zcube schema and all required tables
+    get_conn()               – returns a psycopg2 connection
+    get_schema()             – returns the target schema name
+    load_config_from_db()    – load all default parameter sets as a config dict
+    init_schema()            – creates the zcube schema and all required tables
     bulk_insert(...)         – generic TRUNCATE + execute_values helper
     jsonb_serialize(obj)     – converts numpy/pandas objects to JSON-safe Python
+
+Connection credentials are read from (in priority order):
+  1. config/config.yaml  — minimal file with only database section
+  2. DB_* environment variables (or .env file loaded via python-dotenv)
+
+All other settings (auth, ETL source DB, logging, forecasting parameters,
+etc.) are stored in the zcube.parameters table — see load_config_from_db().
 """
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
 import psycopg2
 import psycopg2.extras
-import yaml
+
+# Load .env if present (python-dotenv is in requirements)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env", override=False)
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
+
+# ─── resolve the canonical config.yaml location once at import time ──────────
+_CONFIG_YAML = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -25,36 +44,105 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _load_pg_config(config_path: Union[str, Path]) -> dict:
-    """Read the postgres block from config.yaml."""
-    with open(config_path, "r") as f:
-        cfg = yaml.safe_load(f)
-    return cfg["data_source"]["postgres"]
-
-
-def get_conn(config_path: Union[str, Path]) -> psycopg2.extensions.connection:
+def _get_pg_config() -> dict:
     """
-    Create and return a new psycopg2 connection using config.yaml settings.
+    Read PostgreSQL connection settings.
 
+    Priority:
+      1. config/config.yaml  →  database:  section
+      2. DB_* environment variables (populated from .env or the process environment)
+    """
+    yaml_cfg: dict = {}
+    if _CONFIG_YAML.exists():
+        try:
+            import yaml
+            with open(_CONFIG_YAML, "r") as fh:
+                raw = yaml.safe_load(fh) or {}
+            yaml_cfg = raw.get("database", {})
+        except Exception as exc:
+            logger.debug("Could not read config.yaml database section: %s", exc)
+
+    def _get(yaml_key: str, env_key: str, default: str) -> str:
+        return yaml_cfg.get(yaml_key) or os.environ.get(env_key, default)
+
+    return {
+        "host":     _get("host",     "DB_HOST",     "localhost"),
+        "port":     int(_get("port",     "DB_PORT",     "5432")),
+        "database": _get("name",     "DB_NAME",     "postgres"),
+        "user":     _get("user",     "DB_USER",     "postgres"),
+        "password": _get("password", "DB_PASSWORD", ""),
+        "schema":   _get("schema",   "DB_SCHEMA",   "zcube"),
+        "sslmode":  _get("sslmode",  "DB_SSLMODE",  "disable"),
+    }
+
+
+def get_conn(config_path=None) -> psycopg2.extensions.connection:
+    """
+    Create and return a new psycopg2 connection.
+
+    Credentials come from config/config.yaml (database section) or DB_* env vars.
+    The legacy *config_path* parameter is accepted but ignored.
     The caller is responsible for calling conn.close() when done.
     """
-    pg = _load_pg_config(config_path)
+    pg = _get_pg_config()
     conn = psycopg2.connect(
-        host=pg.get("host", "localhost"),
-        port=pg.get("port", 5432),
-        dbname=pg.get("database", "postgres"),
-        user=pg.get("user", "postgres"),
-        password=pg.get("password", ""),
-        options=f"-c search_path={pg.get('schema', 'zcube')},public",
+        host=pg["host"],
+        port=pg["port"],
+        dbname=pg["database"],
+        user=pg["user"],
+        password=pg["password"],
+        sslmode=pg["sslmode"],
+        options=f"-c search_path={pg['schema']},public",
     )
     conn.autocommit = False
     return conn
 
 
-def get_schema(config_path: Union[str, Path]) -> str:
-    """Return the schema name from config.yaml (default 'zcube')."""
-    pg = _load_pg_config(config_path)
-    return pg.get("schema", "zcube")
+def get_schema(config_path=None) -> str:
+    """Return the target schema name.
+
+    Reads from config/config.yaml (database.schema) or DB_SCHEMA env var.
+    The legacy *config_path* parameter is accepted but ignored.
+    """
+    return _get_pg_config()["schema"]
+
+
+def load_config_from_db() -> dict:
+    """
+    Load all *default* parameter sets from the DB and return them as a
+    unified config dict keyed by parameter_type.
+
+    This is the runtime replacement for reading config.yaml.  Components call
+    this when they cannot find a config file on disk.
+
+    Returns a dict such as:
+        {
+            'outlier_detection': {...},
+            'characterization': {...},
+            'forecasting': {...},
+            ...
+        }
+    """
+    schema = get_schema()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT parameter_type, parameters_set "
+                f"FROM {schema}.parameters WHERE is_default = TRUE"
+            )
+            result: dict = {}
+            for param_type, param_set in cur.fetchall():
+                result[param_type] = (
+                    param_set if isinstance(param_set, dict)
+                    else json.loads(param_set or "{}")
+                )
+            return result
+    except Exception as exc:
+        logger.warning("load_config_from_db failed: %s — returning empty config", exc)
+        return {}
+    finally:
+        conn.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -109,14 +197,14 @@ def jsonb_serialize(obj):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def init_schema(config_path: Union[str, Path]) -> None:
+def init_schema(config_path=None) -> None:
     """
     Ensure the zcube schema and all required tables exist.
 
     Safe to call repeatedly — uses IF NOT EXISTS everywhere.
+    The legacy *config_path* parameter is accepted but ignored.
     """
-    pg = _load_pg_config(config_path)
-    schema = pg.get("schema", "zcube")
+    schema = get_schema()
 
     ddl = f"""
     -- Schema
@@ -906,7 +994,7 @@ def init_schema(config_path: Union[str, Path]) -> None:
         """,
     ]
 
-    conn = get_conn(config_path)
+    conn = get_conn()
     try:
         # Phase 1: CREATE TABLE statements + seed data — all or nothing
         with conn.cursor() as cur:
@@ -946,10 +1034,10 @@ def init_schema(config_path: Union[str, Path]) -> None:
 
 
 def bulk_insert(
-    config_path: Union[str, Path],
-    table_name: str,
-    columns: Sequence[str],
-    rows: Sequence[Tuple],
+    config_path=None,
+    table_name: str = "",
+    columns: Sequence[str] = (),
+    rows: Sequence[Tuple] = (),
     *,
     truncate: bool = True,
     delete_where: Optional[str] = None,
@@ -960,8 +1048,8 @@ def bulk_insert(
 
     Parameters
     ----------
-    config_path : str | Path
-        Path to config.yaml.
+    config_path : ignored
+        Accepted for backward compatibility; credentials come from env vars.
     table_name : str
         Fully-qualified table name, e.g. ``'zcube.forecast_results'``.
     columns : sequence of str
@@ -992,7 +1080,7 @@ def bulk_insert(
     cols_sql = ", ".join(columns)
     insert_sql = f"INSERT INTO {table_name} ({cols_sql}) VALUES %s"
 
-    conn = get_conn(config_path)
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             if delete_where:
@@ -1016,8 +1104,8 @@ def bulk_insert(
 
 
 def load_table(
-    config_path: Union[str, Path],
-    table_name: str,
+    config_path=None,
+    table_name: str = "",
     columns: str = "*",
     where: str = "",
 ) -> "pd.DataFrame":
@@ -1026,8 +1114,8 @@ def load_table(
 
     Parameters
     ----------
-    config_path : str | Path
-        Path to config.yaml.
+    config_path : ignored
+        Accepted for backward compatibility; credentials come from env vars.
     table_name : str
         Fully-qualified table name, e.g. ``'zcube.backtest_metrics'``.
     columns : str
@@ -1045,7 +1133,7 @@ def load_table(
     if where:
         query += f" WHERE {where}"
 
-    conn = get_conn(config_path)
+    conn = get_conn()
     try:
         df = pd.read_sql(query, conn)
         return df

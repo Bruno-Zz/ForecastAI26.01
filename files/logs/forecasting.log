@@ -1,0 +1,98 @@
+2026-03-10 01:18:52,985 - run_pipeline - INFO - Running single step: outlier-detection
+2026-03-10 01:18:53,735 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 01:18:53,735 - utils.orchestrator - INFO - STEP 1b: Outlier Detection & Correction
+2026-03-10 01:18:53,736 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 01:18:53,816 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 01:18:53,828 - outlier.detection - INFO - OutlierDetector initialized: detection=iqr, correction=clip, enabled=True
+2026-03-10 01:18:53,875 - outlier.detection - INFO - Running outlier detection on 3990 series (method=iqr, correction=clip)
+2026-03-10 01:19:47,111 - outlier.detection - INFO - Outlier detection complete: 21435 outliers detected across 2758 series (of 3990 total)
+2026-03-10 01:20:09,158 - utils.orchestrator - INFO - Corrected data saved to zcube.demand_actuals (407,755 rows updated)
+2026-03-10 01:20:10,252 - utils.orchestrator - INFO - Outliers saved to zcube.detected_outliers (21,435 outliers)
+2026-03-10 01:31:39,942 - run_pipeline - INFO - Running single step: outlier-detection
+2026-03-10 01:31:40,784 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 01:31:40,784 - utils.orchestrator - INFO - STEP 1b: Outlier Detection & Correction
+2026-03-10 01:31:40,784 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 01:31:40,859 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 01:31:40,870 - outlier.detection - INFO - OutlierDetector initialized: detection=iqr, correction=clip, enabled=True
+2026-03-10 01:31:40,919 - outlier.detection - INFO - Running outlier detection on 3990 series (method=iqr, correction=clip)
+2026-03-10 01:32:39,763 - outlier.detection - INFO - Outlier detection complete: 21435 outliers detected across 2758 series (of 3990 total)
+2026-03-10 01:32:56,927 - run_pipeline - INFO - Running single step: segmentation
+2026-03-10 01:32:57,016 - segmentation.segmentation - INFO - Segmentation: computing ABC classification …
+2026-03-10 01:33:00,159 - segmentation.segmentation - INFO - ABC classification: A=173  B=462  C=3355
+2026-03-10 01:33:00,515 - segmentation.segmentation - INFO -   Segment 'All': 3990 series
+2026-03-10 01:33:02,011 - utils.orchestrator - INFO - Corrected data saved to zcube.demand_actuals (407,755 rows updated)
+2026-03-10 01:33:02,017 - segmentation.segmentation - INFO - Segment 24: assigned 711 series
+2026-03-10 01:33:02,018 - segmentation.segmentation - INFO -   Segment 'Green': 711 series
+2026-03-10 01:33:02,101 - segmentation.segmentation - INFO - Segment 42: assigned 170 series
+2026-03-10 01:33:02,102 - segmentation.segmentation - INFO -   Segment 'packaging': 170 series
+2026-03-10 01:33:02,194 - segmentation.segmentation - INFO - Segment 44: assigned 146 series
+2026-03-10 01:33:02,195 - segmentation.segmentation - INFO -   Segment 'Hardfruits': 146 series
+2026-03-10 01:33:02,195 - segmentation.segmentation - INFO - Segmentation: resolving parameter assignments …
+2026-03-10 01:33:02,592 - segmentation.segmentation - INFO - Resolved parameter assignments for 3990 series
+2026-03-10 01:33:02,595 - segmentation.segmentation - INFO -   Parameter assignments resolved for 3990 series
+2026-03-10 01:33:03,332 - utils.orchestrator - INFO - Outliers saved to zcube.detected_outliers (21,435 outliers)
+2026-03-10 01:33:31,416 - run_pipeline - INFO - Running single step: characterize
+2026-03-10 01:33:31,981 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 01:33:31,981 - utils.orchestrator - INFO - STEP 2: Time Series Characterization
+2026-03-10 01:33:31,982 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 01:33:32,060 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 01:33:32,145 - characterization.characterization - INFO - Starting characterization of 3990 time series
+2026-03-10 01:33:33,978 - characterization.characterization - INFO -   Characterizing series 100/3990 (14787_2200)
+2026-03-10 01:33:35,784 - characterization.characterization - INFO -   Characterizing series 200/3990 (16646_1374)
+2026-03-10 01:33:37,536 - characterization.characterization - INFO -   Characterizing series 300/3990 (2451_5297)
+2026-03-10 01:33:39,332 - characterization.characterization - INFO -   Characterizing series 400/3990 (28253_5820)
+2026-03-10 01:33:41,176 - characterization.characterization - INFO -   Characterizing series 500/3990 (29041_2967)
+2026-03-10 01:33:42,937 - characterization.characterization - INFO -   Characterizing series 600/3990 (30098_1242)
+2026-03-10 01:33:44,652 - characterization.characterization - INFO -   Characterizing series 700/3990 (30668_937)
+2026-03-10 01:33:46,407 - characterization.characterization - INFO -   Characterizing series 800/3990 (32369_910)
+2026-03-10 01:33:48,175 - characterization.characterization - INFO -   Characterizing series 900/3990 (33225_3040)
+2026-03-10 01:33:50,040 - characterization.characterization - INFO -   Characterizing series 1000/3990 (34035_2329)
+2026-03-10 01:33:51,815 - characterization.characterization - INFO -   Characterizing series 1100/3990 (34883_1376)
+2026-03-10 01:33:53,521 - characterization.characterization - INFO -   Characterizing series 1200/3990 (36919_1361)
+2026-03-10 01:33:55,401 - characterization.characterization - INFO -   Characterizing series 1300/3990 (39088_2777)
+2026-03-10 01:33:57,284 - characterization.characterization - INFO -   Characterizing series 1400/3990 (41095_2131)
+2026-03-10 01:33:58,991 - characterization.characterization - INFO -   Characterizing series 1500/3990 (42682_1004)
+2026-03-10 01:34:00,874 - characterization.characterization - INFO -   Characterizing series 1600/3990 (43285_2159)
+2026-03-10 01:34:02,650 - characterization.characterization - INFO -   Characterizing series 1700/3990 (43751_1374)
+2026-03-10 01:34:04,372 - characterization.characterization - INFO -   Characterizing series 1800/3990 (44341_7149)
+2026-03-10 01:34:06,273 - characterization.characterization - INFO -   Characterizing series 1900/3990 (45679_1374)
+2026-03-10 01:34:07,937 - characterization.characterization - INFO -   Characterizing series 2000/3990 (46334_1039)
+2026-03-10 01:34:09,773 - characterization.characterization - INFO -   Characterizing series 2100/3990 (47104_3124)
+2026-03-10 01:34:11,629 - characterization.characterization - INFO -   Characterizing series 2200/3990 (47632_937)
+2026-03-10 01:34:13,526 - characterization.characterization - INFO -   Characterizing series 2300/3990 (49416_7817)
+2026-03-10 01:34:15,643 - characterization.characterization - INFO -   Characterizing series 2400/3990 (51955_15017)
+2026-03-10 01:34:17,787 - characterization.characterization - INFO -   Characterizing series 2500/3990 (52237_15055)
+2026-03-10 01:34:19,837 - characterization.characterization - INFO -   Characterizing series 2600/3990 (62435_8169)
+2026-03-10 01:34:21,864 - characterization.characterization - INFO -   Characterizing series 2700/3990 (62538_15017)
+2026-03-10 01:34:23,771 - characterization.characterization - INFO -   Characterizing series 2800/3990 (62773_8432)
+2026-03-10 01:34:25,704 - characterization.characterization - INFO -   Characterizing series 2900/3990 (62902_15055)
+2026-03-10 01:34:27,895 - characterization.characterization - INFO -   Characterizing series 3000/3990 (62979_8605)
+2026-03-10 01:34:30,199 - characterization.characterization - INFO -   Characterizing series 3100/3990 (63076_8048)
+2026-03-10 01:34:32,113 - characterization.characterization - INFO -   Characterizing series 3200/3990 (63159_15055)
+2026-03-10 01:34:34,124 - characterization.characterization - INFO -   Characterizing series 3300/3990 (63316_15055)
+2026-03-10 01:34:36,156 - characterization.characterization - INFO -   Characterizing series 3400/3990 (63428_15055)
+2026-03-10 01:34:38,264 - characterization.characterization - INFO - Auto override: using NHITS for '63502_8238' (group=intermittent) with caveat: Series is intermittent; non-intermittent methods may underperform
+2026-03-10 01:34:38,265 - characterization.characterization - INFO -   Characterizing series 3500/3990 (63503_15017)
+2026-03-10 01:34:40,087 - characterization.characterization - INFO -   Characterizing series 3600/3990 (72886_6183)
+2026-03-10 01:34:41,847 - characterization.characterization - INFO -   Characterizing series 3700/3990 (73734_2212)
+2026-03-10 01:34:43,493 - characterization.characterization - INFO -   Characterizing series 3800/3990 (7700_3137)
+2026-03-10 01:34:45,227 - characterization.characterization - INFO -   Characterizing series 3900/3990 (82730_7480)
+2026-03-10 01:34:46,885 - characterization.characterization - INFO -   Characterizing series 3990/3990 (9806_6094)
+2026-03-10 01:34:46,917 - characterization.characterization - INFO - ======================================================================
+2026-03-10 01:34:46,917 - characterization.characterization - INFO - TIME SERIES CHARACTERIZATION SUMMARY
+2026-03-10 01:34:46,917 - characterization.characterization - INFO - ======================================================================
+2026-03-10 01:34:46,917 - characterization.characterization - INFO - Total series analyzed        : 3990
+2026-03-10 01:34:46,917 - characterization.characterization - INFO - With seasonality             : 1405 (35.2%)
+2026-03-10 01:34:46,917 - characterization.characterization - INFO - With trend                   : 1344 (33.7%)
+2026-03-10 01:34:46,918 - characterization.characterization - INFO - Intermittent                 : 1 (0.0%)
+2026-03-10 01:34:46,918 - characterization.characterization - INFO - Stationary                   : 2870 (71.9%)
+2026-03-10 01:34:46,918 - characterization.characterization - INFO - Sufficient for ML (>=20)  : 3990 (100.0%)
+2026-03-10 01:34:46,918 - characterization.characterization - INFO - Sufficient for DL (>=30) : 3990 (100.0%)
+2026-03-10 01:34:46,918 - characterization.characterization - INFO - Complexity distribution:
+2026-03-10 01:34:46,918 - characterization.characterization - INFO -        low:  2452 (61.5%)
+2026-03-10 01:34:46,918 - characterization.characterization - INFO -     medium:  1537 (38.5%)
+2026-03-10 01:34:46,919 - characterization.characterization - INFO -       high:     1 (0.0%)
+2026-03-10 01:34:46,919 - characterization.characterization - INFO - ======================================================================
+2026-03-10 01:34:47,424 - utils.orchestrator - INFO - Characterized 3990 series
+2026-03-10 01:34:47,425 - utils.orchestrator - INFO - Complexity distribution: {'low': 2452, 'medium': 1537, 'high': 1}
+2026-03-10 01:34:47,425 - utils.orchestrator - INFO - Intermittent: 1

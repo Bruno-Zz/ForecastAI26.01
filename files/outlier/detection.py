@@ -34,9 +34,16 @@ class OutlierDetector:
         - none: Flag only, no correction
     """
 
-    def __init__(self, config_path: str = "config/config.yaml", config_override: dict = None):
-        with open(config_path, 'r') as f:
-            full_config = yaml.safe_load(f)
+    def __init__(self, config_path: str = None, config_override: dict = None):
+        try:
+            if config_path:
+                with open(config_path, 'r') as f:
+                    full_config = yaml.safe_load(f) or {}
+            else:
+                raise FileNotFoundError
+        except (FileNotFoundError, OSError):
+            from db.db import load_config_from_db
+            full_config = load_config_from_db()
         if config_override:
             from utils.parameter_resolver import ParameterResolver
             full_config = ParameterResolver.deep_merge(full_config, config_override)
@@ -310,22 +317,29 @@ class OutlierDetector:
             logger.info("Outlier detection is disabled in config")
             return df.copy(), pd.DataFrame()
 
+        n_total = df['unique_id'].nunique()
         logger.info(
-            f"Running outlier detection on {df['unique_id'].nunique()} series "
+            f"Running outlier detection on {n_total} series "
             f"(method={self.detection_method}, correction={self.correction_method})"
         )
+        print(f"[OUTLIER_PROGRESS] completed=0 total={n_total}", flush=True)
 
         corrected_df = df.copy()
         all_outliers = []
         adjusted_count = 0
+        _prog_step = max(1, n_total // 100)
 
-        for uid in df['unique_id'].unique():
+        for _idx, uid in enumerate(df['unique_id'].unique()):
             mask = df['unique_id'] == uid
             series_data = df.loc[mask].sort_values('date')
             values = series_data['y'].values.astype(float)
             dates = series_data['date'].values
 
             corrected_values, outliers = self.detect_and_correct_series(values, uid, dates)
+
+            _done = _idx + 1
+            if _done % _prog_step == 0 or _done == n_total:
+                print(f"[OUTLIER_PROGRESS] completed={_done} total={n_total}", flush=True)
 
             if not outliers.empty:
                 all_outliers.append(outliers)

@@ -14,7 +14,6 @@ from pathlib import Path
 from pydantic import BaseModel
 from scipy import stats as scipy_stats
 import logging
-import yaml
 
 # Silence pandas UserWarning about psycopg2 not being SQLAlchemy
 warnings.filterwarnings("ignore", message=".*pandas only supports SQLAlchemy.*")
@@ -48,12 +47,6 @@ try:
 except ImportError:
     _DASK_AVAILABLE = False
     logging.warning("Dask not available; data_cache will use pandas DataFrames")
-
-
-def _api_config_path() -> str:
-    """Return the path to config.yaml as a string."""
-    p = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
-    return str(p)
 
 
 # Initialize FastAPI app
@@ -90,10 +83,10 @@ app.add_middleware(
 
 # JWT auth middleware (added AFTER CORS so preflight passes)
 def _get_jwt_secret():
-    cfg_path = _api_config_path()
+    """Read JWT secret from DB auth parameters (or fallback to env var)."""
     try:
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
+        from db.db import load_config_from_db
+        cfg = load_config_from_db()
         return cfg.get("auth", {}).get("jwt_secret", "CHANGE-ME")
     except Exception:
         return "CHANGE-ME"
@@ -102,8 +95,7 @@ def _get_jwt_secret():
 app.add_middleware(
     JWTAuthMiddleware,
     secret_key=_get_jwt_secret(),
-    schema=get_schema(_api_config_path()) if _DB_AVAILABLE else "zcube",
-    config_path=_api_config_path(),
+    schema=get_schema() if _DB_AVAILABLE else "zcube",
 )
 
 # Configure logging
@@ -149,8 +141,8 @@ PARAMETER_REGISTRY = [
     },
     {
         "parameter_type": "best_method",
-        "label": "Best Method",
-        "description": "Composite scoring weights",
+        "label": "Method Selection",
+        "description": "Method selection strategy, per-group method lists, and composite scoring weights",
     },
     {
         "parameter_type": "meio",
@@ -176,6 +168,11 @@ PARAMETER_REGISTRY = [
         "parameter_type": "logging",
         "label": "Logging",
         "description": "Log level and file settings",
+    },
+    {
+        "parameter_type": "segmentation",
+        "label": "Segmentation",
+        "description": "Segmentation and enumeration settings",
     },
 ]
 
@@ -210,6 +207,17 @@ class TimeSeriesInfo(BaseModel):
     best_method: Optional[str] = None
     best_method_source: Optional[str] = None  # 'backtested' or 'recommended'
     classifications: Optional[Dict[str, str]] = None  # { "config_name": "A", ... }
+
+
+class MethodCompatibilityRequest(BaseModel):
+    methods: List[str]
+    n_observations: int = 0
+    is_intermittent: bool = False
+    has_seasonality: bool = False
+    sufficient_for_ml: bool = False
+    sufficient_for_deep_learning: bool = False
+    min_for_ml: int = 20
+    min_for_deep_learning: int = 30
 
 
 class ForecastData(BaseModel):
@@ -275,11 +283,9 @@ def load_data():
         logger.warning("Database not available — cannot load data")
         return
 
-    cfg_path = _api_config_path()
-
     try:
-        schema = get_schema(cfg_path)
-        conn = get_conn(cfg_path)
+        schema = get_schema()
+        conn = get_conn()
 
         # ── time_series (corrected values, used for charts) ──
         if data_cache["time_series"] is None:
@@ -323,12 +329,9 @@ def load_data():
                     logger.info(
                         f"Backfill: {len(missing)} series in forecasts but not in demand_actuals — querying source DB…"
                     )
-                    # Read config directly from file (data_cache['config'] isn't loaded yet)
-                    _bf_cfg_path = (
-                        Path(cfg_path) if not isinstance(cfg_path, Path) else cfg_path
-                    )
-                    with open(_bf_cfg_path, "r") as _bf_fh:
-                        cfg = yaml.safe_load(_bf_fh)
+                    # Load data_source config from DB
+                    from db.db import load_config_from_db
+                    cfg = load_config_from_db()
                     src = cfg.get("data_source", {}).get("source_db", {})
                     if src.get("host"):
                         import psycopg2
@@ -511,14 +514,14 @@ def load_data():
 
         conn.close()
 
-        # ── config (YAML, not DB) ──
+        # ── config (from DB) ──
         if data_cache["config"] is None:
-            # Use absolute path derived from __file__ so it works regardless of cwd
-            config_path = Path(_api_config_path())
-            if config_path.exists():
-                with open(config_path, "r") as fh:
-                    data_cache["config"] = yaml.safe_load(fh)
-                logger.info(f"Loaded config.yaml from {config_path}")
+            try:
+                from db.db import load_config_from_db
+                data_cache["config"] = load_config_from_db()
+                logger.info("Loaded config from DB")
+            except Exception as _cfg_err:
+                logger.warning(f"Could not load config from DB: {_cfg_err}")
 
     except Exception as e:
         logger.error(f"Error loading data from DB: {e}", exc_info=True)
@@ -529,13 +532,34 @@ def _get_config():
     return data_cache.get("config") or {}
 
 
-def seed_parameters(config_path: str) -> None:
-    """Seed default parameter versions from config.yaml (one per type)."""
+def _merge_missing_keys(base: dict, updates: dict) -> dict:
+    """
+    Return a copy of *base* with any keys missing from it filled in from *updates*.
+    Existing keys in *base* are NEVER overwritten (base wins).
+    Recurses into nested dicts so newly-added nested keys also propagate.
+    """
+    result = dict(base)
+    for k, v in updates.items():
+        if k not in result:
+            result[k] = v
+        elif isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _merge_missing_keys(result[k], v)
+    return result
+
+
+def seed_parameters() -> None:
+    """Seed default parameter versions (one per type).
+
+    On first run: inserts a 'Default' row for every parameter type using
+    built-in defaults.  On subsequent runs: deep-merges any NEW keys into
+    every existing row without overwriting user customisations.
+    """
     if not _DB_AVAILABLE:
         return
-    schema = get_schema(config_path)
-    with open(config_path, "r") as fh:
-        full_cfg = yaml.safe_load(fh) or {}
+    schema = get_schema()
+    # Load existing defaults from DB; fall back to empty dict per type
+    from db.db import load_config_from_db
+    full_cfg = load_config_from_db()
 
     conn = get_conn(config_path)
     try:
@@ -543,6 +567,8 @@ def seed_parameters(config_path: str) -> None:
             for meta in PARAMETER_REGISTRY:
                 param_type = meta["parameter_type"]
                 param_data = full_cfg.get(param_type, {})
+
+                # Insert the default row on first run (skip if already exists)
                 cur.execute(
                     f"""INSERT INTO {schema}.parameters
                         (parameter_type, name, label, parameters_set, description, is_default, sort_order)
@@ -555,8 +581,42 @@ def seed_parameters(config_path: str) -> None:
                         meta.get("description"),
                     ),
                 )
+
+                # Patch ALL existing rows: add any keys that are in the built-in defaults
+                # but missing from the stored parameters_set (preserves customisations).
+                cur.execute(
+                    f"SELECT id, parameters_set FROM {schema}.parameters WHERE parameter_type = %s",
+                    (param_type,),
+                )
+                rows = cur.fetchall()
+                for row_id, stored in rows:
+                    existing = stored if isinstance(stored, dict) else json.loads(stored or "{}")
+                    merged = _merge_missing_keys(existing, param_data)
+                    if merged != existing:
+                        cur.execute(
+                            f"UPDATE {schema}.parameters SET parameters_set = %s::jsonb WHERE id = %s",
+                            (json.dumps(merged, default=str), row_id),
+                        )
+
+        # One-time migration: strip keys that moved from forecasting → best_method
+        _moved_from_forecasting = {
+            'method_selection', 'method_selection_strategy',
+            'best_fit_methods', 'method_overrides',
+        }
+        cur.execute(
+            f"SELECT id, parameters_set FROM {schema}.parameters WHERE parameter_type = 'forecasting'",
+        )
+        for row_id, stored in cur.fetchall():
+            existing = stored if isinstance(stored, dict) else json.loads(stored or "{}")
+            cleaned = {k: v for k, v in existing.items() if k not in _moved_from_forecasting}
+            if cleaned != existing:
+                cur.execute(
+                    f"UPDATE {schema}.parameters SET parameters_set = %s::jsonb WHERE id = %s",
+                    (json.dumps(cleaned, default=str), row_id),
+                )
+
         conn.commit()
-        logger.info(f"Seeded default parameter sets into DB")
+        logger.info("Seeded/patched default parameter sets into DB")
     except Exception:
         conn.rollback()
         raise
@@ -571,18 +631,18 @@ async def startup_event():
     # Ensure local DB schema is up-to-date
     if _DB_AVAILABLE:
         try:
-            _init_db_schema(_api_config_path())
+            _init_db_schema()
             logger.info("DB schema initialised")
         except Exception as exc:
             logger.warning(f"DB schema init failed (non-fatal): {exc}")
         # Seed default admin user on first run
         try:
-            seed_default_admin(_api_config_path())
+            seed_default_admin()
         except Exception as exc:
             logger.warning(f"Admin seed failed (non-fatal): {exc}")
-        # Seed parameters from config.yaml
+        # Seed default parameter rows in DB
         try:
-            seed_parameters(_api_config_path())
+            seed_parameters()
         except Exception as exc:
             logger.warning(f"Parameter seed failed (non-fatal): {exc}")
         # Mark any leftover 'running' process_log rows as interrupted
@@ -593,6 +653,12 @@ async def startup_event():
 @app.post("/api/reload")
 async def reload_data():
     """Reload all data from PostgreSQL into cache (call after a pipeline run)."""
+    # Sync any missing keys into existing parameter rows (non-destructive)
+    if _DB_AVAILABLE:
+        try:
+            seed_parameters()
+        except Exception as exc:
+            logger.warning(f"Parameter sync on reload failed (non-fatal): {exc}")
     # Reset cache so load_data() re-reads everything
     for key in data_cache:
         data_cache[key] = None
@@ -612,8 +678,8 @@ async def get_config():
     # Try to assemble from DB sections first
     if _DB_AVAILABLE:
         try:
-            schema = get_schema(_api_config_path())
-            conn = get_conn(_api_config_path())
+            schema = get_schema()
+            conn = get_conn()
             try:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -655,29 +721,25 @@ async def get_config():
 
     _redact(safe)
 
-    # Also return as raw YAML string for display
-    raw_yaml = yaml.dump(safe, default_flow_style=False, sort_keys=False)
-
-    return {"config": safe, "config_yaml": raw_yaml}
+    return {"config": safe}
 
 
 @app.post("/api/config/update")
 async def update_config(body: dict = Body(...)):
     """
-    Update specific config keys and persist to config.yaml.
+    Update specific config keys and persist to the DB parameters table.
 
     Expects JSON body like:
       { "path": "forecasting.horizon", "value": 52 }
     or batch:
       { "updates": [ {"path": "forecasting.horizon", "value": 52}, ... ] }
     """
-    config_path = Path(_api_config_path())
-    if not config_path.exists():
-        raise HTTPException(status_code=404, detail="config.yaml not found")
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
 
-    # Load current config
-    with open(config_path, "r") as fh:
-        config = yaml.safe_load(fh)
+    # Load current config from DB
+    from db.db import load_config_from_db
+    config = load_config_from_db()
 
     # Build list of updates
     updates = body.get("updates", [])
@@ -727,36 +789,30 @@ async def update_config(body: dict = Body(...)):
     if not applied:
         raise HTTPException(status_code=400, detail="No valid updates applied")
 
-    # Write back
-    with open(config_path, "w") as fh:
-        yaml.dump(
-            config, fh, default_flow_style=False, sort_keys=False, allow_unicode=True
-        )
-
     # Refresh in-memory cache
     data_cache["config"] = config
 
-    # Sync changed sections to parameters DB table
-    if _DB_AVAILABLE:
+    # Persist changed sections to DB parameters table
+    try:
+        schema = get_schema()
+        conn = get_conn()
         try:
-            schema = get_schema(str(config_path))
-            conn = get_conn(str(config_path))
-            try:
-                changed_sections = set(a["path"].split(".")[0] for a in applied)
-                with conn.cursor() as cur:
-                    for sect_key in changed_sections:
-                        section_data = config.get(sect_key, {})
-                        cur.execute(
-                            f"UPDATE {schema}.parameters SET parameters_set = %s::jsonb, updated_at = NOW() WHERE parameter_type = %s AND is_default = TRUE",
-                            (json.dumps(section_data, default=str), sect_key),
-                        )
-                conn.commit()
-            except Exception:
-                conn.rollback()
-            finally:
-                conn.close()
-        except Exception as sync_err:
-            logger.warning(f"Parameters DB sync failed (non-fatal): {sync_err}")
+            changed_sections = set(a["path"].split(".")[0] for a in applied)
+            with conn.cursor() as cur:
+                for sect_key in changed_sections:
+                    section_data = config.get(sect_key, {})
+                    cur.execute(
+                        f"UPDATE {schema}.parameters SET parameters_set = %s::jsonb, updated_at = NOW() WHERE parameter_type = %s AND is_default = TRUE",
+                        (json.dumps(section_data, default=str), sect_key),
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    except Exception as sync_err:
+        raise HTTPException(status_code=500, detail=f"DB update failed: {sync_err}")
 
     logger.info(f"Config updated: {[a['path'] for a in applied]}")
     return {"status": "ok", "applied": applied}
@@ -842,8 +898,8 @@ async def list_parameters():
     """List all parameter versions with segment associations."""
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="DB not available")
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -862,10 +918,24 @@ async def list_parameters():
             for pid, sid in cur.fetchall():
                 seg_map.setdefault(pid, []).append(sid)
 
+        # Load DB defaults once so we can fill in any missing keys
+        try:
+            from db.db import load_config_from_db
+            _full_cfg = load_config_from_db()
+        except Exception:
+            _full_cfg = {}
+
         result = []
         for row in rows:
             entry = _param_row_to_dict(cols, row)
             entry["segment_ids"] = seg_map.get(entry["id"], [])
+            # Merge DB defaults for any keys missing from a row's parameters_set.
+            # Stored values always win; defaults only fill in gaps.
+            cfg_defaults = _full_cfg.get(entry["parameter_type"], {})
+            if cfg_defaults and isinstance(entry.get("parameters_set"), dict):
+                entry["parameters_set"] = _merge_missing_keys(
+                    entry["parameters_set"], cfg_defaults
+                )
             result.append(entry)
         return result
     finally:
@@ -877,8 +947,8 @@ async def reorder_parameters(body: ParameterReorder):
     """Reorder parameter versions within a type. Default must be last."""
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="DB not available")
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             # Validate all IDs belong to the given parameter_type
@@ -939,11 +1009,10 @@ async def resolve_parameters():
     """Trigger parameter assignment resolution for all series."""
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="DB not available")
-    config_path = _api_config_path()
     try:
         from segmentation.segmentation import SegmentationEngine
 
-        engine = SegmentationEngine(config_path)
+        engine = SegmentationEngine()
         count = engine.resolve_parameter_assignments()
         return {"status": "ok", "resolved_series": count}
     except ImportError:
@@ -957,8 +1026,8 @@ async def get_parameter(param_id: int):
     """Get one parameter version by surrogate key."""
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="DB not available")
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -998,8 +1067,8 @@ async def create_parameter(body: ParameterCreate):
     if not body.name or not body.name.strip():
         raise HTTPException(status_code=400, detail="Name is required")
 
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         params_set = body.parameters_set or {}
 
@@ -1092,9 +1161,8 @@ async def update_parameter(param_id: int, body: ParameterUpdate):
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="DB not available")
 
-    config_path = Path(_api_config_path())
-    schema = get_schema(str(config_path))
-    conn = get_conn(str(config_path))
+    schema = get_schema()
+    conn = get_conn()
     param_type = None
     is_default_row = False
     try:
@@ -1185,51 +1253,8 @@ async def update_parameter(param_id: int, body: ParameterUpdate):
     finally:
         conn.close()
 
-    # Write-back to config.yaml only for default versions
-    if is_default_row and body.parameters_set is not None:
-        try:
-            with open(config_path, "r") as fh:
-                full_cfg = yaml.safe_load(fh) or {}
-            existing_section = full_cfg.get(param_type, {})
-
-            def _collect_sensitive(d, prefix=""):
-                result = {}
-                if isinstance(d, dict):
-                    for k, v in d.items():
-                        if any(bk in k.lower() for bk in _PARAM_BLOCKED_KEYS):
-                            result[k] = v
-                        elif isinstance(v, dict):
-                            sub = _collect_sensitive(v, f"{prefix}{k}.")
-                            if sub:
-                                result[k] = sub
-                return result
-
-            sensitive = _collect_sensitive(existing_section)
-
-            def _deep_merge(base, override):
-                merged = dict(base)
-                for k, v in override.items():
-                    if isinstance(v, dict) and isinstance(merged.get(k), dict):
-                        merged[k] = _deep_merge(merged[k], v)
-                    else:
-                        merged[k] = v
-                return merged
-
-            full_cfg[param_type] = _deep_merge(body.parameters_set, sensitive)
-            with open(config_path, "w") as fh:
-                yaml.dump(
-                    full_cfg,
-                    fh,
-                    default_flow_style=False,
-                    sort_keys=False,
-                    allow_unicode=True,
-                )
-            data_cache["config"] = full_cfg
-            logger.info(
-                f"Parameter '{param_type}' (id={param_id}) saved to DB and YAML"
-            )
-        except Exception as exc:
-            logger.warning(f"YAML write-back failed (DB already updated): {exc}")
+    # Invalidate in-memory config cache so next request re-reads from DB
+    data_cache["config"] = None
 
     return {"status": "ok", "param_id": param_id, "parameter_type": param_type}
 
@@ -1239,8 +1264,8 @@ async def delete_parameter(param_id: int):
     """Delete a parameter version. Cannot delete default versions."""
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="DB not available")
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             # Fetch full old row for audit
@@ -1281,8 +1306,8 @@ async def get_parameter_segments(param_id: int):
     """Get segment IDs associated with a parameter version."""
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="DB not available")
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1311,8 +1336,8 @@ async def set_parameter_segments(
         )
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="DB not available")
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -1436,8 +1461,8 @@ async def get_series_list(
     # Build classification lookup: { unique_id: { config_name: class_label } }
     classifications_map: Dict[str, Dict[str, str]] = {}
     try:
-        conn = get_conn(_api_config_path())
-        schema = get_schema(_api_config_path())
+        conn = get_conn()
+        schema = get_schema()
         cls_df = pd.read_sql(
             f"""
             SELECT r.unique_id, c.name AS config_name, r.class_label
@@ -2259,6 +2284,39 @@ async def get_best_methods():
         results.append(entry)
 
     return results
+
+
+@app.post("/api/methods/check-compatibility")
+async def check_method_compatibility_endpoint(body: MethodCompatibilityRequest):
+    """
+    Check compatibility of a list of methods against representative series
+    characteristics.  Used by the Settings UI to display warnings when the
+    planner configures method_overrides or best_fit_methods.
+
+    Returns a dict: { method_name: { status: "ok"|"warning"|"error", reason: str } }
+    """
+    try:
+        from characterization.characterization import (
+            TimeSeriesCharacterizer,
+            SeriesCharacteristics,
+        )
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"characterization module unavailable: {exc}")
+
+    chars = SeriesCharacteristics(
+        unique_id="__check__",
+        n_observations=body.n_observations,
+        is_intermittent=body.is_intermittent,
+        has_seasonality=body.has_seasonality,
+        sufficient_for_ml=body.sufficient_for_ml,
+        sufficient_for_deep_learning=body.sufficient_for_deep_learning,
+    )
+    result = {}
+    for method in body.methods:
+        result[method] = TimeSeriesCharacterizer.check_method_compatibility(
+            method, chars, body.min_for_ml, body.min_for_deep_learning
+        )
+    return result
 
 
 @app.get("/api/series/{unique_id}/best-method")
@@ -3404,7 +3462,49 @@ async def get_series_distributions(unique_id: str):
 _pipeline_jobs: Dict[str, Dict] = {}
 _pipeline_lock = threading.Lock()
 
-_STALE_JOB_TIMEOUT_SEC = 7200  # 2 hours — mark "running" jobs as stale after this
+_STALE_JOB_TIMEOUT_FALLBACK_SEC = 7200  # default if DB not available
+
+# (cached_at: datetime | None, value: int) — refreshed every 30 s to avoid
+# a DB query on every 1-second poll tick inside _cleanup_stale_jobs.
+_timeout_cache: tuple = (None, _STALE_JOB_TIMEOUT_FALLBACK_SEC)
+
+
+def _get_job_timeout_sec() -> int:
+    """Read pipeline.job_timeout_sec from the active 'parallel' parameter set.
+
+    Falls back to _STALE_JOB_TIMEOUT_FALLBACK_SEC when the DB is unavailable
+    or the key is absent.  Caches the result for 30 seconds so repeated calls
+    from the 1-second poll loop don't hammer the DB.
+    """
+    global _timeout_cache
+    cached_at, cached_val = _timeout_cache
+    now = datetime.utcnow()
+    if cached_at is not None and (now - cached_at).total_seconds() < 30:
+        return cached_val
+
+    val = _STALE_JOB_TIMEOUT_FALLBACK_SEC
+    try:
+        if _DB_AVAILABLE:
+            schema = get_schema()
+            conn = get_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT parameters_set FROM {schema}.parameters "
+                        f"WHERE parameter_type = 'parallel' AND is_default = TRUE LIMIT 1"
+                    )
+                    row = cur.fetchone()
+                    if row and isinstance(row[0], dict):
+                        db_val = row[0].get("pipeline", {}).get("job_timeout_sec")
+                        if db_val is not None:
+                            val = int(db_val)
+            finally:
+                conn.close()
+    except Exception:
+        pass
+
+    _timeout_cache = (now, val)
+    return val
 
 
 def _cleanup_stale_jobs():
@@ -3457,16 +3557,33 @@ def _cleanup_stale_jobs():
             try:
                 started_dt = datetime.fromisoformat(started)
                 elapsed = (now - started_dt).total_seconds()
-                if elapsed > _STALE_JOB_TIMEOUT_SEC:
+                timeout_sec = _get_job_timeout_sec()
+                if elapsed > timeout_sec:
+                    # Set the exit_code and status BEFORE killing so the runner
+                    # thread's post-wait guard sees -3 and doesn't overwrite.
                     job["status"] = "error"
                     job["ended_at"] = now.isoformat()
                     job["log_lines"].append(
-                        f"[TIMEOUT] Job exceeded {_STALE_JOB_TIMEOUT_SEC}s — marked as stale"
+                        f"[TIMEOUT] Job exceeded {timeout_sec}s — killed and marked as stale"
                     )
                     job["exit_code"] = -3
                     logger.warning(
-                        f"Stale job {job['job_id']} timed out after {elapsed:.0f}s"
+                        f"Stale job {job['job_id']} timed out after {elapsed:.0f}s — killing process"
                     )
+                    # Kill the process so it doesn't keep running in the background
+                    kill_pid = job.get("pid")
+                    if kill_pid:
+                        try:
+                            if sys.platform == "win32":
+                                subprocess.call(
+                                    ["taskkill", "/F", "/T", "/PID", str(kill_pid)],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                )
+                            else:
+                                os.killpg(os.getpgid(kill_pid), signal.SIGTERM)
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -3480,7 +3597,7 @@ def _mark_stale_db_steps():
     if not _DB_AVAILABLE:
         return
     try:
-        conn = get_conn(_api_config_path())
+        conn = get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -3545,7 +3662,7 @@ PIPELINE_STEPS = {
         "desc": "Rolling-window backtesting and metric computation",
     },
     "best-method": {
-        "label": "Best Method",
+        "label": "Method Selection",
         "arg": "best-method",
         "desc": "Select the best method per series using composite scoring",
     },
@@ -3563,9 +3680,9 @@ PIPELINE_STEP_ORDER = [
     "segmentation",
     "classification",
     "characterization",
+    "best-method",
     "forecast",
     "backtest",
-    "best-method",
     "distributions",
 ]
 
@@ -3573,7 +3690,7 @@ PIPELINE_STEP_ORDER = [
 def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = None):
     """Run a pipeline step in a background thread, capturing output line by line."""
     files_dir = Path(__file__).parent.parent  # files/ directory
-    cmd = [sys.executable, "run_pipeline.py", "--only", step_arg, "--log-level", "INFO"]
+    cmd = [sys.executable, "-u", "run_pipeline.py", "--only", step_arg, "--log-level", "INFO"]
     if extra_args:
         cmd.extend(extra_args)
 
@@ -3600,11 +3717,8 @@ def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = Non
         for line in proc.stdout:
             line = line.rstrip("\n")
             with _pipeline_lock:
-                # If job was killed externally, stop reading stdout
-                if (
-                    _pipeline_jobs[job_id].get("status") == "error"
-                    and _pipeline_jobs[job_id].get("exit_code") == -1
-                ):
+                # If job was killed externally or timed out, stop reading stdout
+                if _pipeline_jobs[job_id].get("exit_code") in (-1, -3):
                     proc.kill()
                     break
                 _pipeline_jobs[job_id]["log_lines"].append(line)
@@ -3613,8 +3727,8 @@ def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = Non
         exit_code = proc.returncode
 
         with _pipeline_lock:
-            # Don't overwrite status if already marked as killed
-            if _pipeline_jobs[job_id].get("exit_code") != -1:
+            # Don't overwrite status if already marked as killed or timed out
+            if _pipeline_jobs[job_id].get("exit_code") not in (-1, -3):
                 _pipeline_jobs[job_id]["exit_code"] = exit_code
                 _pipeline_jobs[job_id]["status"] = (
                     "success" if exit_code == 0 else "error"
@@ -3653,6 +3767,7 @@ def _run_full_pipeline_thread(job_id: str):
 
         cmd = [
             sys.executable,
+            "-u",           # force unbuffered stdout so progress lines are flushed immediately
             "run_pipeline.py",
             "--only",
             step_arg,
@@ -3677,8 +3792,8 @@ def _run_full_pipeline_thread(job_id: str):
             for line in proc.stdout:
                 line = line.rstrip("\n")
                 with _pipeline_lock:
-                    # Abort if killed externally
-                    if _pipeline_jobs[job_id].get("exit_code") == -1:
+                    # Abort if killed externally or timed out
+                    if _pipeline_jobs[job_id].get("exit_code") in (-1, -3):
                         proc.kill()
                         return
                     _pipeline_jobs[job_id]["log_lines"].append(line)
@@ -3695,12 +3810,14 @@ def _run_full_pipeline_thread(job_id: str):
 
         if exit_code != 0:
             with _pipeline_lock:
-                _pipeline_jobs[job_id]["log_lines"].append(
-                    f"\n✕ Step '{step_label}' failed with exit code {exit_code}. Pipeline aborted."
-                )
-                _pipeline_jobs[job_id]["exit_code"] = exit_code
-                _pipeline_jobs[job_id]["status"] = "error"
-                _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
+                # Don't overwrite status if already killed or timed out
+                if _pipeline_jobs[job_id].get("exit_code") not in (-1, -3):
+                    _pipeline_jobs[job_id]["log_lines"].append(
+                        f"\n✕ Step '{step_label}' failed with exit code {exit_code}. Pipeline aborted."
+                    )
+                    _pipeline_jobs[job_id]["exit_code"] = exit_code
+                    _pipeline_jobs[job_id]["status"] = "error"
+                    _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
             return
 
         with _pipeline_lock:
@@ -3893,8 +4010,8 @@ async def run_forecast_for_series(req: RunForecastRequest, request: Request):
     # Load any hyperparameter overrides from DB for the requested series
     if _DB_AVAILABLE:
         try:
-            conn = get_conn(_api_config_path())
-            schema = get_schema(_api_config_path())
+            conn = get_conn()
+            schema = get_schema()
             placeholders = ",".join(["%s"] * len(req.series))
             with conn.cursor() as cur:
                 cur.execute(
@@ -3939,8 +4056,8 @@ async def get_hyperparams(unique_id: str):
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
-        conn = get_conn(_api_config_path())
-        schema = get_schema(_api_config_path())
+        conn = get_conn()
+        schema = get_schema()
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT method, overrides FROM {schema}.hyperparameter_overrides WHERE unique_id = %s",
@@ -3965,8 +4082,8 @@ async def put_hyperparams(unique_id: str, req: HyperparamOverridesRequest):
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
-        conn = get_conn(_api_config_path())
-        schema = get_schema(_api_config_path())
+        conn = get_conn()
+        schema = get_schema()
         with conn.cursor() as cur:
             for method, overrides in req.overrides.items():
                 cur.execute(
@@ -3994,8 +4111,8 @@ async def delete_hyperparams(unique_id: str, method: Optional[str] = None):
     if not _DB_AVAILABLE:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
-        conn = get_conn(_api_config_path())
-        schema = get_schema(_api_config_path())
+        conn = get_conn()
+        schema = get_schema()
         with conn.cursor() as cur:
             if method:
                 cur.execute(
@@ -4030,99 +4147,68 @@ async def get_pipeline_jobs():
     return sorted(enriched, key=lambda j: j.get("started_at") or "", reverse=True)
 
 
+_PROGRESS_MARKERS = [
+    "FORECAST_PROGRESS",
+    "BACKTEST_PROGRESS",
+    "OUTLIER_PROGRESS",
+    "CHAR_PROGRESS",
+    "BESTMETHOD_PROGRESS",
+    "SEGMENTATION_PROGRESS",
+    "DISTRIBUTIONS_PROGRESS",
+]
+
+
 def _extract_progress(log_lines: list) -> dict:
     """
-    Parse the most recent [FORECAST_PROGRESS] and [BACKTEST_PROGRESS]
-    markers from log lines into a structured progress dict.
+    Parse the most recent occurrence of every known progress marker from
+    log_lines and return a dict keyed by marker name.
 
-    Returns e.g.::
+    Each value is a dict of the key=value pairs that follow the marker tag,
+    e.g.::
 
         {
-          "current_step": "backtest",          # or "forecast", "best-method", "loading"
-          "completed": 50, "total": 200,
-          "batches_done": 2, "batches_total": 4,
-          "pct": 25.0
+            "OUTLIER_PROGRESS":      {"completed": 80,  "total": 100},
+            "FORECAST_PROGRESS":     {"completed": 50,  "total": 200,
+                                      "batches_done": 2, "batches_total": 4},
+            "BACKTEST_PROGRESS":     {"completed": 120, "total": 200},
+            "CHAR_PROGRESS":         {"completed": 60,  "total": 100},
+            "BESTMETHOD_PROGRESS":   {"completed": 40,  "total": 100},
+            "SEGMENTATION_PROGRESS": {"completed": 3,   "total": 5},
+            "DISTRIBUTIONS_PROGRESS":{"completed": 90,  "total": 200},
         }
+
+    Markers with ``total == 0`` are omitted so the frontend ``ForecastProgressBar``
+    guard (``if (!progress.total) return null``) works correctly.
     """
-    progress = {}
-    # 1) Detect current step from the most recent step-indicator line
+    result: dict = {}
+    found: set = set()
+
     for line in reversed(log_lines):
-        if "Best method selection" in line or "STEP 5" in line:
-            progress["current_step"] = "best-method"
-            break
-        if "Backtesting complete" in line:
-            progress["current_step"] = "best-method"
-            break
-        if (
-            "[BACKTEST_PROGRESS]" in line
-            or "Chaining: Backtest" in line
-            or "STEP 4" in line
-        ):
-            progress["current_step"] = "backtest"
-            break
-        if "Forecasting complete" in line:
-            progress["current_step"] = "backtest"
-            break
-        if "[FORECAST_PROGRESS]" in line or "STEP 3" in line:
-            progress["current_step"] = "forecast"
-            break
-        if "Loading" in line:
-            progress["current_step"] = "loading"
-            break
+        for marker in _PROGRESS_MARKERS:
+            if marker in found:
+                continue
+            tag = f"[{marker}]"
+            if tag not in line:
+                continue
+            # Everything after the tag is space-separated key=value pairs
+            part = line.split(tag, 1)[1].strip()
+            data: dict = {}
+            for token in part.split():
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    try:
+                        data[k] = int(v)
+                    except ValueError:
+                        data[k] = v
+            # Only include if there is a positive total (avoids spurious 0-total entries)
+            if data.get("total", 0) > 0:
+                result[marker] = data
+            found.add(marker)
 
-    # 2) Find the most recent progress marker for numeric completion data
-    for line in reversed(log_lines):
-        for marker in ("[BACKTEST_PROGRESS]", "[FORECAST_PROGRESS]"):
-            if marker in line:
-                part = line.split(marker, 1)[1].strip()
-                for token in part.split():
-                    if "=" in token:
-                        k, v = token.split("=", 1)
-                        try:
-                            progress[k] = int(v)
-                        except ValueError:
-                            progress[k] = v
-                total = progress.get("total", 0)
-                completed = progress.get("completed", 0)
-                progress["pct"] = (
-                    round(100.0 * completed / total, 1) if total > 0 else 0
-                )
-                break
-        else:
-            continue
-        break
+        if len(found) == len(_PROGRESS_MARKERS):
+            break  # All markers found — no need to scan further
 
-    # 3) Compute overall_pct spanning the full chain (forecast + backtest + best-method)
-    #    Approximate weight: forecast ~30%, backtest ~65%, best-method ~5%
-    step = progress.get("current_step", "loading")
-    step_pct = progress.get("pct", 0)
-    if step == "loading":
-        progress["overall_pct"] = 0
-    elif step == "forecast":
-        progress["overall_pct"] = round(step_pct * 0.30, 1)
-    elif step == "backtest":
-        progress["overall_pct"] = round(30 + step_pct * 0.65, 1)
-    elif step == "best-method":
-        progress["overall_pct"] = 97
-    else:
-        progress["overall_pct"] = progress.get("pct", 0)
-
-    # 4) Include nested keys matching the SSE-parsed structure so the frontend
-    #    can use the same ForecastProgressBar component whether data comes via
-    #    SSE or polling.
-    if progress.get("total"):
-        nested = {
-            "completed": progress.get("completed", 0),
-            "total": progress["total"],
-            "batches_done": progress.get("batches_done"),
-            "batches_total": progress.get("batches_total"),
-        }
-        if step == "forecast":
-            progress["FORECAST_PROGRESS"] = nested
-        elif step == "backtest":
-            progress["BACKTEST_PROGRESS"] = nested
-
-    return progress
+    return result
 
 
 @app.get("/api/pipeline/jobs/{job_id}")
@@ -4274,7 +4360,7 @@ async def get_process_log(
     Optional filters: step_name, status, run_id.
     """
     _require_db()
-    conn = get_conn(_api_config_path())
+    conn = get_conn()
     try:
         where_parts = []
         params: list = []
@@ -4337,7 +4423,7 @@ async def get_process_log_runs():
     Return one summary row per run_id: step count, total duration, status.
     """
     _require_db()
-    conn = get_conn(_api_config_path())
+    conn = get_conn()
     try:
         query = """
             SELECT
@@ -4388,7 +4474,7 @@ async def get_process_log_runs():
 async def get_run_steps(run_id: str):
     """Return all steps for a specific run_id."""
     _require_db()
-    conn = get_conn(_api_config_path())
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -4424,7 +4510,7 @@ async def get_run_steps(run_id: str):
 async def get_step_log_tail(step_id: int):
     """Return the captured log_tail for a specific step row (polling endpoint)."""
     _require_db()
-    conn = get_conn(_api_config_path())
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -4465,8 +4551,8 @@ class ABCConfigIn(BaseModel):
 async def list_abc_configurations():
     """List all ABC configurations with result summary counts."""
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             cur.execute(f"""
@@ -4499,8 +4585,8 @@ async def list_abc_configurations():
 async def create_abc_configuration(body: ABCConfigIn):
     """Create a new ABC configuration."""
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -4532,8 +4618,8 @@ async def create_abc_configuration(body: ABCConfigIn):
 async def get_abc_configuration(config_id: int):
     """Get a single ABC configuration with result stats."""
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             cur.execute(f"""
@@ -4565,8 +4651,8 @@ async def get_abc_configuration(config_id: int):
 async def update_abc_configuration(config_id: int, body: ABCConfigIn):
     """Update an ABC configuration."""
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -4600,8 +4686,8 @@ async def update_abc_configuration(config_id: int, body: ABCConfigIn):
 async def delete_abc_configuration(config_id: int):
     """Delete an ABC configuration and its results (CASCADE)."""
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -4627,7 +4713,7 @@ async def run_abc_classification(config_id: int):
     """Run a single ABC classification."""
     _require_db()
     from classification.abc import ABCClassifier
-    classifier = ABCClassifier(_api_config_path())
+    classifier = ABCClassifier()
     try:
         summary = classifier.run_classification(config_id)
         return summary
@@ -4640,7 +4726,7 @@ async def run_all_abc_classifications():
     """Run all active ABC classifications."""
     _require_db()
     from classification.abc import ABCClassifier
-    classifier = ABCClassifier(_api_config_path())
+    classifier = ABCClassifier()
     summaries = classifier.run_all_active()
     return {"ran": len(summaries), "summaries": summaries}
 
@@ -4649,8 +4735,8 @@ async def run_all_abc_classifications():
 async def get_abc_results(config_id: int, limit: int = 5000, offset: int = 0):
     """Get classification results for a config."""
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         df = pd.read_sql(
             f"""
@@ -4672,8 +4758,8 @@ async def get_abc_results(config_id: int, limit: int = 5000, offset: int = 0):
 async def get_abc_results_by_series(unique_id: str):
     """Get all classification results for a single series."""
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             cur.execute(f"""
@@ -4695,8 +4781,8 @@ async def get_abc_results_by_series(unique_id: str):
 async def get_abc_summary(config_id: int):
     """Distribution summary for a classification config."""
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             cur.execute(f"""
@@ -4729,7 +4815,7 @@ async def check_price_available():
     """Check if price data is available for the 'value' metric."""
     _require_db()
     from classification.abc import ABCClassifier
-    classifier = ABCClassifier(_api_config_path())
+    classifier = ABCClassifier()
     return classifier.check_price_available()
 
 
@@ -4764,8 +4850,8 @@ def _segment_row_to_dict(row: tuple, cols: list) -> dict:
 async def list_segments():
     """Return all segments with member counts."""
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -4802,8 +4888,8 @@ async def create_segment(body: SegmentIn, request: Request):
                 status_code=403, detail="You don't have permission to create segments"
             )
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         criteria_json = json.dumps(body.criteria or {})
         with conn.cursor() as cur:
@@ -4861,10 +4947,10 @@ _ENUM_FIELDS = {"abc_class", "complexity_level", "trend_direction"}
 
 
 def _get_max_enum_distinct() -> int:
-    """Get max_enum_distinct from config, default to 200."""
+    """Get max_enum_distinct from DB config, default to 200."""
     try:
-        with open(_api_config_path()) as f:
-            cfg = yaml.safe_load(f)
+        from db.db import load_config_from_db
+        cfg = load_config_from_db()
         return cfg.get("segmentation", {}).get("max_enum_distinct", 200)
     except Exception:
         return 200
@@ -4880,8 +4966,8 @@ async def get_segment_fields():
     """
     _require_db()
     _MAX_ENUM_DISTINCT = _get_max_enum_distinct()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             # ── 1. Detect table columns from information_schema ──────────
@@ -5148,8 +5234,8 @@ async def update_segment(segment_id: int, body: SegmentIn, request: Request):
                 status_code=403, detail="You don't have permission to edit this segment"
             )
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             # Fetch full old row for audit
@@ -5219,8 +5305,8 @@ async def delete_segment(segment_id: int, request: Request):
                 detail="You don't have permission to delete this segment",
             )
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             # Fetch full old row for audit
@@ -5260,8 +5346,8 @@ async def delete_segment(segment_id: int, request: Request):
 async def get_segment_members(segment_id: int):
     """Return all unique_ids in this segment."""
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -5295,8 +5381,8 @@ async def get_audit_log(
     - limit / offset: pagination (default 50 rows)
     """
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         clauses = []
         params = []
@@ -5342,8 +5428,8 @@ async def get_segment_details(segment_id: int, limit: int = 200, offset: int = 0
     item/site attributes, plus the segment criteria.
     """
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             # Segment info
@@ -5438,8 +5524,8 @@ async def preview_segment(segment_id: int, request: Request):
                 detail="You don't have permission to preview this segment",
             )
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -5459,7 +5545,7 @@ async def preview_segment(segment_id: int, request: Request):
     try:
         from segmentation.segmentation import SegmentationEngine
 
-        engine = SegmentationEngine(_api_config_path())
+        engine = SegmentationEngine()
         matched = engine.evaluate_criteria(criteria)
         return {"count": len(matched), "sample": matched[:20]}
     except Exception as exc:
@@ -5482,8 +5568,8 @@ async def assign_segment(segment_id: int, request: Request):
                 detail="You don't have permission to assign this segment",
             )
     _require_db()
-    conn = get_conn(_api_config_path())
-    schema = get_schema(_api_config_path())
+    conn = get_conn()
+    schema = get_schema()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -5504,10 +5590,10 @@ async def assign_segment(segment_id: int, request: Request):
     try:
         from segmentation.segmentation import SegmentationEngine
 
-        engine = SegmentationEngine(_api_config_path())
+        engine = SegmentationEngine()
         if is_default:
             # Fast path: assign all series
-            seg_schema = get_schema(_api_config_path())
+            seg_schema = get_schema()
             count = engine._assign_all_series(segment_id, seg_schema)
         else:
             count = engine.assign_segment(segment_id, criteria or {})
@@ -5534,7 +5620,7 @@ class AdjustmentIn(BaseModel):
 async def get_adjustments(unique_id: str):
     """Return all adjustments for a series."""
     _require_db()
-    conn = get_conn(_api_config_path())
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -5590,7 +5676,7 @@ async def upsert_adjustment(unique_id: str, body: AdjustmentIn, request: Request
             status_code=400, detail="adjustment_type must be 'adjustment' or 'override'"
         )
 
-    conn = get_conn(_api_config_path())
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -5643,7 +5729,7 @@ async def upsert_adjustment(unique_id: str, body: AdjustmentIn, request: Request
 async def delete_adjustment(unique_id: str, forecast_date: str, adjustment_type: str):
     """Delete a single adjustment row."""
     _require_db()
-    conn = get_conn(_api_config_path())
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -5683,7 +5769,7 @@ async def delete_all_adjustments(unique_id: str, request: Request):
             status_code=403, detail="You don't have permission to delete adjustments"
         )
     _require_db()
-    conn = get_conn(_api_config_path())
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(

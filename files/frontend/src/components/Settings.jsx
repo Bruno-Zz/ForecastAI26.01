@@ -34,6 +34,7 @@ const PARAM_OPTIONS = {
   'output.formats.metrics':                             ['postgres', 'parquet', 'csv'],
   'output.formats.plots':                               ['png', 'svg', 'html'],
   'logging.level':                                      ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+  'best_method.method_selection_strategy':              ['auto', 'best_fit'],
 };
 
 /** Array parameters → dropdown per item row in the modal editor */
@@ -41,11 +42,12 @@ const ARRAY_ITEM_OPTIONS = {
   'forecasting.ml_models':                        ALL_FORECASTING_METHODS,
   'forecasting.statsforecast_models':             ALL_FORECASTING_METHODS,
   'forecasting.neuralforecast_models':            ALL_FORECASTING_METHODS,
-  'forecasting.method_selection.sparse_data':     ALL_FORECASTING_METHODS,
-  'forecasting.method_selection.intermittent':    ALL_FORECASTING_METHODS,
-  'forecasting.method_selection.seasonal':        ALL_FORECASTING_METHODS,
-  'forecasting.method_selection.complex':         ALL_FORECASTING_METHODS,
-  'forecasting.method_selection.standard':        ALL_FORECASTING_METHODS,
+  'best_method.method_selection.sparse_data':     ALL_FORECASTING_METHODS,
+  'best_method.method_selection.intermittent':    ALL_FORECASTING_METHODS,
+  'best_method.method_selection.seasonal':        ALL_FORECASTING_METHODS,
+  'best_method.method_selection.complex':         ALL_FORECASTING_METHODS,
+  'best_method.method_selection.standard':        ALL_FORECASTING_METHODS,
+  'best_method.best_fit_methods':                 ALL_FORECASTING_METHODS,
   'meio.distributions':                           ['normal', 'gamma', 'negative_binomial', 'lognormal', 'poisson', 'weibull'],
   'evaluation.metrics.point_forecast':            ['mae', 'rmse', 'mape', 'smape', 'bias', 'mase'],
   'evaluation.metrics.probabilistic':             ['winkler_score', 'crps', 'coverage', 'quantile_loss'],
@@ -53,12 +55,39 @@ const ARRAY_ITEM_OPTIONS = {
   'hierarchical.reconciliation_methods':          ['BottomUp', 'TopDown', 'MinTrace', 'ERM'],
 };
 
+/**
+ * Nullable method override dropdowns (strategy=auto, per demand group).
+ * Value null means "Auto – run all group methods".
+ */
+const NULLABLE_METHOD_OPTIONS = {
+  'best_method.method_overrides.sparse_data':  ALL_FORECASTING_METHODS,
+  'best_method.method_overrides.intermittent': ALL_FORECASTING_METHODS,
+  'best_method.method_overrides.seasonal':     ALL_FORECASTING_METHODS,
+  'best_method.method_overrides.complex':      ALL_FORECASTING_METHODS,
+  'best_method.method_overrides.standard':     ALL_FORECASTING_METHODS,
+};
+
+/** Static compatibility hints shown as an amber ⚠ next to a method choice */
+const METHOD_WARNINGS = {
+  NHITS:            'Requires deep learning data sufficiency (≥30 obs)',
+  NBEATS:           'Requires deep learning data sufficiency (≥30 obs)',
+  PatchTST:         'Requires deep learning data sufficiency (≥30 obs)',
+  TFT:              'Requires deep learning data sufficiency (≥30 obs)',
+  DeepAR:           'Requires deep learning data sufficiency (≥30 obs)',
+  LightGBM:         'Requires ML data sufficiency (≥20 obs)',
+  XGBoost:          'Requires ML data sufficiency (≥20 obs)',
+  CrostonOptimized: 'Designed for intermittent demand only',
+  ADIDA:            'Designed for intermittent demand only',
+  IMAPA:            'Designed for intermittent demand only',
+  MSTL:             'Best with seasonal data',
+};
+
 /* ─── Parameter type → tab assignment ─── */
 const BUSINESS_PARAM_TYPES = new Set([
   'best_method', 'characterization', 'evaluation', 'forecasting', 'outlier_detection',
 ]);
 const SYSTEM_PARAM_TYPES = new Set([
-  'data_source', 'etl', 'hierarchical', 'meio', 'parallel', 'output', 'auth', 'logging',
+  'data_source', 'etl', 'hierarchical', 'meio', 'parallel', 'output', 'auth', 'logging', 'segmentation',
 ]);
 
 const TABS = [
@@ -297,6 +326,25 @@ function JsonTableModal({ path, value, onSave, onClose, allowedValues }) {
   });
   const [error, setError] = useState(null);
   const backdropRef = useRef(null);
+  const [dragRow, setDragRow] = useState(null);
+  const [dragOverRow, setDragOverRow] = useState(null);
+
+  const handleRowDragStart = (idx) => setDragRow(idx);
+  const handleRowDragOver = (e, idx) => { e.preventDefault(); setDragOverRow(idx); };
+  const handleRowDrop = (e, toIdx) => {
+    e.preventDefault();
+    if (dragRow === null || dragRow === toIdx) { setDragRow(null); setDragOverRow(null); return; }
+    setRows(prev => {
+      const next = [...prev];
+      const [moved] = next.splice(dragRow, 1);
+      next.splice(toIdx, 0, moved);
+      if (isArray) return next.map((r, i) => ({ ...r, key: String(i) }));
+      return next;
+    });
+    setDragRow(null);
+    setDragOverRow(null);
+  };
+  const handleRowDragEnd = () => { setDragRow(null); setDragOverRow(null); };
 
   // Close on Escape
   useEffect(() => {
@@ -430,17 +478,37 @@ function JsonTableModal({ path, value, onSave, onClose, allowedValues }) {
           <table className="w-full text-xs">
             <thead>
               <tr className="text-left text-gray-400 dark:text-gray-500 border-b border-gray-100 dark:border-gray-700">
+                {isArray && allowedValues && <th className="py-1.5 pr-1 w-5 font-medium" />}
                 {isArray
                   ? <th className="py-1.5 pr-2 w-8 font-medium">#</th>
                   : <th className="py-1.5 pr-2 font-medium">Key</th>
                 }
                 <th className="py-1.5 pr-2 font-medium">Value</th>
-                <th className="py-1.5 w-20 font-medium text-right">Actions</th>
+                <th className="py-1.5 w-16 font-medium text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((row, idx) => (
-                <tr key={idx} className="border-b border-gray-50 dark:border-gray-700/40 group">
+                <tr
+                  key={idx}
+                  draggable={isArray && !!allowedValues}
+                  onDragStart={() => isArray && allowedValues && handleRowDragStart(idx)}
+                  onDragOver={e => isArray && allowedValues && handleRowDragOver(e, idx)}
+                  onDrop={e => isArray && allowedValues && handleRowDrop(e, idx)}
+                  onDragEnd={handleRowDragEnd}
+                  className={`border-b border-gray-50 dark:border-gray-700/40 group transition-colors
+                    ${dragOverRow === idx && dragRow !== idx ? 'bg-blue-50 dark:bg-blue-900/20' : ''}
+                    ${dragRow === idx ? 'opacity-40' : ''}
+                    ${isArray && allowedValues ? 'cursor-grab active:cursor-grabbing' : ''}`}
+                >
+                  {/* Drag handle — only for draggable method arrays */}
+                  {isArray && allowedValues && (
+                    <td className="py-1.5 pr-1 align-middle text-gray-300 dark:text-gray-600 select-none">
+                      <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                        <path d="M7 2a2 2 0 1 0 .001 4.001A2 2 0 0 0 7 2zm0 6a2 2 0 1 0 .001 4.001A2 2 0 0 0 7 8zm0 6a2 2 0 1 0 .001 4.001A2 2 0 0 0 7 14zm6-8a2 2 0 1 0-.001-4.001A2 2 0 0 0 13 6zm0 2a2 2 0 1 0 .001 4.001A2 2 0 0 0 13 8zm0 6a2 2 0 1 0 .001 4.001A2 2 0 0 0 13 14z"/>
+                      </svg>
+                    </td>
+                  )}
                   {/* Key / index column */}
                   <td className="py-1.5 pr-2 align-middle">
                     {isArray ? (
@@ -490,7 +558,8 @@ function JsonTableModal({ path, value, onSave, onClose, allowedValues }) {
                   {/* Actions column */}
                   <td className="py-1.5 align-middle">
                     <div className="flex items-center justify-end gap-0.5 opacity-40 group-hover:opacity-100 transition-opacity">
-                      {isArray && (
+                      {/* Show up/down buttons only when drag-and-drop is not available */}
+                      {isArray && !allowedValues && (
                         <>
                           <button onClick={() => moveRow(idx, -1)} disabled={idx === 0}
                             className="p-0.5 text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-20" title="Move up">
@@ -546,7 +615,7 @@ function JsonTableModal({ path, value, onSave, onClose, allowedValues }) {
 
 
 /* ─── Editable parameter field ─── */
-function ParamField({ label, path, value, onChange, saving }) {
+function ParamField({ label, path, value, onChange, saving, parametersSet }) {
   const [modalOpen, setModalOpen] = useState(false);
   const isBool = typeof value === 'boolean';
   const isNumber = typeof value === 'number';
@@ -554,6 +623,19 @@ function ParamField({ label, path, value, onChange, saving }) {
   const isArray = Array.isArray(value);
   const isObj = !isNull && !isArray && typeof value === 'object';
   const isSensitive = /password|secret|token|account_key/i.test(label);
+
+  // ── Strategy-aware visibility (best_method parameter type) ──
+  // Hide method_overrides + per-group method_selection rows when strategy = best_fit
+  if (
+    (path.startsWith('best_method.method_overrides.') ||
+     path.startsWith('best_method.method_selection.')) &&
+    parametersSet?.method_selection_strategy === 'best_fit'
+  ) return null;
+  // Hide best_fit_methods row when strategy = auto (or unset)
+  if (
+    path === 'best_method.best_fit_methods' &&
+    parametersSet?.method_selection_strategy !== 'best_fit'
+  ) return null;
 
   if (isSensitive) {
     return (
@@ -608,6 +690,38 @@ function ParamField({ label, path, value, onChange, saving }) {
             onClose={() => setModalOpen(false)}
             allowedValues={ARRAY_ITEM_OPTIONS[path] || null}
           />
+        )}
+      </div>
+    );
+  }
+
+  // Nullable method override dropdown (auto mode: pin one method per demand group)
+  const nullableOpts = NULLABLE_METHOD_OPTIONS[path];
+  if (nullableOpts) {
+    const warn = value ? METHOD_WARNINGS[value] : null;
+    return (
+      <div className="flex flex-col gap-0.5 py-2 border-b border-gray-100 dark:border-gray-700/50 last:border-0">
+        <div className="flex items-center justify-between gap-3">
+          <label className="text-xs text-gray-500 dark:text-gray-400 min-w-0 break-all">{label}</label>
+          <select
+            value={value ?? '__auto__'}
+            onChange={e => onChange(path, e.target.value === '__auto__' ? null : e.target.value)}
+            disabled={saving === path}
+            className="text-xs font-mono bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 w-52 text-right text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-1 focus:ring-blue-400 cursor-pointer"
+          >
+            <option value="__auto__">— Auto (run all) —</option>
+            {nullableOpts.map(opt => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        </div>
+        {warn && (
+          <div className="flex items-start gap-1 text-[10px] text-amber-600 dark:text-amber-400 justify-end pr-0.5">
+            <svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+            </svg>
+            <span>{warn}</span>
+          </div>
         )}
       </div>
     );
@@ -1221,7 +1335,15 @@ function ConfigTab({ filterTypes, title = 'System Configuration', subtitle = 'Ed
                 </div>
               )}
               {grp.entries.map(({ key, path, value }) => (
-                <ParamField key={path} label={key} path={path} value={value} onChange={handleParamChange} saving={saving} />
+                <ParamField
+                  key={path}
+                  label={key}
+                  path={path}
+                  value={value}
+                  onChange={handleParamChange}
+                  saving={saving}
+                  parametersSet={activeVersionObj?.parameters_set}
+                />
               ))}
             </div>
           ))}

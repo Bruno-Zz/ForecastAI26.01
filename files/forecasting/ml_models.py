@@ -56,16 +56,24 @@ class MLForecaster:
     # Supported methods
     SUPPORTED_METHODS = ['LightGBM', 'XGBoost']
 
-    def __init__(self, config_path: str = "config/config.yaml", config_override: dict = None):
+    def __init__(self, config_path: str = None, config_override: dict = None):
         """
         Initialize with configuration.
 
         Args:
-            config_path: Path to the YAML configuration file.
+            config_path: Optional path to a YAML config file (legacy). When
+                omitted the configuration is loaded from the database.
             config_override: Optional dict to deep-merge on top of the loaded config.
         """
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+        try:
+            if config_path:
+                with open(config_path, 'r') as f:
+                    self.config = yaml.safe_load(f) or {}
+            else:
+                raise FileNotFoundError
+        except (FileNotFoundError, OSError):
+            from db.db import load_config_from_db
+            self.config = load_config_from_db()
         if config_override:
             from utils.parameter_resolver import ParameterResolver
             self.config = ParameterResolver.deep_merge(self.config, config_override)

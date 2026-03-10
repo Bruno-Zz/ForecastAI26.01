@@ -13,7 +13,7 @@ import { useTheme } from '../contexts/ThemeContext';
 import { formatTime, formatNumber } from '../utils/formatting';
 import api from '../utils/api';
 
-const STEP_ORDER = ['etl', 'outlier-detection', 'segmentation', 'characterization', 'forecast', 'backtest', 'best-method', 'distributions'];
+const STEP_ORDER = ['etl', 'outlier-detection', 'segmentation', 'characterization', 'best-method', 'forecast', 'backtest', 'distributions'];
 
 // Parse a UTC ISO timestamp that may or may not already end with 'Z'
 const parseUTC = (s) => new Date(s.endsWith('Z') ? s : s + 'Z');
@@ -222,7 +222,7 @@ const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs, l
             <div className="min-w-0">
               <h3 className="font-bold text-gray-900 dark:text-gray-100 text-sm">Run Full Pipeline</h3>
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                Run all 6 steps in order: ETL → Outlier Detection → Forecast → Backtest → Best Method → Distributions.
+                Run all steps in order: ETL → Outlier Detection → Segmentation → Characterization → Method Selection → Forecast → Backtest → Distributions.
                 Stops automatically if any step fails.
               </p>
             </div>
@@ -261,23 +261,58 @@ const FullPipelineCard = ({ steps, job, onRun, onKill, showLogs, onToggleLogs, l
           />
         )}
 
-        {/* Progress block — indeterminate while running any step; series bars for forecast/backtest */}
+        {/* Progress block — indeterminate while running any step; series bars for quantifiable steps */}
         {job && (() => {
-          const fp = job.progress?.FORECAST_PROGRESS;
-          const bp = job.progress?.BACKTEST_PROGRESS;
-          const hasSeriesData = fp || bp;
+          const op  = job.progress?.OUTLIER_PROGRESS;
+          const sgp = job.progress?.SEGMENTATION_PROGRESS;
+          const cp  = job.progress?.CHAR_PROGRESS;
+          const mp  = job.progress?.BESTMETHOD_PROGRESS;
+          const fp  = job.progress?.FORECAST_PROGRESS;
+          const bp  = job.progress?.BACKTEST_PROGRESS;
+          const dp  = job.progress?.DISTRIBUTIONS_PROGRESS;
+          const hasSeriesData = op || sgp || cp || mp || fp || bp || dp;
           return (
             <div className="mt-2 space-y-1.5">
+              {op && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-20 flex-shrink-0">🔍 Outliers</span>
+                  <div className="flex-1"><ForecastProgressBar progress={op} label="series" /></div>
+                </div>
+              )}
+              {sgp && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-20 flex-shrink-0">🏷️ Segments</span>
+                  <div className="flex-1"><ForecastProgressBar progress={sgp} label="segments" /></div>
+                </div>
+              )}
+              {cp && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-20 flex-shrink-0">🔬 Charact.</span>
+                  <div className="flex-1"><ForecastProgressBar progress={cp} label="series" /></div>
+                </div>
+              )}
+              {mp && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-20 flex-shrink-0">🏆 Meth. Sel.</span>
+                  <div className="flex-1"><ForecastProgressBar progress={mp} label="series" /></div>
+                </div>
+              )}
               {fp && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-16 flex-shrink-0">📊 Forecast</span>
+                  <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-20 flex-shrink-0">📊 Forecast</span>
                   <div className="flex-1"><ForecastProgressBar progress={fp} label="series" /></div>
                 </div>
               )}
               {bp && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-16 flex-shrink-0">🔁 Backtest</span>
+                  <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-20 flex-shrink-0">🔁 Backtest</span>
                   <div className="flex-1"><ForecastProgressBar progress={bp} label="series" /></div>
+                </div>
+              )}
+              {dp && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-500 dark:text-gray-400 font-medium w-20 flex-shrink-0">📈 Distrib.</span>
+                  <div className="flex-1"><ForecastProgressBar progress={dp} label="series" /></div>
                 </div>
               )}
               {isRunning && !hasSeriesData && (
@@ -391,13 +426,22 @@ const StepCard = ({ step, onRun, onKill, activeJob, onToggleLogs, showLogs, isFu
           </div>
         )}
 
-        {/* Progress block — always visible while running; stays after completion for forecast/backtest */}
+        {/* Progress block — always visible while running; stays after completion for quantifiable steps */}
         {(isRunning || isDone) && (() => {
-          const fp = step.id === 'forecast' && activeJob?.progress?.FORECAST_PROGRESS;
-          const bp = step.id === 'backtest' && activeJob?.progress?.BACKTEST_PROGRESS;
-          // Specific series-count bar (forecast / backtest with data)
-          if (fp) return <div className="mt-2"><ForecastProgressBar progress={fp} label="series" /></div>;
-          if (bp) return <div className="mt-2"><ForecastProgressBar progress={bp} label="series" /></div>;
+          const op  = step.id === 'outlier-detection' && activeJob?.progress?.OUTLIER_PROGRESS;
+          const sgp = step.id === 'segmentation'      && activeJob?.progress?.SEGMENTATION_PROGRESS;
+          const cp  = step.id === 'characterization'  && activeJob?.progress?.CHAR_PROGRESS;
+          const mp  = step.id === 'best-method'       && activeJob?.progress?.BESTMETHOD_PROGRESS;
+          const fp  = step.id === 'forecast'          && activeJob?.progress?.FORECAST_PROGRESS;
+          const bp  = step.id === 'backtest'          && activeJob?.progress?.BACKTEST_PROGRESS;
+          const dp  = step.id === 'distributions'     && activeJob?.progress?.DISTRIBUTIONS_PROGRESS;
+          if (op)  return <div className="mt-2"><ForecastProgressBar progress={op}  label="series" /></div>;
+          if (sgp) return <div className="mt-2"><ForecastProgressBar progress={sgp} label="segments" /></div>;
+          if (cp)  return <div className="mt-2"><ForecastProgressBar progress={cp}  label="series" /></div>;
+          if (mp)  return <div className="mt-2"><ForecastProgressBar progress={mp}  label="series" /></div>;
+          if (fp)  return <div className="mt-2"><ForecastProgressBar progress={fp}  label="series" /></div>;
+          if (bp)  return <div className="mt-2"><ForecastProgressBar progress={bp}  label="series" /></div>;
+          if (dp)  return <div className="mt-2"><ForecastProgressBar progress={dp}  label="series" /></div>;
           // Indeterminate bar while running (no series data yet or step has none)
           if (isRunning) return (
             <div className="mt-2">
@@ -441,6 +485,12 @@ export const PipelineRunner = () => {
   const [showFullLogs, setShowFullLogs] = useState(false);
   const [error, setError]           = useState(null);
   const eventSources = useRef({});                         // key -> EventSource
+  // Refs so the stable polling interval can read the latest state without
+  // being recreated on every state change (avoids constant timer resets).
+  const jobsRef    = useRef({});
+  const fullJobRef = useRef(null);
+  useEffect(() => { jobsRef.current    = jobs;    }, [jobs]);
+  useEffect(() => { fullJobRef.current = fullJob; }, [fullJob]);
 
   // ── SSE helper (defined early so restore effects can use it) ────────
   const openSSE = useCallback((key, jobId, setter) => {
@@ -452,14 +502,16 @@ export const PipelineRunner = () => {
     const token = localStorage.getItem('forecastai_token') || '';
     const es = new EventSource(`/api/pipeline/jobs/${jobId}/stream${token ? `?token=${token}` : ''}`);
 
+    es.onerror = (err) => console.warn('[SSE] error/close for', key, err);
+
     es.onmessage = (e) => {
       try {
         const { line } = JSON.parse(e.data);
 
         // Parse structured progress markers — update job.progress, don't add to log
-        const progMatch = line.match(/\[(FORECAST_PROGRESS|BACKTEST_PROGRESS)\]\s+(.*)/);
+        const progMatch = line.match(/\[(FORECAST_PROGRESS|BACKTEST_PROGRESS|OUTLIER_PROGRESS|CHAR_PROGRESS|BESTMETHOD_PROGRESS|SEGMENTATION_PROGRESS|DISTRIBUTIONS_PROGRESS)\]\s+(.*)/);
         if (progMatch) {
-          const progKey = progMatch[1]; // 'FORECAST_PROGRESS' or 'BACKTEST_PROGRESS'
+          const progKey = progMatch[1];
           const progData = {};
           progMatch[2].trim().split(/\s+/).forEach(pair => {
             const eq = pair.indexOf('=');
@@ -525,10 +577,19 @@ export const PipelineRunner = () => {
             if (prev && typeof prev === 'object' && !prev.job_id) {
               const job = prev[key];
               if (!job || job.job_id !== jobId) return prev;
-              return { ...prev, [key]: r.data };
+              return {
+                ...prev,
+                [key]: {
+                  ...r.data,
+                  progress: { ...(prev[key]?.progress || {}), ...(r.data.progress || {}) },
+                },
+              };
             } else {
               if (!prev || prev.job_id !== jobId) return prev;
-              return r.data;
+              return {
+                ...r.data,
+                progress: { ...(prev?.progress || {}), ...(r.data.progress || {}) },
+              };
             }
           });
         } catch { /* ignore */ }
@@ -610,7 +671,10 @@ export const PipelineRunner = () => {
     }
   }, [fullJob, jobs, openSSE]);
 
-  // Poll running jobs, plus recently-ended jobs (for status/progress sync)
+  // Poll running jobs, plus recently-ended jobs (for status/progress sync).
+  // Uses refs so this interval is created once and never restarted on every
+  // SSE-driven state change (which was the root cause of the "flashing bar"
+  // issue where the timer was cancelled before it could fire).
   useEffect(() => {
     const interval = setInterval(async () => {
       const nowMs = Date.now();
@@ -619,24 +683,37 @@ export const PipelineRunner = () => {
         // Re-poll for up to 8s after completion to catch server-side status corrections
         (j.ended_at && nowMs - new Date(j.ended_at).getTime() < 8000);
 
-      // Individual step jobs
-      const liveEntries = Object.entries(jobs).filter(([, j]) => isLiveJob(j));
+      // Individual step jobs — read from ref so we always get the latest state
+      const liveEntries = Object.entries(jobsRef.current).filter(([, j]) => isLiveJob(j));
       for (const [stepId, job] of liveEntries) {
         try {
           const r = await api.get(`/pipeline/jobs/${job.job_id}`);
-          setJobs(prev => ({ ...prev, [stepId]: r.data }));
+          // Merge server-parsed progress (from log_lines via _extract_progress) with
+          // client-side SSE progress.  Server wins on overlapping keys; client fills
+          // in markers the server may not have seen yet in its latest snapshot.
+          setJobs(prev => ({
+            ...prev,
+            [stepId]: {
+              ...r.data,
+              progress: { ...(prev[stepId]?.progress || {}), ...(r.data.progress || {}) },
+            },
+          }));
         } catch { /* ignore */ }
       }
-      // Full-pipeline job
-      if (fullJob && isLiveJob(fullJob)) {
+      // Full-pipeline job — read from ref
+      const currentFullJob = fullJobRef.current;
+      if (currentFullJob && isLiveJob(currentFullJob)) {
         try {
-          const r = await api.get(`/pipeline/jobs/${fullJob.job_id}`);
-          setFullJob(r.data);
+          const r = await api.get(`/pipeline/jobs/${currentFullJob.job_id}`);
+          setFullJob(prev => ({
+            ...r.data,
+            progress: { ...(prev?.progress || {}), ...(r.data.progress || {}) },
+          }));
         } catch { /* ignore */ }
       }
     }, 1000);
     return () => clearInterval(interval);
-  }, [jobs, fullJob]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cleanup SSE on unmount
   useEffect(() => () => {

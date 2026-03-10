@@ -83,10 +83,17 @@ class DistributionFitter:
     Fits parametric distributions to forecast quantiles for MEIO.
     """
     
-    def __init__(self, config_path: str = "config/config.yaml", config_override: dict = None):
+    def __init__(self, config_path: str = None, config_override: dict = None):
         """Initialize with configuration."""
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+        try:
+            if config_path:
+                with open(config_path, 'r') as f:
+                    self.config = yaml.safe_load(f) or {}
+            else:
+                raise FileNotFoundError
+        except (FileNotFoundError, OSError):
+            from db.db import load_config_from_db
+            self.config = load_config_from_db()
         if config_override:
             from utils.parameter_resolver import ParameterResolver
             self.config = ParameterResolver.deep_merge(self.config, config_override)
@@ -377,8 +384,13 @@ class DistributionFitter:
             DataFrame with fitted distributions
         """
         distributions = []
-        
-        for _, row in forecasts_df.iterrows():
+        n_total = len(forecasts_df)
+        _dist_step = max(1, n_total // 100)
+        print(f"[DISTRIBUTIONS_PROGRESS] completed=0 total={n_total}", flush=True)
+        for _dist_idx, (_, row) in enumerate(forecasts_df.iterrows()):
+            _dist_done = _dist_idx + 1
+            if _dist_done % _dist_step == 0 or _dist_done == n_total:
+                print(f"[DISTRIBUTIONS_PROGRESS] completed={_dist_done} total={n_total}", flush=True)
             unique_id = row['unique_id']
             method = row['method']
             

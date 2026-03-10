@@ -21,7 +21,6 @@ import numpy as np
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 import logging
-import yaml
 from datetime import datetime
 
 # Local DB helper
@@ -57,37 +56,29 @@ class ETLPipeline:
         "median": "median",
     }
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path=None):
         """
         Initialize the ETL pipeline.
 
-        Args:
-            config_path: Path to config.yaml. If None, resolves to
-                         config/config.yaml relative to the files/ directory.
+        All configuration is read from the database (data_source and etl
+        parameter sets).  The legacy *config_path* parameter is accepted
+        but ignored.
         """
         self.logger = logging.getLogger(__name__)
 
-        # Resolve config path
-        if config_path is None:
-            files_dir = Path(__file__).resolve().parent.parent
-            config_path = str(files_dir / "config" / "config.yaml")
-
-        self.config_path = Path(config_path)
-        if not self.config_path.exists():
-            raise FileNotFoundError(f"Configuration file not found: {self.config_path}")
-
-        with open(self.config_path, "r") as f:
-            self.config = yaml.safe_load(f)
+        # Load config from DB (data_source + etl parameter types)
+        from db.db import load_config_from_db
+        self.config = load_config_from_db()
 
         # Extract relevant config sections
-        self.pg_config = self.config["data_source"]["postgres"]
-        self.etl_config = self.config["etl"]
-        self.query_config = self.etl_config["query"]
+        data_src = self.config.get("data_source", {})
+        self.etl_config = self.config.get("etl", {})
+        self.query_config = self.etl_config.get("query", {})
         self.agg_config = self.etl_config.get("aggregation", {})
 
-        # ── Source DB (remote Neon) — for extraction ──
-        self.source_db_config = self.config["data_source"].get("source_db")
-        if self.source_db_config:
+        # ── Source DB (remote) — for extraction ──
+        self.source_db_config = data_src.get("source_db") or {}
+        if self.source_db_config.get("host"):
             self.source_demand_table = self.source_db_config.get(
                 "demand_table", "dp_plan.calc_dp_actual"
             )
@@ -97,19 +88,22 @@ class ETLPipeline:
             self.src_col_site_id = src_cols.get("site_id", "site_id")
             self.src_col_date    = src_cols.get("date", "date")
             self.src_col_qty     = src_cols.get("qty", "qty")
-            self.src_col_channel = src_cols.get("channel", "channel")  # None = skip
+            self.src_col_channel = src_cols.get("channel", "channel")
         else:
             self.source_demand_table = None
 
-        # ── Local DB tables (for load + downstream) ──
-        self.tables = self.pg_config.get("tables", {
-            "item": "zcube.item",
-            "site": "zcube.site",
-            "demand_actual": "zcube.demand_actuals",
-            "forecast_results": "zcube.forecast_results",
-            "forecast_adjustments": "zcube.forecast_adjustments",
-            "process_log": "zcube.process_log",
-        })
+        # ── Local DB schema name ──
+        schema = get_schema()
+
+        # ── Table names ──
+        self.tables = {
+            "item": f"{schema}.item",
+            "site": f"{schema}.site",
+            "demand_actual": f"{schema}.demand_actuals",
+            "forecast_results": f"{schema}.forecast_results",
+            "forecast_adjustments": f"{schema}.forecast_adjustments",
+            "process_log": f"{schema}.process_log",
+        }
 
         # Column name overrides from config (used during transform)
         self.date_column = self.query_config.get("date_column", "date")
@@ -125,12 +119,11 @@ class ETLPipeline:
         self.frequency = self.agg_config.get("frequency", "M")
         self.agg_method = self.agg_config.get("method", "sum")
 
-        # Output table (PostgreSQL — no parquet)
-        self.output_table = self.tables.get("demand_actual", "zcube.demand_actuals")
+        # Output table
+        self.output_table = self.tables.get("demand_actual", f"{schema}.demand_actuals")
 
         src_label = self.source_demand_table or "(local fallback)"
         self.logger.info("ETLPipeline initialized")
-        self.logger.info(f"  Config : {self.config_path}")
         self.logger.info(f"  Source : {src_label}")
         self.logger.info(f"  Output : {self.output_table}")
 
@@ -141,7 +134,7 @@ class ETLPipeline:
     def init_db(self) -> None:
         """Ensure the local zcube schema and all tables exist."""
         self.logger.info("Initialising local database schema...")
-        init_schema(str(self.config_path))
+        init_schema()
         self.logger.info("Database schema ready")
 
     # ------------------------------------------------------------------
@@ -168,7 +161,7 @@ class ETLPipeline:
                 sslmode=cfg.get("sslmode", "require"),
             )
         # Fallback: use local DB
-        return get_conn(str(self.config_path))
+        return get_conn()
 
     # ------------------------------------------------------------------
     # Query builders
@@ -472,7 +465,7 @@ class ETLPipeline:
             self.logger.warning("No rows to insert into demand_actuals")
             return 0
 
-        conn = get_conn(str(self.config_path))
+        conn = get_conn()
         try:
             with conn.cursor() as cur:
                 # Truncate for a clean reload
@@ -798,7 +791,7 @@ class ETLPipeline:
         )
 
         src_conn = self._get_source_conn()
-        dst_conn = get_conn(str(self.config_path))
+        dst_conn = get_conn()
 
         try:
             # ── Item types ────────────────────────────────────────────────

@@ -58,10 +58,17 @@ class ForecastEvaluator:
     Implements rolling window cross-validation.
     """
     
-    def __init__(self, config_path: str = "config/config.yaml", config_override: dict = None):
+    def __init__(self, config_path: str = None, config_override: dict = None):
         """Initialize with configuration."""
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+        try:
+            if config_path:
+                with open(config_path, 'r') as f:
+                    self.config = yaml.safe_load(f) or {}
+            else:
+                raise FileNotFoundError
+        except (FileNotFoundError, OSError):
+            from db.db import load_config_from_db
+            self.config = load_config_from_db()
         if config_override:
             from utils.parameter_resolver import ParameterResolver
             self.config = ParameterResolver.deep_merge(self.config, config_override)

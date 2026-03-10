@@ -230,7 +230,9 @@ class SegmentationEngine:
             conn.close()
 
         results: Dict[str, int] = {}
-        for seg_id, seg_name, criteria, is_default in segments:
+        n_segments = len(segments)
+        print(f"[SEGMENTATION_PROGRESS] completed=0 total={n_segments}", flush=True)
+        for _seg_idx, (seg_id, seg_name, criteria, is_default) in enumerate(segments):
             if is_default:
                 # "All" segment: assign every series from demand_actuals directly
                 count = self._assign_all_series(seg_id, schema)
@@ -238,6 +240,7 @@ class SegmentationEngine:
                 count = self.assign_segment(seg_id, criteria or {})
             results[seg_name] = count
             logger.info("  Segment '%s': %d series", seg_name, count)
+            print(f"[SEGMENTATION_PROGRESS] completed={_seg_idx + 1} total={n_segments}", flush=True)
 
         # Resolve parameter assignments after all segment memberships are set
         logger.info("Segmentation: resolving parameter assignments …")

@@ -33,7 +33,7 @@ class MethodSelector:
     Lower composite_score == better.
     """
 
-    def __init__(self, config_path: str = "config/config.yaml", config_override: dict = None):
+    def __init__(self, config_path: str = None, config_override: dict = None):
         """
         Initialise the selector.
 
@@ -56,34 +56,31 @@ class MethodSelector:
     # Weight loading
     # ------------------------------------------------------------------
     def _load_weights(self, config_path: str, config_override: dict = None) -> Dict[str, float]:
-        """Load metric weights from config, falling back to defaults."""
+        """Load metric weights from DB (or yaml fallback), falling back to defaults."""
         try:
-            cfg_file = Path(config_path)
-            if cfg_file.exists():
-                with open(cfg_file, "r") as fh:
-                    config = yaml.safe_load(fh) or {}
-                if config_override:
-                    from utils.parameter_resolver import ParameterResolver
-                    config = ParameterResolver.deep_merge(config, config_override)
-                weights = (
-                    config.get("best_method", {}).get("weights", None)
-                )
-                if weights is not None:
-                    self.logger.info(
-                        "Loaded weights from config: %s", config_path
-                    )
-                    return {str(k): float(v) for k, v in weights.items()}
-            self.logger.warning(
-                "Config '%s' not found or missing best_method.weights – "
-                "using default weights.",
-                config_path,
-            )
+            if config_path:
+                cfg_file = Path(config_path)
+                if cfg_file.exists():
+                    with open(cfg_file, "r") as fh:
+                        config = yaml.safe_load(fh) or {}
+                else:
+                    raise FileNotFoundError
+            else:
+                raise FileNotFoundError
+        except (FileNotFoundError, OSError):
+            from db.db import load_config_from_db
+            config = load_config_from_db()
+        try:
+            if config_override:
+                from utils.parameter_resolver import ParameterResolver
+                config = ParameterResolver.deep_merge(config, config_override)
+            weights = config.get("best_method", {}).get("weights", None)
+            if weights is not None:
+                self.logger.info("Loaded best_method weights from DB/config")
+                return {str(k): float(v) for k, v in weights.items()}
         except Exception as exc:
-            self.logger.warning(
-                "Failed to read config '%s': %s – using default weights.",
-                config_path,
-                exc,
-            )
+            self.logger.warning("Failed to extract weights: %s – using defaults.", exc)
+        self.logger.warning("Missing best_method.weights – using default weights.")
         return dict(_DEFAULT_WEIGHTS)
 
     # ------------------------------------------------------------------
@@ -123,9 +120,15 @@ class MethodSelector:
             )
 
         results = []
-        for uid, group in metrics_df.groupby("unique_id"):
+        n_total = metrics_df["unique_id"].nunique()
+        _bm_step = max(1, n_total // 100)
+        print(f"[BESTMETHOD_PROGRESS] completed=0 total={n_total}", flush=True)
+        for _bm_idx, (uid, group) in enumerate(metrics_df.groupby("unique_id")):
             row = self._rank_methods_for_series(uid, group)
             results.append(row)
+            _bm_done = _bm_idx + 1
+            if _bm_done % _bm_step == 0 or _bm_done == n_total:
+                print(f"[BESTMETHOD_PROGRESS] completed={_bm_done} total={n_total}", flush=True)
 
         if not results:
             return self._empty_result()

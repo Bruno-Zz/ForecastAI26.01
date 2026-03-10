@@ -163,23 +163,31 @@ class TimeSeriesCharacterizer:
         unique_id | ds (datetime) | y (numeric)
     """
 
-    def __init__(self, config_path: str = "config/config.yaml", config_override: dict = None):
+    def __init__(self, config_path: str = None, config_override: dict = None):
         """
-        Initialize the characterizer from a YAML configuration file.
+        Initialize the characterizer.
 
         Args:
-            config_path: Path to the project config.yaml.
+            config_path: Optional path to a YAML config file (legacy). When
+                omitted the configuration is loaded from the database.
             config_override: Optional dict to deep-merge on top of the loaded config.
         """
-        self.config_path = config_path
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+        try:
+            if config_path:
+                with open(config_path, 'r') as f:
+                    self.config = yaml.safe_load(f) or {}
+            else:
+                raise FileNotFoundError
+        except (FileNotFoundError, OSError):
+            from db.db import load_config_from_db
+            self.config = load_config_from_db()
         if config_override:
             from utils.parameter_resolver import ParameterResolver
             self.config = ParameterResolver.deep_merge(self.config, config_override)
 
         self.char_config = self.config['characterization']
-        self.method_selection = self.config['forecasting']['method_selection']
+        _bm_cfg = self.config.get('best_method', {})
+        self.method_selection = _bm_cfg.get('method_selection', {})
         self.output_config = self.config.get('output', {})
         self.logger = logging.getLogger(__name__)
 
@@ -189,6 +197,12 @@ class TimeSeriesCharacterizer:
         self.intermittency_cfg = self.char_config['intermittency']
         self.stationarity_cfg = self.char_config['stationarity']
         self.sufficiency_cfg = self.char_config['data_sufficiency']
+        self.complexity_cfg = self.char_config.get('complexity', {})
+
+        # Method selection strategy (per parameter version / per segment)
+        self.method_selection_strategy = _bm_cfg.get('method_selection_strategy', 'auto')
+        self.best_fit_methods = _bm_cfg.get('best_fit_methods', [])
+        self.method_overrides = _bm_cfg.get('method_overrides', {})
 
         # Frequency used as a fallback when date information is unavailable
         self.frequency = (
@@ -241,6 +255,8 @@ class TimeSeriesCharacterizer:
         unique_ids = df[id_col].unique()
         n_series = len(unique_ids)
         self.logger.info(f"Starting characterization of {n_series} time series")
+        print(f"[CHAR_PROGRESS] completed=0 total={n_series}", flush=True)
+        _char_prog_step = max(1, n_series // 100)
 
         results: List[Dict[str, Any]] = []
 
@@ -249,6 +265,8 @@ class TimeSeriesCharacterizer:
                 self.logger.info(
                     f"  Characterizing series {idx + 1}/{n_series} ({uid})"
                 )
+            if (idx + 1) % _char_prog_step == 0 or (idx + 1) == n_series:
+                print(f"[CHAR_PROGRESS] completed={idx + 1} total={n_series}", flush=True)
 
             series_df = (
                 df[df[id_col] == uid]
@@ -524,10 +542,22 @@ class TimeSeriesCharacterizer:
         else:
             chars.cov = 0.0
 
-        # Sparsity rule: sparse (intermittent) when fewer than 5 periods have
-        # positive demand over the complete horizon.
+        # Multi-criterion intermittency classification using configurable thresholds.
+        # 1. Syntetos-Boylan: ADI > adi_threshold AND CoV > cov_threshold
+        # 2. Zero-ratio rule: proportion of zeros exceeds zero_threshold
+        # 3. Count fallback: fewer than min_positive_periods non-zero observations
+        zero_thr = self.intermittency_cfg.get('zero_threshold', 0.5)
+        adi_thr  = self.intermittency_cfg.get('adi_threshold',  1.32)
+        cov_thr  = self.intermittency_cfg.get('cov_threshold',  0.49)
+        min_pos  = self.intermittency_cfg.get('min_positive_periods', 5)
+
         n_periods_with_demand = int(np.sum(values > 0))
-        chars.is_intermittent = n_periods_with_demand < 5
+
+        sb_rule    = (chars.adi > adi_thr) and (chars.cov > cov_thr)
+        zero_rule  = chars.zero_ratio > zero_thr
+        count_rule = n_periods_with_demand < min_pos
+
+        chars.is_intermittent = sb_rule or zero_rule or count_rule
 
     # ------------------------------------------------------------------
     # Stationarity
@@ -643,10 +673,13 @@ class TimeSeriesCharacterizer:
 
         chars.complexity_score = float(np.clip(composite, 0.0, 1.0))
 
-        # Classification
-        if chars.complexity_score < 0.35:
+        # Classification using configurable thresholds
+        low_thr  = self.complexity_cfg.get('low_threshold',  0.35)
+        high_thr = self.complexity_cfg.get('high_threshold', 0.65)
+
+        if chars.complexity_score < low_thr:
             chars.complexity_level = 'low'
-        elif chars.complexity_score < 0.65:
+        elif chars.complexity_score < high_thr:
             chars.complexity_level = 'medium'
         else:
             chars.complexity_level = 'high'
@@ -667,31 +700,128 @@ class TimeSeriesCharacterizer:
         chars.sufficient_for_deep_learning = chars.n_observations >= min_dl
 
     # ------------------------------------------------------------------
+    # Method compatibility check
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def check_method_compatibility(
+        method: str,
+        chars: 'SeriesCharacteristics',
+        min_ml: int = 20,
+        min_dl: int = 30,
+    ) -> Dict[str, str]:
+        """
+        Return compatibility status for a single method against a series.
+
+        Returns
+        -------
+        dict with keys:
+            status : 'ok' | 'warning' | 'error'
+                'error'   – method cannot run at all (should be skipped)
+                'warning' – method can run but is not a natural fit
+                'ok'      – method is appropriate for this series
+            reason : str – human-readable explanation (empty when 'ok')
+        """
+        DL              = {'NHITS', 'NBEATS', 'PatchTST', 'TFT', 'DeepAR'}
+        ML              = {'LightGBM', 'XGBoost'}
+        INT_ONLY        = {'CrostonOptimized', 'ADIDA', 'IMAPA'}
+        SEASONAL_REQ    = {'MSTL'}
+        INT_SAFE        = INT_ONLY | {'HistoricAverage', 'SeasonalNaive', 'TimesFM'}
+
+        if method in DL and not chars.sufficient_for_deep_learning:
+            return {
+                'status': 'error',
+                'reason': (
+                    f'{method} requires ≥{min_dl} observations; '
+                    f'series has {chars.n_observations}'
+                ),
+            }
+        if method in ML and not chars.sufficient_for_ml:
+            return {
+                'status': 'error',
+                'reason': (
+                    f'{method} requires ≥{min_ml} observations; '
+                    f'series has {chars.n_observations}'
+                ),
+            }
+        if method in INT_ONLY and not chars.is_intermittent:
+            return {
+                'status': 'warning',
+                'reason': (
+                    f'{method} is designed for intermittent demand; '
+                    'this series has regular demand'
+                ),
+            }
+        if chars.is_intermittent and method not in INT_SAFE:
+            return {
+                'status': 'warning',
+                'reason': (
+                    'Series is intermittent; non-intermittent methods '
+                    'may underperform'
+                ),
+            }
+        if method in SEASONAL_REQ and not chars.has_seasonality:
+            return {
+                'status': 'warning',
+                'reason': f'{method} works best with seasonal data; none detected',
+            }
+        return {'status': 'ok', 'reason': ''}
+
+    # ------------------------------------------------------------------
     # Method recommendation
     # ------------------------------------------------------------------
 
     def _recommend_methods(self, chars: SeriesCharacteristics) -> List[str]:
         """
-        Select forecasting methods based on detected characteristics.
+        Select forecasting methods based on the configured strategy.
 
-        Decision logic (in priority order):
-            1. Sparse data (< 5 obs/year on average) -> sparse_data methods.
-            2. Intermittent demand -> intermittent methods.
-            3. High complexity -> complex methods (filtered by data sufficiency).
-            4. Seasonal patterns -> seasonal methods (filtered by data sufficiency).
-            5. Otherwise -> standard methods.
+        Strategy: 'best_fit'
+            Use the planner-selected best_fit_methods list.  Compatibility is
+            checked per method: incompatible ones are skipped (logged as
+            WARNING); sub-optimal ones are included (logged as INFO).
+            Falls back to HistoricAverage if nothing can run.
 
-        Deep-learning and ML methods are excluded when data is insufficient.
+        Strategy: 'auto'  (default)
+            Demand characteristics drive group assignment (sparse_data,
+            intermittent, complex, seasonal, standard).  Configurable
+            thresholds in characterization.* control the assignment.
+            Within each group the planner may optionally pin a single method
+            via forecasting.method_overrides.<group>.  If the pinned method
+            is incompatible, the full group list is used instead.
+            Deep-learning and ML methods are excluded when data is
+            insufficient.
         """
-        sparse_obs_per_year = self.sufficiency_cfg.get('sparse_obs_per_year', 5)
+        min_ml = self.sufficiency_cfg.get('min_for_ml', 20)
+        min_dl = self.sufficiency_cfg.get('min_for_deep_learning', 30)
 
-        # Methods that require substantial data
+        # ── Strategy: best_fit ─────────────────────────────────────────
+        if self.method_selection_strategy == 'best_fit':
+            candidates = list(self.best_fit_methods) or list(
+                self.method_selection.get('standard', [])
+            )
+            runnable = []
+            for m in candidates:
+                compat = self.check_method_compatibility(m, chars, min_ml, min_dl)
+                if compat['status'] == 'error':
+                    self.logger.warning(
+                        "Best-fit: skipping %s for '%s': %s",
+                        m, chars.unique_id, compat['reason'],
+                    )
+                else:
+                    if compat['status'] == 'warning':
+                        self.logger.info(
+                            "Best-fit: including %s for '%s' with caveat: %s",
+                            m, chars.unique_id, compat['reason'],
+                        )
+                    runnable.append(m)
+            return runnable if runnable else ['HistoricAverage']
+
+        # ── Strategy: auto ─────────────────────────────────────────────
         ml_methods = {'LightGBM', 'XGBoost'}
         dl_methods = {'NHITS', 'NBEATS', 'PatchTST', 'TFT', 'DeepAR'}
+        sparse_obs_per_year = self.sufficiency_cfg.get('sparse_obs_per_year', 5)
 
-        # ----- 1. Sparse data: fewer than 5 observations per year on average -----
-        # Compute the span in years from the stored date range; fall back to
-        # a period-count estimate if dates are unavailable.
+        # Determine sparsity from observation density
         is_sparse = False
         try:
             if chars.date_range_start and chars.date_range_end:
@@ -701,37 +831,52 @@ class TimeSeriesCharacterizer:
                 obs_per_year = chars.n_observations / span_years
                 is_sparse = obs_per_year < sparse_obs_per_year
             else:
-                # Fallback: derive a 1-year threshold from the configured frequency
-                # e.g. W→52 periods/yr, M→12, so sparse = fewer than sparse_obs_per_year * (periods/yr / 12)
                 periods_per_year = self._freq_periods_year.get(self.frequency, 12)
-                fallback_threshold = max(sparse_obs_per_year, round(sparse_obs_per_year * periods_per_year / 12))
+                fallback_threshold = max(
+                    sparse_obs_per_year,
+                    round(sparse_obs_per_year * periods_per_year / 12),
+                )
                 is_sparse = chars.n_observations < fallback_threshold
         except Exception:
             periods_per_year = self._freq_periods_year.get(self.frequency, 12)
-            fallback_threshold = max(sparse_obs_per_year, round(sparse_obs_per_year * periods_per_year / 12))
+            fallback_threshold = max(
+                sparse_obs_per_year,
+                round(sparse_obs_per_year * periods_per_year / 12),
+            )
             is_sparse = chars.n_observations < fallback_threshold
 
+        # Map series to demand group
         if is_sparse:
-            methods = list(self.method_selection.get('sparse_data', []))
-            return self._filter_by_sufficiency(methods, chars, ml_methods, dl_methods)
+            group_key = 'sparse_data'
+        elif chars.is_intermittent:
+            group_key = 'intermittent'
+        elif chars.complexity_level == 'high':
+            group_key = 'complex'
+        elif chars.has_seasonality:
+            group_key = 'seasonal'
+        else:
+            group_key = 'standard'
 
-        # ----- 2. Intermittent demand -----
-        if chars.is_intermittent:
-            methods = list(self.method_selection.get('intermittent', []))
-            return self._filter_by_sufficiency(methods, chars, ml_methods, dl_methods)
+        # Apply planner method override for this group (if configured)
+        override = (self.method_overrides or {}).get(group_key)
+        if override:
+            compat = self.check_method_compatibility(override, chars, min_ml, min_dl)
+            if compat['status'] != 'error':
+                if compat['status'] == 'warning':
+                    self.logger.info(
+                        "Auto override: using %s for '%s' (group=%s) with caveat: %s",
+                        override, chars.unique_id, group_key, compat['reason'],
+                    )
+                return [override]
+            else:
+                self.logger.warning(
+                    "Auto override: %s incompatible for '%s' (%s); "
+                    "falling back to group methods",
+                    override, chars.unique_id, compat['reason'],
+                )
 
-        # ----- 3. High complexity -----
-        if chars.complexity_level == 'high':
-            methods = list(self.method_selection.get('complex', []))
-            return self._filter_by_sufficiency(methods, chars, ml_methods, dl_methods)
-
-        # ----- 4. Seasonal -----
-        if chars.has_seasonality:
-            methods = list(self.method_selection.get('seasonal', []))
-            return self._filter_by_sufficiency(methods, chars, ml_methods, dl_methods)
-
-        # ----- 5. Standard -----
-        methods = list(self.method_selection.get('standard', []))
+        # No override (or override incompatible): run full group list
+        methods = list(self.method_selection.get(group_key, []))
         return self._filter_by_sufficiency(methods, chars, ml_methods, dl_methods)
 
     @staticmethod

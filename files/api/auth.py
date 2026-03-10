@@ -3,6 +3,7 @@ Authentication module for ForecastAI.
 JWT-based auth with local password, Microsoft OAuth, and Google OAuth support.
 """
 
+import json
 import logging
 import sys
 import uuid
@@ -11,7 +12,6 @@ from pathlib import Path
 from typing import List, Optional
 
 import httpx
-import yaml
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel
 
@@ -36,26 +36,41 @@ ALGORITHM = "HS256"
 
 
 # ────────────────────────────────────────────────────────
-# Config helpers
+# Config helpers  (read from DB 'auth' parameter set)
 # ────────────────────────────────────────────────────────
 
 
-def _api_config_path() -> str:
-    return str(Path(__file__).resolve().parent.parent / "config" / "config.yaml")
+def _load_auth_from_db() -> dict:
+    """Load the 'auth' parameter set from the database.
 
-
-def _load_auth_config() -> dict:
-    with open(_api_config_path(), "r") as f:
-        cfg = yaml.safe_load(f)
-    return cfg.get("auth", {})
+    Returns an empty dict if the DB is unavailable or the row doesn't exist yet
+    (e.g. during initial schema creation).
+    """
+    try:
+        schema = get_schema()
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT parameters_set FROM {schema}.parameters "
+                    f"WHERE parameter_type = 'auth' AND is_default = TRUE LIMIT 1"
+                )
+                row = cur.fetchone()
+                if row:
+                    return row[0] if isinstance(row[0], dict) else json.loads(row[0] or "{}")
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return {}
 
 
 def _jwt_secret() -> str:
-    return _load_auth_config().get("jwt_secret", "CHANGE-ME")
+    return _load_auth_from_db().get("jwt_secret", "CHANGE-ME")
 
 
 def _token_expiry_minutes() -> int:
-    return _load_auth_config().get("token_expiry_minutes", 480)
+    return int(_load_auth_from_db().get("token_expiry_minutes", 480))
 
 
 # ────────────────────────────────────────────────────────
@@ -165,8 +180,8 @@ def _user_row_to_response(row: dict) -> UserResponse:
 
 def _db_fetch_user_by_email(email: str) -> Optional[dict]:
     """Look up a user by email. Returns dict or None."""
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -186,8 +201,8 @@ def _db_fetch_user_by_email(email: str) -> Optional[dict]:
 
 
 def _db_fetch_user_by_id(user_id: str) -> Optional[dict]:
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -308,8 +323,8 @@ async def microsoft_login(body: MicrosoftTokenRequest):
 
     # Upsert user
     user = _db_fetch_user_by_email(email)
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
 
     try:
         with conn.cursor() as cur:
@@ -386,8 +401,8 @@ async def google_login(body: GoogleTokenRequest):
 
     # Upsert user
     user = _db_fetch_user_by_email(email)
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
 
     try:
         with conn.cursor() as cur:
@@ -456,8 +471,8 @@ async def create_user(body: CreateUserRequest, request: Request):
         )
 
     hashed = pwd_context.hash(body.password)
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -498,8 +513,8 @@ async def list_users(request: Request):
     """Admin: list all users."""
     _require_admin(request)
 
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -564,8 +579,8 @@ async def update_user(user_id: str, body: UpdateUserRequest, request: Request):
     updates.append("updated_at = NOW()")
     params.append(user_id)
 
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -604,8 +619,8 @@ async def change_password(body: ChangePasswordRequest, request: Request):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
 
     new_hash = pwd_context.hash(body.new_password)
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -632,8 +647,8 @@ async def logout(request: Request):
     if not jti:
         return {"detail": "Logged out"}
 
-    schema = get_schema(_api_config_path())
-    conn = get_conn(_api_config_path())
+    schema = get_schema()
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -654,19 +669,22 @@ async def logout(request: Request):
 # ────────────────────────────────────────────────────────
 
 
-def seed_default_admin(config_path: str) -> None:
-    """Create the default admin user on first run if no users exist."""
+def seed_default_admin(config_path=None) -> None:
+    """Create the default admin user on first run if no users exist.
+
+    Default admin credentials are read from the 'auth' parameter set in the DB
+    (Settings → System Configuration → Auth).  The legacy *config_path*
+    parameter is accepted but ignored.
+    """
     try:
-        with open(config_path, "r") as f:
-            cfg = yaml.safe_load(f)
-        auth_cfg = cfg.get("auth", {})
+        auth_cfg = _load_auth_from_db()
         default_admin = auth_cfg.get("default_admin", {})
         if not default_admin.get("email"):
-            logger.info("No default_admin configured -- skipping seed")
+            logger.info("No default_admin configured in DB -- skipping seed")
             return
 
-        schema = get_schema(config_path)
-        conn = get_conn(config_path)
+        schema = get_schema()
+        conn = get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(f"SELECT COUNT(*) FROM {schema}.users")
