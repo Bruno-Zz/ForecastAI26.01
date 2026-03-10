@@ -1,0 +1,37 @@
+[package]
+name = "meio_optimizer"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-Echelon Inventory Optimization engine with PyO3 bindings"
+
+[lib]
+name = "meio_optimizer"
+# cdylib  → Python extension (.pyd / .so)
+# rlib    → allows internal tests
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Python bindings
+pyo3 = { version = "0.23", features = ["extension-module"] }
+
+# Parallelism — Rayon powers the parallel main loop
+rayon = "1.10"
+
+# Fast lock-free concurrent primitives
+parking_lot = "0.12"
+
+# Serialization (config / results interchange with Python)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Statistical distributions (Normal, Poisson, Gamma, LogNormal, Weibull, NegBinomial)
+statrs = "0.17"
+
+# Logging
+log = "0.4"
+
+[profile.release]
+opt-level = 3
+lto        = true
+codegen-units = 1
+panic      = "abort"
