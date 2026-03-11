@@ -22,7 +22,6 @@ try:
         AutoETS,
         AutoTheta,
         AutoCES,
-        MSTL,
         CrostonOptimized,
         ADIDA,
         IMAPA,
@@ -37,6 +36,22 @@ try:
 except ImportError:
     STATSFORECAST_AVAILABLE = False
     logging.warning("StatsForecast not available. Install with: pip install statsforecast")
+
+# MSTL requires the optional 'supersmoother' package, but statsforecast imports
+# it lazily inside MSTL.fit() — so `from statsforecast.models import MSTL`
+# succeeds even without supersmoother.  Probe the actual runtime dependency here.
+try:
+    from statsforecast.models import MSTL
+    import supersmoother as _supersmoother_probe  # noqa: F401 — lazy dep check
+    del _supersmoother_probe
+    MSTL_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    MSTL_AVAILABLE = False
+    logging.warning(
+        "MSTL model unavailable: 'supersmoother' package not found in the active "
+        "Python environment. To enable MSTL, activate the correct venv and run: "
+        "pip install supersmoother  (then restart the API/pipeline process)."
+    )
 
 
 @dataclass
@@ -101,6 +116,12 @@ class StatisticalForecaster:
         self.horizon = self.forecast_config['horizon']
         self.confidence_levels = self.forecast_config['confidence_levels']
         self.n_jobs = self.config.get('performance', {}).get('n_jobs', 1)
+        # Methods disabled at runtime due to missing optional dependencies.
+        # Tracked per-instance so the warning fires only once, not once per series.
+        self._missing_dep_methods: set = set()
+        # Per-method failure counters — warnings are throttled after a threshold
+        # so that systematic model failures don't spam the log (once per series).
+        self._method_error_counts: dict = {}
 
         # Translate config frequency shorthand to the pandas 2.x offset aliases
         # that StatsForecast / utilsforecast expects.  'M' was deprecated in
@@ -140,7 +161,8 @@ class StatisticalForecaster:
         season_length = max(1, int(ovr.get('season_length', season_length)))
 
         # For MSTL the trend forecaster must be non-seasonal (season_length=1).
-        mstl_trend = AutoARIMA(season_length=1)
+        # Only instantiate when supersmoother is available.
+        mstl_trend = AutoARIMA(season_length=1) if MSTL_AVAILABLE else None
 
         # Conformal prediction intervals for intermittent-demand models
         n_obs = characteristics.get('n_observations', 0)
@@ -262,14 +284,17 @@ class StatisticalForecaster:
                                 'simple (N), partial (P), full (F) seasonal models.',
                  'method_family': 'CES'}
             ),
-            'MSTL': lambda: (
-                MSTL(season_length=season_length, trend_forecaster=mstl_trend),
-                {**_base_hyper, **_ovr_flag, 'season_length': season_length,
-                 'trend_forecaster': 'AutoARIMA(season_length=1)',
-                 'description': 'Multiple Seasonal-Trend decomposition using LOESS. '
-                                'Decomposes into trend + seasonal + remainder, then forecasts '
-                                'trend with AutoARIMA(season_length=1).',
-                 'method_family': 'Decomposition'}
+            **(  # MSTL requires optional 'supersmoother' package
+                {'MSTL': lambda: (
+                    MSTL(season_length=season_length, trend_forecaster=mstl_trend),
+                    {**_base_hyper, **_ovr_flag, 'season_length': season_length,
+                     'trend_forecaster': 'AutoARIMA(season_length=1)',
+                     'description': 'Multiple Seasonal-Trend decomposition using LOESS. '
+                                    'Decomposes into trend + seasonal + remainder, then '
+                                    'forecasts trend with AutoARIMA(season_length=1).',
+                     'method_family': 'Decomposition'}
+                )}
+                if MSTL_AVAILABLE else {}
             ),
             'CrostonOptimized': lambda: (
                 CrostonOptimized(prediction_intervals=_conformal),
@@ -380,6 +405,10 @@ class StatisticalForecaster:
         n_obs = len(series_df)
 
         for method in methods:
+            # Skip methods whose optional dependency was already found missing this run.
+            if method in self._missing_dep_methods:
+                continue
+
             # Pre-flight guard: SeasonalNaive and SeasonalWindowAverage require
             # at least season_length observations; StatsForecast raises
             # "number sections must be larger than 0" otherwise.
@@ -439,8 +468,21 @@ class StatisticalForecaster:
                 _conformal_available = n_obs >= 2 * self.horizon + 1
                 _skip_level = method in _INTERMITTENT_MODELS and not _conformal_available
 
+                # MSTL uses supersmoother which requires unique date points.
+                # Aggregate (sum) any duplicate dates before passing to StatsForecast.
+                _forecast_input_df = series_df
+                if method == 'MSTL' and series_df['ds'].duplicated().any():
+                    _forecast_input_df = (
+                        series_df.groupby(['unique_id', 'ds'], as_index=False)['y']
+                        .sum().sort_values('ds').reset_index(drop=True)
+                    )
+                    self.logger.debug(
+                        f"{unique_id}: MSTL deduplicated dates "
+                        f"{len(series_df)} → {len(_forecast_input_df)} rows"
+                    )
+
                 # Generate forecast with prediction intervals
-                forecast_kwargs = dict(df=series_df, h=self.horizon)
+                forecast_kwargs = dict(df=_forecast_input_df, h=self.horizon)
                 if not _skip_level:
                     forecast_kwargs['level'] = self.confidence_levels
                 forecast_df = sf.forecast(**forecast_kwargs)
@@ -564,7 +606,9 @@ class StatisticalForecaster:
                     fitted_df = sf.forecast_fitted_values()
                     if method in fitted_df.columns:
                         fitted_values = fitted_df[method].values
-                        residuals = series_df['y'].values - fitted_values
+                        _insample_y = _forecast_input_df['y'].values
+                        if len(fitted_values) == len(_insample_y):
+                            residuals = _insample_y - fitted_values
                 except:
                     pass
 
@@ -578,20 +622,46 @@ class StatisticalForecaster:
                     residuals=residuals,
                     hyperparameters=method_hyperparams,
                     training_time=training_time,
-                    insample_actual=series_df['y'].values
+                    insample_actual=_forecast_input_df['y'].values
                 )
                 
                 results.append(result)
                 
                 self.logger.debug(f"Forecast complete: {unique_id} - {method} ({training_time:.2f}s)")
                 
+            except ModuleNotFoundError as dep_err:
+                # A required optional package is missing (e.g. supersmoother for MSTL).
+                # Log once for the whole run, then silently skip all subsequent series.
+                if method not in self._missing_dep_methods:
+                    self.logger.warning(
+                        f"Method '{method}' disabled — missing dependency: {dep_err}. "
+                        f"Fix: activate the correct venv and run: pip install {dep_err.name or str(dep_err)}"
+                    )
+                    self._missing_dep_methods.add(method)
+                continue
             except Exception as e:
                 # Downgrade "Unknown method" to debug — expected when non-statistical
                 # methods (TimesFM, LightGBM…) are passed in without pre-filtering.
                 if "Unknown method" in str(e):
                     self.logger.debug(f"{unique_id}: skipping {method} — {e}")
                 else:
-                    self.logger.warning(f"Failed to forecast {unique_id} with {method}: {str(e)}")
+                    # Throttle repeated failures for the same method: log the first
+                    # 3 fully, emit a summary at the 4th, then suppress to debug.
+                    cnt = self._method_error_counts.get(method, 0) + 1
+                    self._method_error_counts[method] = cnt
+                    if cnt <= 3:
+                        self.logger.warning(
+                            f"Failed to forecast {unique_id} with {method}: {str(e)}"
+                        )
+                    elif cnt == 4:
+                        self.logger.warning(
+                            f"'{method}' has now failed {cnt} times this run "
+                            f"(further per-series warnings suppressed). Last error: {str(e)}"
+                        )
+                    else:
+                        self.logger.debug(
+                            f"Failed to forecast {unique_id} with {method}: {str(e)}"
+                        )
                 continue
         
         return results
@@ -620,10 +690,12 @@ class StatisticalForecaster:
 
         # Methods this forecaster knows how to handle
         KNOWN_METHODS = {
-            'AutoARIMA', 'AutoETS', 'AutoTheta', 'AutoCES', 'MSTL',
+            'AutoARIMA', 'AutoETS', 'AutoTheta', 'AutoCES',
             'CrostonOptimized', 'ADIDA', 'IMAPA', 'TSB',
             'SeasonalNaive', 'HistoricAverage', 'Naive', 'SeasonalWindowAverage'
         }
+        if MSTL_AVAILABLE:
+            KNOWN_METHODS.add('MSTL')
 
         rows_list = characteristics_df.to_dict('records')
 

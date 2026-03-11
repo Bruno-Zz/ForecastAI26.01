@@ -43,6 +43,19 @@ const FIXED_COLS = [
   { id: 'best_method',      label: 'Best Method', type: 'text',    sortKey: 'best_method',      defaultHidden: false },
 ];
 
+// ─── Default column widths (px) ──────────────────────────────────
+const DEFAULT_COL_WIDTHS = {
+  '_item': 130, '_site': 110, 'n_observations': 64,
+  'complexity_level': 95, 'is_intermittent': 70, 'has_seasonality': 70,
+  'has_trend': 60, 'mean': 80, '_sparkline': 120, 'n_outliers': 54,
+  'best_method': 140,
+};
+const getDefaultColWidth = (colId) => {
+  if (DEFAULT_COL_WIDTHS[colId] !== undefined) return DEFAULT_COL_WIDTHS[colId];
+  if (colId.startsWith('_cls_')) return 70;
+  return 100;
+};
+
 function buildDefaultOrder(abcColIds) {
   const base = FIXED_COLS.map(c => c.id);
   const cIdx = base.indexOf('complexity_level');
@@ -329,6 +342,38 @@ export const Dashboard = () => {
       return next;
     });
   }, [setHiddenCols]);
+
+  // Column widths (resizable)
+  const [colWidths, setColWidthsRaw] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('dash_col_widths') || 'null') || {}; }
+    catch { return {}; }
+  });
+  const setColWidth = useCallback((colId, width) => {
+    setColWidthsRaw(prev => {
+      const next = { ...prev, [colId]: width };
+      localStorage.setItem('dash_col_widths', JSON.stringify(next));
+      return next;
+    });
+  }, []);
+  const handleResizeMouseDown = useCallback((e, colId, startWidth) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const startX = e.clientX;
+    const onMove = (mv) => {
+      const newW = Math.max(40, startWidth + mv.clientX - startX);
+      setColWidth(colId, newW);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [setColWidth]);
 
   // Unified column filters
   const [colFilters, setColFilters] = useState({});
@@ -887,10 +932,14 @@ export const Dashboard = () => {
                     </label>
                   );
                 })}
-                <div className="border-t border-gray-100 dark:border-gray-700 mt-1 pt-1 px-3 pb-1">
+                <div className="border-t border-gray-100 dark:border-gray-700 mt-1 pt-1 px-3 pb-1 flex gap-3">
                   <button onClick={() => { setHiddenCols(buildDefaultHidden()); setColsMenuOpen(false); }}
                     className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
-                    Reset to defaults
+                    Reset columns
+                  </button>
+                  <button onClick={() => { setColWidthsRaw({}); localStorage.removeItem('dash_col_widths'); setColsMenuOpen(false); }}
+                    className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
+                    Reset widths
                   </button>
                 </div>
               </div>
@@ -900,7 +949,12 @@ export const Dashboard = () => {
 
         {/* Table */}
         <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
-          <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 text-sm">
+          <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 text-sm" style={{ tableLayout: 'fixed' }}>
+            <colgroup>
+              {visibleCols.map(col => (
+                <col key={col.id} style={{ width: colWidths[col.id] ?? getDefaultColWidth(col.id) }} />
+              ))}
+            </colgroup>
             <thead className="bg-gray-50 dark:bg-gray-900">
 
               {/* ── Column headers: click to sort, drag to reorder ── */}
@@ -914,8 +968,9 @@ export const Dashboard = () => {
                     onDragEnd={handleColDragEnd}
                     onClick={() => handleSort(col.sortKey)}
                     title={col.sortKey ? 'Click to sort · Drag to reorder' : 'Drag to reorder'}
+                    style={{ position: 'relative' }}
                     className={[
-                      'px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase whitespace-nowrap select-none transition-colors',
+                      'px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase whitespace-nowrap select-none transition-colors overflow-hidden',
                       col.sortKey ? 'cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800' : 'cursor-grab',
                       dragOverColId === col.id && dragColId !== col.id ? 'bg-blue-50 dark:bg-blue-900/20 border-l-2 border-blue-400' : '',
                       dragColId === col.id ? 'opacity-40' : '',
@@ -924,6 +979,16 @@ export const Dashboard = () => {
                     <span className="mr-1 text-gray-300 dark:text-gray-600 select-none" aria-hidden="true">{'\u2630'}</span>
                     {col.label}
                     {col.sortKey ? sortInd(col.sortKey) : ''}
+                    {/* Resize handle */}
+                    <div
+                      draggable={false}
+                      onMouseDown={(e) => handleResizeMouseDown(e, col.id, colWidths[col.id] ?? getDefaultColWidth(col.id))}
+                      onDragStart={(e) => e.preventDefault()}
+                      onClick={(e) => e.stopPropagation()}
+                      title="Drag to resize column"
+                      style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: '6px', cursor: 'col-resize', zIndex: 2 }}
+                      className="resize-col-handle hover:bg-blue-400 dark:hover:bg-blue-500 opacity-0 hover:opacity-40 transition-opacity"
+                    />
                   </th>
                 ))}
               </tr>

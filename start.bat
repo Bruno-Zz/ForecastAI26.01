@@ -15,7 +15,7 @@ ping -n 2 127.0.0.1 >nul
 
 REM Start API server (port 8002)
 echo Starting API on port 8002...
-start "ForecastAI - API" /min cmd /c "cd /d %~dp0files && python -m uvicorn api.main:app --host 127.0.0.1 --port 8002"
+start "ForecastAI - API" /min cmd /c "cd /d %~dp0files && C:\allDev\ForecastAI2026.01\files\venv\Scripts\python.exe -m uvicorn api.main:app --host 127.0.0.1 --port 8002"
 
 REM Give API time to start
 ping -n 5 127.0.0.1 >nul

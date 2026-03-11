@@ -1265,3 +1265,517 @@ LINE 1: ...T INTO zcube.series_hashes (unique_id, data_hash, hashed_at)
 2026-03-11 14:51:04,655 - etl.etl - INFO - Transformation complete: 906,046 -> 408,255 rows, 53,863 -> 3,991 series
 2026-03-11 14:51:04,657 - etl.etl - INFO - 
 --- LOAD ---
+2026-03-11 15:24:10,952 - run_pipeline - INFO - Running single step: etl
+2026-03-11 15:24:10,998 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:24:10,998 - utils.orchestrator - INFO - STEP 1: ETL - Extract, Transform, Load
+2026-03-11 15:24:10,998 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:24:11,011 - etl.etl - INFO - ETLPipeline initialized
+2026-03-11 15:24:11,011 - etl.etl - INFO -   Source : dp_plan.calc_dp_actual
+2026-03-11 15:24:11,011 - etl.etl - INFO -   Output : zcube.demand_actuals
+2026-03-11 15:24:11,011 - etl.etl - INFO - ================================================================================
+2026-03-11 15:24:11,011 - etl.etl - INFO - ETL PIPELINE START
+2026-03-11 15:24:11,011 - etl.etl - INFO -   Timestamp : 2026-03-11T15:24:11.011815
+2026-03-11 15:24:11,011 - etl.etl - INFO -   Source    : ep-gentle-rain-a5ba1hxu.us-east-2.aws.neon.tech:5432/scenario
+2026-03-11 15:24:11,011 - etl.etl - INFO -   Tables    : ['zcube.item', 'zcube.site', 'zcube.demand_actuals', 'zcube.forecast_results', 'zcube.forecast_adjustments', 'zcube.process_log']
+2026-03-11 15:24:11,011 - etl.etl - INFO -   Frequency : W
+2026-03-11 15:24:11,012 - etl.etl - INFO -   Output    : zcube.demand_actuals
+2026-03-11 15:24:11,012 - etl.etl - INFO - ================================================================================
+2026-03-11 15:24:11,012 - etl.etl - INFO - 
+--- INIT DB ---
+2026-03-11 15:24:11,012 - etl.etl - INFO - Initialising local database schema...
+2026-03-11 15:24:11,031 - db.db - INFO - Schema 'zcube' tables created/verified
+2026-03-11 15:24:11,108 - db.db - INFO - Schema 'zcube' fully initialised
+2026-03-11 15:24:11,108 - etl.etl - INFO - Database schema ready
+2026-03-11 15:24:11,108 - etl.etl - INFO - 
+--- DIMENSION TABLES ---
+2026-03-11 15:24:11,109 - etl.etl - INFO - Loading dimension tables from dp_plan -> zcube...
+2026-03-11 15:24:11,735 - etl.etl - INFO -   dp_plan.dp_item_type -> zcube.item_type
+2026-03-11 15:24:11,991 - etl.etl - INFO -     -> 3 item type(s) upserted
+2026-03-11 15:24:11,991 - etl.etl - INFO -   dp_plan.dp_site_type -> zcube.site_type
+2026-03-11 15:24:12,115 - etl.etl - INFO -     -> 6 site type(s) upserted
+2026-03-11 15:24:12,349 - etl.etl - INFO -   dp_plan.dp_item -> zcube.item
+2026-03-11 15:24:12,467 - etl.etl - INFO -     Source dp_plan.dp_item: gathering 2 extra column(s) into attributes JSONB: ['uom_id', 'group_id']
+2026-03-11 15:24:14,405 - etl.etl - INFO -     -> 54,291 item(s) upserted
+2026-03-11 15:24:14,405 - etl.etl - INFO -     -> extra columns gathered into attributes: ['uom_id', 'group_id']
+2026-03-11 15:24:14,405 - etl.etl - INFO -   dp_plan.dp_site -> zcube.site
+2026-03-11 15:24:14,523 - etl.etl - INFO -     Source dp_plan.dp_site: gathering 1 extra column(s) into attributes JSONB: ['group_id']
+2026-03-11 15:24:15,067 - etl.etl - INFO -     -> 13,986 site(s) upserted
+2026-03-11 15:24:15,067 - etl.etl - INFO -     -> extra columns gathered into attributes: ['group_id']
+2026-03-11 15:24:17,531 - etl.etl - INFO -   plan.item: enriching 57,348 item(s) with plan attributes
+2026-03-11 15:24:20,115 - etl.etl - INFO -     -> 54,291 item(s) enriched with plan attributes
+2026-03-11 15:24:20,678 - etl.etl - INFO -   plan.site: enriching 13,983 site(s) with plan attributes
+2026-03-11 15:24:21,197 - etl.etl - INFO -     -> 13,983 site(s) enriched with plan attributes
+2026-03-11 15:24:21,207 - etl.etl - INFO - Dimension tables loaded successfully
+2026-03-11 15:24:21,217 - etl.etl - INFO - 
+--- EXTRACT ---
+2026-03-11 15:24:21,217 - etl.etl - INFO - Extracting from remote (dp_plan.calc_dp_actual)...
+2026-03-11 15:24:29,949 - etl.etl - INFO - Extracted 906,046 rows, 53,863 unique series
+2026-03-11 15:24:29,991 - etl.etl - INFO - 
+--- TRANSFORM ---
+2026-03-11 15:24:29,991 - etl.etl - INFO - Starting transformation...
+2026-03-11 15:24:30,142 - etl.etl - INFO - Dropping 71,439 rows with null/non-numeric values
+2026-03-11 15:24:30,282 - etl.etl - INFO - Aggregating to frequency=W (W), method=sum
+2026-03-11 15:24:31,074 - etl.etl - INFO - Filtering series with < 52 observations: removing 49,872 series
+2026-03-11 15:24:31,191 - etl.etl - INFO - Transformation complete: 906,046 -> 408,255 rows, 53,863 -> 3,991 series
+2026-03-11 15:24:31,192 - etl.etl - INFO - 
+--- LOAD ---
+2026-03-11 15:24:40,418 - etl.etl - INFO - Truncating zcube.demand_actuals...
+2026-03-11 15:24:40,422 - etl.etl - INFO - Inserting 408,255 rows into zcube.demand_actuals...
+2026-03-11 15:24:45,057 - etl.etl - INFO - Back-filling item_name / site_name from dimension tables...
+2026-03-11 15:24:46,659 - etl.etl - INFO - Back-filled names for 234,046 row(s)
+2026-03-11 15:24:46,659 - etl.etl - INFO - Removing orphan rows with no matching item or site...
+2026-03-11 15:24:46,903 - etl.etl - INFO - Removed 174,209 orphan row(s) with no matching item/site
+2026-03-11 15:24:46,918 - etl.etl - INFO - Inserted 408,255 rows into zcube.demand_actuals
+2026-03-11 15:24:49,084 - etl.etl - WARNING - Could not upsert series hashes: INSERT has more target columns than expressions
+LINE 1: ...T INTO zcube.series_hashes (unique_id, data_hash, hashed_at)
+                                                             ^
+
+2026-03-11 15:24:49,132 - etl.etl - INFO - Loaded 408,255 rows into zcube.demand_actuals
+2026-03-11 15:24:49,132 - etl.etl - INFO - 
+================================================================================
+2026-03-11 15:24:49,133 - etl.etl - INFO - ETL PIPELINE COMPLETE
+2026-03-11 15:24:49,133 - etl.etl - INFO -   Duration        : 38.1s
+2026-03-11 15:24:49,133 - etl.etl - INFO -   Total rows      : 408,255
+2026-03-11 15:24:49,144 - etl.etl - INFO -   Total series    : 3,991
+2026-03-11 15:24:49,146 - etl.etl - INFO -   Date range      : 2021-03-07 00:00:00 to 2026-03-22 00:00:00
+2026-03-11 15:24:49,146 - etl.etl - INFO -   Output table    : zcube.demand_actuals
+2026-03-11 15:24:49,146 - etl.etl - INFO - ================================================================================
+2026-03-11 15:24:49,193 - utils.orchestrator - INFO - ETL complete: 408255 rows, 3991 series
+2026-03-11 15:24:52,133 - run_pipeline - INFO - Running single step: outlier-detection
+2026-03-11 15:24:52,669 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:24:52,669 - utils.orchestrator - INFO - STEP 1b: Outlier Detection & Correction
+2026-03-11 15:24:52,669 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:24:52,718 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+2026-03-11 15:24:52,735 - outlier.detection - INFO - OutlierDetector initialized: detection=iqr, correction=clip, enabled=True
+2026-03-11 15:24:52,769 - outlier.detection - INFO - Running outlier detection on 2395 series (method=iqr, correction=clip)
+2026-03-11 15:25:12,480 - outlier.detection - INFO - Outlier detection complete: 12860 outliers detected across 1667 series (of 2395 total)
+2026-03-11 15:25:22,301 - utils.orchestrator - INFO - Corrected data saved to zcube.demand_actuals (234,046 rows updated)
+2026-03-11 15:25:22,877 - db.db - INFO - bulk_insert: 12,860 rows -> zcube.detected_outliers
+2026-03-11 15:25:22,877 - utils.orchestrator - INFO - Outliers saved to zcube.detected_outliers (12,860 outliers)
+2026-03-11 15:25:25,898 - run_pipeline - INFO - Running single step: segmentation
+2026-03-11 15:25:25,997 - segmentation.segmentation - INFO - Segmentation: computing ABC classification …
+2026-03-11 15:25:27,466 - segmentation.segmentation - INFO - ABC classification: A=91  B=366  C=1938
+2026-03-11 15:25:27,625 - segmentation.segmentation - INFO -   Segment 'All': 2395 series
+2026-03-11 15:25:28,256 - segmentation.segmentation - INFO - Segment 24: assigned 265 series
+2026-03-11 15:25:28,256 - segmentation.segmentation - INFO -   Segment 'Green': 265 series
+2026-03-11 15:25:28,287 - segmentation.segmentation - INFO - Segment 42: assigned 170 series
+2026-03-11 15:25:28,287 - segmentation.segmentation - INFO -   Segment 'packaging': 170 series
+2026-03-11 15:25:28,316 - segmentation.segmentation - INFO - Segment 44: assigned 146 series
+2026-03-11 15:25:28,316 - segmentation.segmentation - INFO -   Segment 'Hardfruits': 146 series
+2026-03-11 15:25:28,352 - segmentation.segmentation - INFO - Segment 96: assigned 2 series
+2026-03-11 15:25:28,352 - segmentation.segmentation - INFO -   Segment '10285': 2 series
+2026-03-11 15:25:28,353 - segmentation.segmentation - INFO - Segmentation: resolving parameter assignments …
+2026-03-11 15:25:28,519 - segmentation.segmentation - INFO - Resolved parameter assignments for 2395 series
+2026-03-11 15:25:28,520 - segmentation.segmentation - INFO -   Parameter assignments resolved for 2395 series
+2026-03-11 15:25:31,476 - run_pipeline - INFO - Running single step: classification
+2026-03-11 15:25:31,618 - classification.abc - INFO - Running ABC classification 'Hits' (metric=hits, method=cumulative_pct, lookback=12 mo, granularity=item_site)
+2026-03-11 15:25:31,776 - classification.abc - INFO - ABC 'Hits' complete: 1688 series — A=936, B=398, C=354
+2026-03-11 15:25:34,766 - run_pipeline - INFO - Running single step: characterize
+2026-03-11 15:25:35,096 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:25:35,097 - utils.orchestrator - INFO - STEP 2: Time Series Characterization
+2026-03-11 15:25:35,097 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:25:35,147 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+2026-03-11 15:25:35,202 - characterization.characterization - INFO - Starting characterization of 2395 time series
+2026-03-11 15:25:36,307 - characterization.characterization - INFO -   Characterizing series 100/2395 (14787_3099)
+2026-03-11 15:25:37,388 - characterization.characterization - INFO -   Characterizing series 200/2395 (20263_3068)
+2026-03-11 15:25:38,465 - characterization.characterization - INFO -   Characterizing series 300/2395 (28587_2121)
+2026-03-11 15:25:39,527 - characterization.characterization - INFO -   Characterizing series 400/2395 (29107_937)
+2026-03-11 15:25:40,669 - characterization.characterization - INFO -   Characterizing series 500/2395 (30268_1051)
+2026-03-11 15:25:41,777 - characterization.characterization - INFO -   Characterizing series 600/2395 (31857_1006)
+2026-03-11 15:25:42,931 - characterization.characterization - INFO -   Characterizing series 700/2395 (33203_1413)
+2026-03-11 15:25:44,031 - characterization.characterization - INFO -   Characterizing series 800/2395 (34280_2131)
+2026-03-11 15:25:45,190 - characterization.characterization - INFO -   Characterizing series 900/2395 (3674_2312)
+2026-03-11 15:25:46,292 - characterization.characterization - INFO -   Characterizing series 1000/2395 (39370_1049)
+2026-03-11 15:25:47,416 - characterization.characterization - INFO -   Characterizing series 1100/2395 (41923_1377)
+2026-03-11 15:25:48,489 - characterization.characterization - INFO -   Characterizing series 1200/2395 (43285_6980)
+2026-03-11 15:25:49,561 - characterization.characterization - INFO -   Characterizing series 1300/2395 (43851_7611)
+2026-03-11 15:25:50,629 - characterization.characterization - INFO -   Characterizing series 1400/2395 (45182_1374)
+2026-03-11 15:25:51,634 - characterization.characterization - INFO -   Characterizing series 1500/2395 (46342_1087)
+2026-03-11 15:25:52,680 - characterization.characterization - INFO -   Characterizing series 1600/2395 (47173_5493)
+2026-03-11 15:25:53,725 - characterization.characterization - INFO -   Characterizing series 1700/2395 (47959_14870)
+2026-03-11 15:25:54,789 - characterization.characterization - INFO -   Characterizing series 1800/2395 (51832_15017)
+2026-03-11 15:25:55,961 - characterization.characterization - INFO -   Characterizing series 1900/2395 (52230_15055)
+2026-03-11 15:25:57,123 - characterization.characterization - INFO -   Characterizing series 2000/2395 (62282_15017)
+2026-03-11 15:25:58,195 - characterization.characterization - INFO -   Characterizing series 2100/2395 (62499_15055)
+2026-03-11 15:25:59,231 - characterization.characterization - INFO -   Characterizing series 2200/2395 (73161_6422)
+2026-03-11 15:26:00,279 - characterization.characterization - INFO -   Characterizing series 2300/2395 (73955_2882)
+2026-03-11 15:26:01,256 - characterization.characterization - INFO -   Characterizing series 2395/2395 (9806_6094)
+2026-03-11 15:26:01,273 - characterization.characterization - INFO - ======================================================================
+2026-03-11 15:26:01,273 - characterization.characterization - INFO - TIME SERIES CHARACTERIZATION SUMMARY
+2026-03-11 15:26:01,273 - characterization.characterization - INFO - ======================================================================
+2026-03-11 15:26:01,273 - characterization.characterization - INFO - Total series analyzed        : 2395
+2026-03-11 15:26:01,274 - characterization.characterization - INFO - With seasonality             : 708 (29.6%)
+2026-03-11 15:26:01,274 - characterization.characterization - INFO - With trend                   : 697 (29.1%)
+2026-03-11 15:26:01,274 - characterization.characterization - INFO - Intermittent                 : 0 (0.0%)
+2026-03-11 15:26:01,274 - characterization.characterization - INFO - Stationary                   : 1777 (74.2%)
+2026-03-11 15:26:01,274 - characterization.characterization - INFO - Sufficient for ML (>=20)  : 2395 (100.0%)
+2026-03-11 15:26:01,274 - characterization.characterization - INFO - Sufficient for DL (>=30) : 2395 (100.0%)
+2026-03-11 15:26:01,274 - characterization.characterization - INFO - Complexity distribution:
+2026-03-11 15:26:01,275 - characterization.characterization - INFO -        low:  1527 (63.8%)
+2026-03-11 15:26:01,275 - characterization.characterization - INFO -     medium:   868 (36.2%)
+2026-03-11 15:26:01,275 - characterization.characterization - INFO -       high:     0 (0.0%)
+2026-03-11 15:26:01,275 - characterization.characterization - INFO - ======================================================================
+2026-03-11 15:26:01,591 - db.db - INFO - bulk_insert: 2,395 rows -> zcube.time_series_characteristics
+2026-03-11 15:26:01,591 - utils.orchestrator - INFO - Characterized 2395 series
+2026-03-11 15:26:01,592 - utils.orchestrator - INFO - Complexity distribution: {'low': 1527, 'medium': 868}
+2026-03-11 15:26:01,592 - utils.orchestrator - INFO - Intermittent: 0
+2026-03-11 15:26:04,459 - run_pipeline - INFO - Running single step: forecast
+2026-03-11 15:26:09,071 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:1047' processes=8 threads=16, memory=111.76 GiB>
+2026-03-11 15:26:09,071 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-11 15:26:09,072 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:26:09,072 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-11 15:26:09,072 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:26:09,114 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+2026-03-11 15:26:09,116 - utils.orchestrator - INFO - Parameter grouping (forecasting): 2 groups (0 individual overrides)
+2026-03-11 15:26:09,116 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-11 15:26:10,210 - utils.orchestrator - INFO -   2395 series -> 25 batches
+2026-03-11 15:32:50,322 - run_pipeline - INFO - Running single step: etl
+2026-03-11 15:32:50,360 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:32:50,361 - utils.orchestrator - INFO - STEP 1: ETL - Extract, Transform, Load
+2026-03-11 15:32:50,361 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:32:50,376 - etl.etl - INFO - ETLPipeline initialized
+2026-03-11 15:32:50,376 - etl.etl - INFO -   Source : dp_plan.calc_dp_actual
+2026-03-11 15:32:50,376 - etl.etl - INFO -   Output : zcube.demand_actuals
+2026-03-11 15:32:50,376 - etl.etl - INFO - ================================================================================
+2026-03-11 15:32:50,376 - etl.etl - INFO - ETL PIPELINE START
+2026-03-11 15:32:50,376 - etl.etl - INFO -   Timestamp : 2026-03-11T15:32:50.376833
+2026-03-11 15:32:50,376 - etl.etl - INFO -   Source    : ep-gentle-rain-a5ba1hxu.us-east-2.aws.neon.tech:5432/scenario
+2026-03-11 15:32:50,376 - etl.etl - INFO -   Tables    : ['zcube.item', 'zcube.site', 'zcube.demand_actuals', 'zcube.forecast_results', 'zcube.forecast_adjustments', 'zcube.process_log']
+2026-03-11 15:32:50,377 - etl.etl - INFO -   Frequency : W
+2026-03-11 15:32:50,377 - etl.etl - INFO -   Output    : zcube.demand_actuals
+2026-03-11 15:32:50,377 - etl.etl - INFO - ================================================================================
+2026-03-11 15:32:50,377 - etl.etl - INFO - 
+--- INIT DB ---
+2026-03-11 15:32:50,377 - etl.etl - INFO - Initialising local database schema...
+2026-03-11 15:32:50,398 - db.db - INFO - Schema 'zcube' tables created/verified
+2026-03-11 15:32:50,505 - db.db - INFO - Schema 'zcube' fully initialised
+2026-03-11 15:32:50,506 - etl.etl - INFO - Database schema ready
+2026-03-11 15:32:50,506 - etl.etl - INFO - 
+--- DIMENSION TABLES ---
+2026-03-11 15:32:50,507 - etl.etl - INFO - Loading dimension tables from dp_plan -> zcube...
+2026-03-11 15:32:51,154 - etl.etl - INFO -   dp_plan.dp_item_type -> zcube.item_type
+2026-03-11 15:32:51,409 - etl.etl - INFO -     -> 3 item type(s) upserted
+2026-03-11 15:32:51,410 - etl.etl - INFO -   dp_plan.dp_site_type -> zcube.site_type
+2026-03-11 15:32:51,531 - etl.etl - INFO -     -> 6 site type(s) upserted
+2026-03-11 15:32:51,767 - etl.etl - INFO -   dp_plan.dp_item -> zcube.item
+2026-03-11 15:32:51,885 - etl.etl - INFO -     Source dp_plan.dp_item: gathering 2 extra column(s) into attributes JSONB: ['uom_id', 'group_id']
+2026-03-11 15:32:53,812 - etl.etl - INFO -     -> 54,291 item(s) upserted
+2026-03-11 15:32:53,812 - etl.etl - INFO -     -> extra columns gathered into attributes: ['uom_id', 'group_id']
+2026-03-11 15:32:53,812 - etl.etl - INFO -   dp_plan.dp_site -> zcube.site
+2026-03-11 15:32:53,930 - etl.etl - INFO -     Source dp_plan.dp_site: gathering 1 extra column(s) into attributes JSONB: ['group_id']
+2026-03-11 15:32:54,495 - etl.etl - INFO -     -> 13,986 site(s) upserted
+2026-03-11 15:32:54,495 - etl.etl - INFO -     -> extra columns gathered into attributes: ['group_id']
+2026-03-11 15:32:56,936 - etl.etl - INFO -   plan.item: enriching 57,348 item(s) with plan attributes
+2026-03-11 15:32:59,492 - etl.etl - INFO -     -> 54,291 item(s) enriched with plan attributes
+2026-03-11 15:33:00,043 - etl.etl - INFO -   plan.site: enriching 13,983 site(s) with plan attributes
+2026-03-11 15:33:00,614 - etl.etl - INFO -     -> 13,983 site(s) enriched with plan attributes
+2026-03-11 15:33:00,629 - etl.etl - INFO - Dimension tables loaded successfully
+2026-03-11 15:33:00,641 - etl.etl - INFO - 
+--- EXTRACT ---
+2026-03-11 15:33:00,641 - etl.etl - INFO - Extracting from remote (dp_plan.calc_dp_actual)...
+2026-03-11 15:33:10,908 - etl.etl - INFO - Extracted 906,046 rows, 53,863 unique series
+2026-03-11 15:33:10,949 - etl.etl - INFO - 
+--- TRANSFORM ---
+2026-03-11 15:33:10,949 - etl.etl - INFO - Starting transformation...
+2026-03-11 15:33:11,117 - etl.etl - INFO - Dropping 71,439 rows with null/non-numeric values
+2026-03-11 15:33:11,265 - etl.etl - INFO - Aggregating to frequency=W (W), method=sum
+2026-03-11 15:33:12,056 - etl.etl - INFO - Filtering series with < 52 observations: removing 49,872 series
+2026-03-11 15:33:12,177 - etl.etl - INFO - Transformation complete: 906,046 -> 408,255 rows, 53,863 -> 3,991 series
+2026-03-11 15:33:12,178 - etl.etl - INFO - 
+--- LOAD ---
+2026-03-11 15:33:20,992 - etl.etl - INFO - Truncating zcube.demand_actuals...
+2026-03-11 15:33:20,995 - etl.etl - INFO - Inserting 408,255 rows into zcube.demand_actuals...
+2026-03-11 15:33:25,683 - etl.etl - INFO - Back-filling item_name / site_name from dimension tables...
+2026-03-11 15:33:27,277 - etl.etl - INFO - Back-filled names for 234,046 row(s)
+2026-03-11 15:33:27,277 - etl.etl - INFO - Removing orphan rows with no matching item or site...
+2026-03-11 15:33:27,402 - etl.etl - INFO - Removed 174,209 orphan row(s) with no matching item/site
+2026-03-11 15:33:27,420 - etl.etl - INFO - Inserted 408,255 rows into zcube.demand_actuals
+2026-03-11 15:33:29,563 - etl.etl - WARNING - Could not upsert series hashes: INSERT has more target columns than expressions
+LINE 1: ...T INTO zcube.series_hashes (unique_id, data_hash, hashed_at)
+                                                             ^
+
+2026-03-11 15:33:29,612 - etl.etl - INFO - Loaded 408,255 rows into zcube.demand_actuals
+2026-03-11 15:33:29,612 - etl.etl - INFO - 
+================================================================================
+2026-03-11 15:33:29,612 - etl.etl - INFO - ETL PIPELINE COMPLETE
+2026-03-11 15:33:29,612 - etl.etl - INFO -   Duration        : 39.2s
+2026-03-11 15:33:29,612 - etl.etl - INFO -   Total rows      : 408,255
+2026-03-11 15:33:29,624 - etl.etl - INFO -   Total series    : 3,991
+2026-03-11 15:33:29,625 - etl.etl - INFO -   Date range      : 2021-03-07 00:00:00 to 2026-03-22 00:00:00
+2026-03-11 15:33:29,626 - etl.etl - INFO -   Output table    : zcube.demand_actuals
+2026-03-11 15:33:29,626 - etl.etl - INFO - ================================================================================
+2026-03-11 15:33:29,673 - utils.orchestrator - INFO - ETL complete: 408255 rows, 3991 series
+2026-03-11 15:33:32,590 - run_pipeline - INFO - Running single step: outlier-detection
+2026-03-11 15:33:33,088 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:33:33,088 - utils.orchestrator - INFO - STEP 1b: Outlier Detection & Correction
+2026-03-11 15:33:33,088 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:33:33,159 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+2026-03-11 15:33:33,183 - outlier.detection - INFO - OutlierDetector initialized: detection=iqr, correction=clip, enabled=True
+2026-03-11 15:33:33,205 - outlier.detection - INFO - Running outlier detection on 2395 series (method=iqr, correction=clip)
+2026-03-11 15:33:52,563 - outlier.detection - INFO - Outlier detection complete: 12860 outliers detected across 1667 series (of 2395 total)
+2026-03-11 15:34:03,482 - utils.orchestrator - INFO - Corrected data saved to zcube.demand_actuals (234,046 rows updated)
+2026-03-11 15:34:04,127 - db.db - INFO - bulk_insert: 12,860 rows -> zcube.detected_outliers
+2026-03-11 15:34:04,127 - utils.orchestrator - INFO - Outliers saved to zcube.detected_outliers (12,860 outliers)
+2026-03-11 15:34:07,993 - run_pipeline - INFO - Running single step: segmentation
+2026-03-11 15:34:08,077 - segmentation.segmentation - INFO - Segmentation: computing ABC classification …
+2026-03-11 15:34:09,779 - segmentation.segmentation - INFO - ABC classification: A=91  B=366  C=1938
+2026-03-11 15:34:09,939 - segmentation.segmentation - INFO -   Segment 'All': 2395 series
+2026-03-11 15:34:10,678 - segmentation.segmentation - INFO - Segment 24: assigned 265 series
+2026-03-11 15:34:10,679 - segmentation.segmentation - INFO -   Segment 'Green': 265 series
+2026-03-11 15:34:10,736 - segmentation.segmentation - INFO - Segment 42: assigned 170 series
+2026-03-11 15:34:10,737 - segmentation.segmentation - INFO -   Segment 'packaging': 170 series
+2026-03-11 15:34:10,774 - segmentation.segmentation - INFO - Segment 44: assigned 146 series
+2026-03-11 15:34:10,775 - segmentation.segmentation - INFO -   Segment 'Hardfruits': 146 series
+2026-03-11 15:34:10,821 - segmentation.segmentation - INFO - Segment 96: assigned 2 series
+2026-03-11 15:34:10,822 - segmentation.segmentation - INFO -   Segment '10285': 2 series
+2026-03-11 15:34:10,822 - segmentation.segmentation - INFO - Segmentation: resolving parameter assignments …
+2026-03-11 15:34:11,007 - segmentation.segmentation - INFO - Resolved parameter assignments for 2395 series
+2026-03-11 15:34:11,008 - segmentation.segmentation - INFO -   Parameter assignments resolved for 2395 series
+2026-03-11 15:34:14,482 - run_pipeline - INFO - Running single step: classification
+2026-03-11 15:34:14,586 - classification.abc - INFO - Running ABC classification 'Hits' (metric=hits, method=cumulative_pct, lookback=12 mo, granularity=item_site)
+2026-03-11 15:34:14,764 - classification.abc - INFO - ABC 'Hits' complete: 1688 series — A=936, B=398, C=354
+2026-03-11 15:34:18,088 - run_pipeline - INFO - Running single step: characterize
+2026-03-11 15:34:18,419 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:34:18,419 - utils.orchestrator - INFO - STEP 2: Time Series Characterization
+2026-03-11 15:34:18,419 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:34:18,455 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+2026-03-11 15:34:18,521 - characterization.characterization - INFO - Starting characterization of 2395 time series
+2026-03-11 15:34:19,672 - characterization.characterization - INFO -   Characterizing series 100/2395 (14787_3099)
+2026-03-11 15:34:20,820 - characterization.characterization - INFO -   Characterizing series 200/2395 (20263_3068)
+2026-03-11 15:34:21,927 - characterization.characterization - INFO -   Characterizing series 300/2395 (28587_2121)
+2026-03-11 15:34:23,065 - characterization.characterization - INFO -   Characterizing series 400/2395 (29107_937)
+2026-03-11 15:34:24,296 - characterization.characterization - INFO -   Characterizing series 500/2395 (30268_1051)
+2026-03-11 15:34:25,478 - characterization.characterization - INFO -   Characterizing series 600/2395 (31857_1006)
+2026-03-11 15:34:26,724 - characterization.characterization - INFO -   Characterizing series 700/2395 (33203_1413)
+2026-03-11 15:34:27,954 - characterization.characterization - INFO -   Characterizing series 800/2395 (34280_2131)
+2026-03-11 15:34:29,074 - characterization.characterization - INFO -   Characterizing series 900/2395 (3674_2312)
+2026-03-11 15:34:30,194 - characterization.characterization - INFO -   Characterizing series 1000/2395 (39370_1049)
+2026-03-11 15:34:31,344 - characterization.characterization - INFO -   Characterizing series 1100/2395 (41923_1377)
+2026-03-11 15:34:32,464 - characterization.characterization - INFO -   Characterizing series 1200/2395 (43285_6980)
+2026-03-11 15:34:33,812 - characterization.characterization - INFO -   Characterizing series 1300/2395 (43851_7611)
+2026-03-11 15:34:35,258 - characterization.characterization - INFO -   Characterizing series 1400/2395 (45182_1374)
+2026-03-11 15:34:36,497 - characterization.characterization - INFO -   Characterizing series 1500/2395 (46342_1087)
+2026-03-11 15:34:37,734 - characterization.characterization - INFO -   Characterizing series 1600/2395 (47173_5493)
+2026-03-11 15:34:38,866 - characterization.characterization - INFO -   Characterizing series 1700/2395 (47959_14870)
+2026-03-11 15:34:40,050 - characterization.characterization - INFO -   Characterizing series 1800/2395 (51832_15017)
+2026-03-11 15:34:41,337 - characterization.characterization - INFO -   Characterizing series 1900/2395 (52230_15055)
+2026-03-11 15:34:42,570 - characterization.characterization - INFO -   Characterizing series 2000/2395 (62282_15017)
+2026-03-11 15:34:43,790 - characterization.characterization - INFO -   Characterizing series 2100/2395 (62499_15055)
+2026-03-11 15:34:44,945 - characterization.characterization - INFO -   Characterizing series 2200/2395 (73161_6422)
+2026-03-11 15:34:46,078 - characterization.characterization - INFO -   Characterizing series 2300/2395 (73955_2882)
+2026-03-11 15:34:47,084 - characterization.characterization - INFO -   Characterizing series 2395/2395 (9806_6094)
+2026-03-11 15:34:47,103 - characterization.characterization - INFO - ======================================================================
+2026-03-11 15:34:47,103 - characterization.characterization - INFO - TIME SERIES CHARACTERIZATION SUMMARY
+2026-03-11 15:34:47,103 - characterization.characterization - INFO - ======================================================================
+2026-03-11 15:34:47,103 - characterization.characterization - INFO - Total series analyzed        : 2395
+2026-03-11 15:34:47,103 - characterization.characterization - INFO - With seasonality             : 708 (29.6%)
+2026-03-11 15:34:47,103 - characterization.characterization - INFO - With trend                   : 697 (29.1%)
+2026-03-11 15:34:47,103 - characterization.characterization - INFO - Intermittent                 : 0 (0.0%)
+2026-03-11 15:34:47,104 - characterization.characterization - INFO - Stationary                   : 1777 (74.2%)
+2026-03-11 15:34:47,104 - characterization.characterization - INFO - Sufficient for ML (>=20)  : 2395 (100.0%)
+2026-03-11 15:34:47,104 - characterization.characterization - INFO - Sufficient for DL (>=30) : 2395 (100.0%)
+2026-03-11 15:34:47,104 - characterization.characterization - INFO - Complexity distribution:
+2026-03-11 15:34:47,104 - characterization.characterization - INFO -        low:  1527 (63.8%)
+2026-03-11 15:34:47,104 - characterization.characterization - INFO -     medium:   868 (36.2%)
+2026-03-11 15:34:47,104 - characterization.characterization - INFO -       high:     0 (0.0%)
+2026-03-11 15:34:47,104 - characterization.characterization - INFO - ======================================================================
+2026-03-11 15:34:47,384 - db.db - INFO - bulk_insert: 2,395 rows -> zcube.time_series_characteristics
+2026-03-11 15:34:47,385 - utils.orchestrator - INFO - Characterized 2395 series
+2026-03-11 15:34:47,386 - utils.orchestrator - INFO - Complexity distribution: {'low': 1527, 'medium': 868}
+2026-03-11 15:34:47,386 - utils.orchestrator - INFO - Intermittent: 0
+2026-03-11 15:34:50,472 - run_pipeline - INFO - Running single step: forecast
+2026-03-11 15:34:56,163 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:55860' processes=8 threads=16, memory=111.76 GiB>
+2026-03-11 15:34:56,164 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-11 15:34:56,164 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:34:56,164 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-11 15:34:56,164 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:34:56,184 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+2026-03-11 15:34:56,186 - utils.orchestrator - INFO - Parameter grouping (forecasting): 2 groups (0 individual overrides)
+2026-03-11 15:34:56,186 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-11 15:34:57,751 - utils.orchestrator - INFO -   2395 series -> 25 batches
+2026-03-11 15:37:43,414 - utils.orchestrator - INFO - Generated 6477 forecasts across 25 batches
+2026-03-11 15:37:52,542 - db.db - INFO - bulk_insert: 6,477 rows -> zcube.forecast_results
+2026-03-11 15:37:52,545 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (6477 rows)
+2026-03-11 15:37:57,525 - run_pipeline - INFO - Running single step: backtest
+2026-03-11 15:38:02,815 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:23737' processes=8 threads=16, memory=111.76 GiB>
+2026-03-11 15:38:02,815 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-11 15:38:02,816 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:38:02,816 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-11 15:38:02,816 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:38:24,837 - utils.orchestrator - INFO - Loaded backtesting overrides for 1 series
+2026-03-11 15:38:24,837 - utils.orchestrator - INFO - Running parallel backtesting with Dask (2395 series -> 24 batches of ~100)...
+2026-03-11 15:44:23,247 - run_pipeline - INFO - Running single step: etl
+2026-03-11 15:44:23,305 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:44:23,305 - utils.orchestrator - INFO - STEP 1: ETL - Extract, Transform, Load
+2026-03-11 15:44:23,305 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:44:23,317 - etl.etl - INFO - ETLPipeline initialized
+2026-03-11 15:44:23,317 - etl.etl - INFO -   Source : dp_plan.calc_dp_actual
+2026-03-11 15:44:23,317 - etl.etl - INFO -   Output : zcube.demand_actuals
+2026-03-11 15:44:23,317 - etl.etl - INFO - ================================================================================
+2026-03-11 15:44:23,317 - etl.etl - INFO - ETL PIPELINE START
+2026-03-11 15:44:23,317 - etl.etl - INFO -   Timestamp : 2026-03-11T15:44:23.317803
+2026-03-11 15:44:23,317 - etl.etl - INFO -   Source    : ep-gentle-rain-a5ba1hxu.us-east-2.aws.neon.tech:5432/scenario
+2026-03-11 15:44:23,317 - etl.etl - INFO -   Tables    : ['zcube.item', 'zcube.site', 'zcube.demand_actuals', 'zcube.forecast_results', 'zcube.forecast_adjustments', 'zcube.process_log']
+2026-03-11 15:44:23,317 - etl.etl - INFO -   Frequency : W
+2026-03-11 15:44:23,318 - etl.etl - INFO -   Output    : zcube.demand_actuals
+2026-03-11 15:44:23,318 - etl.etl - INFO - ================================================================================
+2026-03-11 15:44:23,318 - etl.etl - INFO - 
+--- INIT DB ---
+2026-03-11 15:44:23,318 - etl.etl - INFO - Initialising local database schema...
+2026-03-11 15:44:23,339 - db.db - INFO - Schema 'zcube' tables created/verified
+2026-03-11 15:44:23,419 - db.db - INFO - Schema 'zcube' fully initialised
+2026-03-11 15:44:23,419 - etl.etl - INFO - Database schema ready
+2026-03-11 15:44:23,420 - etl.etl - INFO - 
+--- DIMENSION TABLES ---
+2026-03-11 15:44:23,421 - etl.etl - INFO - Loading dimension tables from dp_plan -> zcube...
+2026-03-11 15:44:24,089 - etl.etl - INFO -   dp_plan.dp_item_type -> zcube.item_type
+2026-03-11 15:44:24,348 - etl.etl - INFO -     -> 3 item type(s) upserted
+2026-03-11 15:44:24,349 - etl.etl - INFO -   dp_plan.dp_site_type -> zcube.site_type
+2026-03-11 15:44:24,478 - etl.etl - INFO -     -> 6 site type(s) upserted
+2026-03-11 15:44:24,710 - etl.etl - INFO -   dp_plan.dp_item -> zcube.item
+2026-03-11 15:44:24,853 - etl.etl - INFO -     Source dp_plan.dp_item: gathering 2 extra column(s) into attributes JSONB: ['uom_id', 'group_id']
+2026-03-11 15:44:27,203 - etl.etl - INFO -     -> 54,291 item(s) upserted
+2026-03-11 15:44:27,203 - etl.etl - INFO -     -> extra columns gathered into attributes: ['uom_id', 'group_id']
+2026-03-11 15:44:27,203 - etl.etl - INFO -   dp_plan.dp_site -> zcube.site
+2026-03-11 15:44:27,322 - etl.etl - INFO -     Source dp_plan.dp_site: gathering 1 extra column(s) into attributes JSONB: ['group_id']
+2026-03-11 15:44:27,960 - etl.etl - INFO -     -> 13,986 site(s) upserted
+2026-03-11 15:44:27,960 - etl.etl - INFO -     -> extra columns gathered into attributes: ['group_id']
+2026-03-11 15:44:32,044 - etl.etl - INFO -   plan.item: enriching 57,348 item(s) with plan attributes
+2026-03-11 15:44:34,954 - etl.etl - INFO -     -> 54,291 item(s) enriched with plan attributes
+2026-03-11 15:44:35,693 - etl.etl - INFO -   plan.site: enriching 13,983 site(s) with plan attributes
+2026-03-11 15:44:36,290 - etl.etl - INFO -     -> 13,983 site(s) enriched with plan attributes
+2026-03-11 15:44:36,305 - etl.etl - INFO - Dimension tables loaded successfully
+2026-03-11 15:44:36,318 - etl.etl - INFO - 
+--- EXTRACT ---
+2026-03-11 15:44:36,318 - etl.etl - INFO - Extracting from remote (dp_plan.calc_dp_actual)...
+2026-03-11 15:45:04,231 - etl.etl - INFO - Extracted 906,046 rows, 53,863 unique series
+2026-03-11 15:45:04,277 - etl.etl - INFO - 
+--- TRANSFORM ---
+2026-03-11 15:45:04,277 - etl.etl - INFO - Starting transformation...
+2026-03-11 15:45:04,420 - etl.etl - INFO - Dropping 71,439 rows with null/non-numeric values
+2026-03-11 15:45:04,551 - etl.etl - INFO - Aggregating to frequency=W (W), method=sum
+2026-03-11 15:45:05,335 - etl.etl - INFO - Filtering series with < 52 observations: removing 49,872 series
+2026-03-11 15:45:05,460 - etl.etl - INFO - Transformation complete: 906,046 -> 408,255 rows, 53,863 -> 3,991 series
+2026-03-11 15:45:05,461 - etl.etl - INFO - 
+--- LOAD ---
+2026-03-11 15:45:14,702 - etl.etl - INFO - Truncating zcube.demand_actuals...
+2026-03-11 15:45:14,706 - etl.etl - INFO - Inserting 408,255 rows into zcube.demand_actuals...
+2026-03-11 15:45:19,289 - etl.etl - INFO - Back-filling item_name / site_name from dimension tables...
+2026-03-11 15:45:20,925 - etl.etl - INFO - Back-filled names for 234,046 row(s)
+2026-03-11 15:45:20,925 - etl.etl - INFO - Removing orphan rows with no matching item or site...
+2026-03-11 15:45:21,054 - etl.etl - INFO - Removed 174,209 orphan row(s) with no matching item/site
+2026-03-11 15:45:21,072 - etl.etl - INFO - Inserted 408,255 rows into zcube.demand_actuals
+2026-03-11 15:45:23,191 - etl.etl - WARNING - Could not upsert series hashes: INSERT has more target columns than expressions
+LINE 1: ...T INTO zcube.series_hashes (unique_id, data_hash, hashed_at)
+                                                             ^
+
+2026-03-11 15:45:23,237 - etl.etl - INFO - Loaded 408,255 rows into zcube.demand_actuals
+2026-03-11 15:45:23,237 - etl.etl - INFO - 
+================================================================================
+2026-03-11 15:45:23,237 - etl.etl - INFO - ETL PIPELINE COMPLETE
+2026-03-11 15:45:23,237 - etl.etl - INFO -   Duration        : 59.9s
+2026-03-11 15:45:23,237 - etl.etl - INFO -   Total rows      : 408,255
+2026-03-11 15:45:23,249 - etl.etl - INFO -   Total series    : 3,991
+2026-03-11 15:45:23,251 - etl.etl - INFO -   Date range      : 2021-03-07 00:00:00 to 2026-03-22 00:00:00
+2026-03-11 15:45:23,251 - etl.etl - INFO -   Output table    : zcube.demand_actuals
+2026-03-11 15:45:23,251 - etl.etl - INFO - ================================================================================
+2026-03-11 15:45:23,297 - utils.orchestrator - INFO - ETL complete: 408255 rows, 3991 series
+2026-03-11 15:45:26,362 - run_pipeline - INFO - Running single step: outlier-detection
+2026-03-11 15:45:26,875 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:45:26,875 - utils.orchestrator - INFO - STEP 1b: Outlier Detection & Correction
+2026-03-11 15:45:26,876 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:45:26,921 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+2026-03-11 15:45:26,938 - outlier.detection - INFO - OutlierDetector initialized: detection=iqr, correction=clip, enabled=True
+2026-03-11 15:45:26,965 - outlier.detection - INFO - Running outlier detection on 2395 series (method=iqr, correction=clip)
+2026-03-11 15:45:48,151 - outlier.detection - INFO - Outlier detection complete: 12860 outliers detected across 1667 series (of 2395 total)
+2026-03-11 15:45:59,107 - utils.orchestrator - INFO - Corrected data saved to zcube.demand_actuals (234,046 rows updated)
+2026-03-11 15:45:59,687 - db.db - INFO - bulk_insert: 12,860 rows -> zcube.detected_outliers
+2026-03-11 15:45:59,688 - utils.orchestrator - INFO - Outliers saved to zcube.detected_outliers (12,860 outliers)
+2026-03-11 15:46:02,898 - run_pipeline - INFO - Running single step: segmentation
+2026-03-11 15:46:02,967 - segmentation.segmentation - INFO - Segmentation: computing ABC classification …
+2026-03-11 15:46:04,487 - segmentation.segmentation - INFO - ABC classification: A=91  B=366  C=1938
+2026-03-11 15:46:04,642 - segmentation.segmentation - INFO -   Segment 'All': 2395 series
+2026-03-11 15:46:05,266 - segmentation.segmentation - INFO - Segment 24: assigned 265 series
+2026-03-11 15:46:05,267 - segmentation.segmentation - INFO -   Segment 'Green': 265 series
+2026-03-11 15:46:05,300 - segmentation.segmentation - INFO - Segment 42: assigned 170 series
+2026-03-11 15:46:05,301 - segmentation.segmentation - INFO -   Segment 'packaging': 170 series
+2026-03-11 15:46:05,336 - segmentation.segmentation - INFO - Segment 44: assigned 146 series
+2026-03-11 15:46:05,337 - segmentation.segmentation - INFO -   Segment 'Hardfruits': 146 series
+2026-03-11 15:46:05,392 - segmentation.segmentation - INFO - Segment 96: assigned 2 series
+2026-03-11 15:46:05,393 - segmentation.segmentation - INFO -   Segment '10285': 2 series
+2026-03-11 15:46:05,393 - segmentation.segmentation - INFO - Segmentation: resolving parameter assignments …
+2026-03-11 15:46:05,569 - segmentation.segmentation - INFO - Resolved parameter assignments for 2395 series
+2026-03-11 15:46:05,571 - segmentation.segmentation - INFO -   Parameter assignments resolved for 2395 series
+2026-03-11 15:46:09,071 - run_pipeline - INFO - Running single step: classification
+2026-03-11 15:46:09,196 - classification.abc - INFO - Running ABC classification 'Hits' (metric=hits, method=cumulative_pct, lookback=12 mo, granularity=item_site)
+2026-03-11 15:46:09,358 - classification.abc - INFO - ABC 'Hits' complete: 1688 series — A=936, B=398, C=354
+2026-03-11 15:46:12,946 - run_pipeline - INFO - Running single step: characterize
+2026-03-11 15:46:13,298 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:46:13,298 - utils.orchestrator - INFO - STEP 2: Time Series Characterization
+2026-03-11 15:46:13,298 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:46:13,336 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+2026-03-11 15:46:13,378 - characterization.characterization - INFO - Starting characterization of 2395 time series
+2026-03-11 15:46:14,588 - characterization.characterization - INFO -   Characterizing series 100/2395 (14787_3099)
+2026-03-11 15:46:15,771 - characterization.characterization - INFO -   Characterizing series 200/2395 (20263_3068)
+2026-03-11 15:46:16,988 - characterization.characterization - INFO -   Characterizing series 300/2395 (28587_2121)
+2026-03-11 15:46:18,116 - characterization.characterization - INFO -   Characterizing series 400/2395 (29107_937)
+2026-03-11 15:46:19,248 - characterization.characterization - INFO -   Characterizing series 500/2395 (30268_1051)
+2026-03-11 15:46:20,375 - characterization.characterization - INFO -   Characterizing series 600/2395 (31857_1006)
+2026-03-11 15:46:21,480 - characterization.characterization - INFO -   Characterizing series 700/2395 (33203_1413)
+2026-03-11 15:46:22,654 - characterization.characterization - INFO -   Characterizing series 800/2395 (34280_2131)
+2026-03-11 15:46:23,792 - characterization.characterization - INFO -   Characterizing series 900/2395 (3674_2312)
+2026-03-11 15:46:24,908 - characterization.characterization - INFO -   Characterizing series 1000/2395 (39370_1049)
+2026-03-11 15:46:26,171 - characterization.characterization - INFO -   Characterizing series 1100/2395 (41923_1377)
+2026-03-11 15:46:27,428 - characterization.characterization - INFO -   Characterizing series 1200/2395 (43285_6980)
+2026-03-11 15:46:28,614 - characterization.characterization - INFO -   Characterizing series 1300/2395 (43851_7611)
+2026-03-11 15:46:29,824 - characterization.characterization - INFO -   Characterizing series 1400/2395 (45182_1374)
+2026-03-11 15:46:30,963 - characterization.characterization - INFO -   Characterizing series 1500/2395 (46342_1087)
+2026-03-11 15:46:32,093 - characterization.characterization - INFO -   Characterizing series 1600/2395 (47173_5493)
+2026-03-11 15:46:33,278 - characterization.characterization - INFO -   Characterizing series 1700/2395 (47959_14870)
+2026-03-11 15:46:34,483 - characterization.characterization - INFO -   Characterizing series 1800/2395 (51832_15017)
+2026-03-11 15:46:35,759 - characterization.characterization - INFO -   Characterizing series 1900/2395 (52230_15055)
+2026-03-11 15:46:37,134 - characterization.characterization - INFO -   Characterizing series 2000/2395 (62282_15017)
+2026-03-11 15:46:38,349 - characterization.characterization - INFO -   Characterizing series 2100/2395 (62499_15055)
+2026-03-11 15:46:39,529 - characterization.characterization - INFO -   Characterizing series 2200/2395 (73161_6422)
+2026-03-11 15:46:40,707 - characterization.characterization - INFO -   Characterizing series 2300/2395 (73955_2882)
+2026-03-11 15:46:41,718 - characterization.characterization - INFO -   Characterizing series 2395/2395 (9806_6094)
+2026-03-11 15:46:41,736 - characterization.characterization - INFO - ======================================================================
+2026-03-11 15:46:41,736 - characterization.characterization - INFO - TIME SERIES CHARACTERIZATION SUMMARY
+2026-03-11 15:46:41,736 - characterization.characterization - INFO - ======================================================================
+2026-03-11 15:46:41,736 - characterization.characterization - INFO - Total series analyzed        : 2395
+2026-03-11 15:46:41,737 - characterization.characterization - INFO - With seasonality             : 708 (29.6%)
+2026-03-11 15:46:41,737 - characterization.characterization - INFO - With trend                   : 697 (29.1%)
+2026-03-11 15:46:41,737 - characterization.characterization - INFO - Intermittent                 : 0 (0.0%)
+2026-03-11 15:46:41,737 - characterization.characterization - INFO - Stationary                   : 1777 (74.2%)
+2026-03-11 15:46:41,738 - characterization.characterization - INFO - Sufficient for ML (>=20)  : 2395 (100.0%)
+2026-03-11 15:46:41,738 - characterization.characterization - INFO - Sufficient for DL (>=30) : 2395 (100.0%)
+2026-03-11 15:46:41,738 - characterization.characterization - INFO - Complexity distribution:
+2026-03-11 15:46:41,739 - characterization.characterization - INFO -        low:  1527 (63.8%)
+2026-03-11 15:46:41,739 - characterization.characterization - INFO -     medium:   868 (36.2%)
+2026-03-11 15:46:41,739 - characterization.characterization - INFO -       high:     0 (0.0%)
+2026-03-11 15:46:41,739 - characterization.characterization - INFO - ======================================================================
+2026-03-11 15:46:42,043 - db.db - INFO - bulk_insert: 2,395 rows -> zcube.time_series_characteristics
+2026-03-11 15:46:42,043 - utils.orchestrator - INFO - Characterized 2395 series
+2026-03-11 15:46:42,044 - utils.orchestrator - INFO - Complexity distribution: {'low': 1527, 'medium': 868}
+2026-03-11 15:46:42,044 - utils.orchestrator - INFO - Intermittent: 0
+2026-03-11 15:46:45,428 - run_pipeline - INFO - Running single step: forecast
+2026-03-11 15:46:50,572 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:31728' processes=8 threads=16, memory=111.76 GiB>
+2026-03-11 15:46:50,572 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-11 15:46:50,573 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:46:50,573 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-11 15:46:50,573 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:46:50,600 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+2026-03-11 15:46:50,603 - utils.orchestrator - INFO - Parameter grouping (forecasting): 2 groups (0 individual overrides)
+2026-03-11 15:46:50,603 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-11 15:46:52,143 - utils.orchestrator - INFO -   2395 series -> 25 batches
+2026-03-11 15:50:13,235 - utils.orchestrator - INFO - Generated 7027 forecasts across 25 batches
+2026-03-11 15:50:23,003 - db.db - INFO - bulk_insert: 7,027 rows -> zcube.forecast_results
+2026-03-11 15:50:23,008 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (7027 rows)
+2026-03-11 15:50:28,728 - run_pipeline - INFO - Running single step: backtest
+2026-03-11 15:50:34,802 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:39561' processes=8 threads=16, memory=111.76 GiB>
+2026-03-11 15:50:34,803 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-11 15:50:34,803 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:50:34,804 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-11 15:50:34,804 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 15:50:58,050 - utils.orchestrator - INFO - Loaded backtesting overrides for 1 series
+2026-03-11 15:50:58,050 - utils.orchestrator - INFO - Running parallel backtesting with Dask (2395 series -> 24 batches of ~100)...
