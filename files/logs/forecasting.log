@@ -96,3 +96,271 @@
 2026-03-10 01:34:47,424 - utils.orchestrator - INFO - Characterized 3990 series
 2026-03-10 01:34:47,425 - utils.orchestrator - INFO - Complexity distribution: {'low': 2452, 'medium': 1537, 'high': 1}
 2026-03-10 01:34:47,425 - utils.orchestrator - INFO - Intermittent: 1
+2026-03-10 10:42:41,584 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 11:44:12,931 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 11:44:52,658 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:61409' processes=64 threads=128, memory=680.78 GiB>
+2026-03-10 11:44:52,659 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-10 11:44:52,659 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 11:44:52,659 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-10 11:44:52,659 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 11:44:53,421 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 11:44:53,424 - utils.orchestrator - INFO - Parameter grouping (forecasting): 2 groups (0 individual overrides)
+2026-03-10 11:44:53,424 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-10 13:23:53,608 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 13:24:58,341 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:54416' processes=64 threads=128, memory=680.78 GiB>
+2026-03-10 13:24:58,342 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-10 13:24:58,343 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 13:24:58,344 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-10 13:24:58,345 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 13:24:58,769 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 13:24:58,822 - utils.orchestrator - INFO - Parameter grouping (forecasting): 2 groups (0 individual overrides)
+2026-03-10 13:24:58,874 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-10 13:25:10,929 - utils.orchestrator - INFO -   3990 series -> 41 batches
+2026-03-10 13:42:39,407 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 13:43:43,054 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:59257' processes=64 threads=128, memory=680.78 GiB>
+2026-03-10 13:43:43,055 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-10 13:43:43,055 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 13:43:43,055 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-10 13:43:43,056 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 13:43:43,886 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 13:43:43,947 - utils.orchestrator - INFO - Parameter grouping (forecasting): 2 groups (0 individual overrides)
+2026-03-10 13:43:44,006 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-10 13:43:56,858 - utils.orchestrator - INFO -   3990 series -> 41 batches
+2026-03-10 14:01:28,638 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 14:02:57,304 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:25090' processes=64 threads=128, memory=680.78 GiB>
+2026-03-10 14:02:57,304 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-10 14:02:57,305 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 14:02:57,305 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-10 14:02:57,305 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 14:02:57,589 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 14:02:57,642 - utils.orchestrator - INFO - Parameter grouping (forecasting): 2 groups (0 individual overrides)
+2026-03-10 14:02:57,806 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-10 14:03:19,549 - utils.orchestrator - INFO -   3990 series -> 41 batches
+2026-03-10 14:47:08,067 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 14:47:19,569 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:41080' processes=8 threads=16, memory=111.76 GiB>
+2026-03-10 14:47:19,570 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-10 14:47:19,570 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 14:47:19,570 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-10 14:47:19,571 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 14:47:19,635 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 14:47:19,639 - utils.orchestrator - INFO - Parameter grouping (forecasting): 2 groups (0 individual overrides)
+2026-03-10 14:47:19,640 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-10 14:47:27,139 - utils.orchestrator - INFO -   3990 series -> 41 batches
+2026-03-10 14:56:23,827 - utils.orchestrator - INFO - Generated 5184 forecasts across 41 batches
+2026-03-10 14:56:32,753 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (5184 rows)
+2026-03-10 15:15:53,999 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 15:16:08,315 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:6820' processes=8 threads=16, memory=111.76 GiB>
+2026-03-10 15:16:08,316 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-10 15:16:08,316 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 15:16:08,316 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-10 15:16:08,317 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 15:16:08,425 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 15:16:08,426 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-10 15:16:08,433 - utils.orchestrator - INFO -   1 series -> 1 batches
+2026-03-10 15:16:08,987 - utils.orchestrator - INFO - Generated 2 forecasts across 1 batches
+2026-03-10 15:16:08,991 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 1 series only
+2026-03-10 15:16:09,082 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (2 rows)
+2026-03-10 15:16:22,165 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:61932' processes=8 threads=16, memory=111.76 GiB>
+2026-03-10 15:16:22,166 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-10 15:16:22,166 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 15:16:22,166 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-10 15:16:22,166 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 15:16:22,195 - utils.orchestrator - INFO - Loaded backtesting overrides for 1 series
+2026-03-10 15:16:22,195 - utils.orchestrator - INFO - Running parallel backtesting with Dask (1 series -> 1 batches of ~100)...
+2026-03-10 15:16:23,420 - utils.orchestrator - INFO - Backtest complete: 1/1 series processed
+2026-03-10 15:16:23,424 - utils.orchestrator - INFO - Targeted save: replacing data for 1 series only
+2026-03-10 15:16:23,475 - utils.orchestrator - INFO - Backtest metrics saved to zcube.backtest_metrics (6 rows)
+2026-03-10 15:16:23,515 - utils.orchestrator - INFO - Backtest summary by method:
+               mae       rmse
+method                       
+AutoETS  35.829767  44.235000
+MSTL     45.540314  54.749048
+2026-03-10 15:16:23,608 - utils.orchestrator - INFO - Per-origin forecasts saved to zcube.forecasts_by_origin (48 rows)
+2026-03-10 15:16:26,485 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 15:16:26,486 - utils.orchestrator - INFO - STEP 5: Best Method Selection
+2026-03-10 15:16:26,486 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 15:16:26,518 - selection.best_method - INFO - Loaded best_method weights from DB/config
+2026-03-10 15:16:26,518 - selection.best_method - INFO - MethodSelector initialised with weights: {'mae': 0.4, 'bias': 0.15, 'mase': 0.1, 'rmse': 0.2, 'coverage_90': 0.15}
+2026-03-10 15:16:26,541 - utils.orchestrator - INFO - Targeted save: replacing best methods for 1 series only
+2026-03-10 15:16:26,609 - utils.orchestrator - INFO - Best methods saved to zcube.best_method_per_series (1 rows)
+2026-03-10 15:16:26,610 - utils.orchestrator - INFO - Best method distribution: {'AutoETS': 1}
+2026-03-10 15:37:56,985 - run_pipeline - INFO - Running single step: segmentation
+2026-03-10 15:37:57,048 - segmentation.segmentation - INFO - Segmentation: computing ABC classification …
+2026-03-10 15:38:04,315 - segmentation.segmentation - INFO - ABC classification: A=173  B=462  C=3355
+2026-03-10 15:38:04,676 - segmentation.segmentation - INFO -   Segment 'All': 3990 series
+2026-03-10 15:38:06,268 - segmentation.segmentation - INFO - Segment 24: assigned 711 series
+2026-03-10 15:38:06,270 - segmentation.segmentation - INFO -   Segment 'Green': 711 series
+2026-03-10 15:38:06,347 - segmentation.segmentation - INFO - Segment 42: assigned 170 series
+2026-03-10 15:38:06,351 - segmentation.segmentation - INFO -   Segment 'packaging': 170 series
+2026-03-10 15:38:06,452 - segmentation.segmentation - INFO - Segment 44: assigned 146 series
+2026-03-10 15:38:06,455 - segmentation.segmentation - INFO -   Segment 'Hardfruits': 146 series
+2026-03-10 15:38:06,523 - segmentation.segmentation - INFO - Segment 96: assigned 0 series
+2026-03-10 15:38:06,524 - segmentation.segmentation - INFO -   Segment '10285': 0 series
+2026-03-10 15:38:06,524 - segmentation.segmentation - INFO - Segmentation: resolving parameter assignments …
+2026-03-10 15:38:06,858 - segmentation.segmentation - INFO - Resolved parameter assignments for 3990 series
+2026-03-10 15:38:06,859 - segmentation.segmentation - INFO -   Parameter assignments resolved for 3990 series
+2026-03-10 20:23:14,941 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 20:23:24,942 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:23077' processes=8 threads=16, memory=111.76 GiB>
+2026-03-10 20:23:24,942 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-10 20:23:24,943 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 20:23:24,943 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-10 20:23:24,943 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 20:23:24,992 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 20:23:24,993 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-10 20:23:24,996 - utils.orchestrator - INFO -   2 series -> 1 batches
+2026-03-10 20:23:25,587 - utils.orchestrator - INFO - Generated 2 forecasts across 1 batches
+2026-03-10 20:23:25,591 - db.db - WARNING - bulk_insert: no rows for ['unique_id', 'method', 'point_forecast', 'quantiles', 'hyperparameters', 'training_time']
+2026-03-10 20:23:25,591 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (0 rows)
+2026-03-10 20:40:11,376 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 20:40:20,171 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:1503' processes=8 threads=16, memory=111.76 GiB>
+2026-03-10 20:40:20,171 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-10 20:40:20,172 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 20:40:20,172 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-10 20:40:20,172 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 20:40:20,219 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 20:40:20,222 - utils.orchestrator - INFO - Parameter grouping (forecasting): 2 groups (0 individual overrides)
+2026-03-10 20:40:20,222 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-10 20:40:25,886 - utils.orchestrator - INFO -   3990 series -> 41 batches
+2026-03-10 20:46:51,574 - utils.orchestrator - INFO - Generated 10563 forecasts across 41 batches
+2026-03-10 20:47:02,543 - db.db - WARNING - bulk_insert: no rows for ['unique_id', 'method', 'point_forecast', 'quantiles', 'hyperparameters', 'training_time']
+2026-03-10 20:47:02,544 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (0 rows)
+2026-03-10 22:29:57,885 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 22:30:05,560 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:65169' processes=8 threads=16, memory=111.76 GiB>
+2026-03-10 22:30:05,560 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-10 22:30:05,560 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 22:30:05,560 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-10 22:30:05,560 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 22:30:05,601 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 22:30:05,601 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-10 22:30:05,604 - utils.orchestrator - INFO -   2 series -> 1 batches
+2026-03-10 22:30:05,941 - utils.orchestrator - INFO - Generated 5 forecasts across 1 batches
+2026-03-10 22:30:05,946 - db.db - WARNING - bulk_insert: no rows for ['unique_id', 'method', 'point_forecast', 'quantiles', 'hyperparameters', 'training_time']
+2026-03-10 22:30:05,946 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (0 rows)
+2026-03-10 23:38:28,267 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 23:38:36,341 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:37958' processes=8 threads=16, memory=111.76 GiB>
+2026-03-10 23:38:36,342 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-10 23:38:36,342 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 23:38:36,342 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-10 23:38:36,342 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 23:38:36,395 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 23:38:36,395 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-10 23:38:36,400 - utils.orchestrator - INFO -   2 series -> 1 batches
+2026-03-10 23:38:36,906 - utils.orchestrator - INFO - Generated 5 forecasts across 1 batches
+2026-03-10 23:38:36,908 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 2 series only
+2026-03-10 23:38:36,911 - db.db - WARNING - bulk_insert: no rows for ['unique_id', 'method', 'point_forecast', 'quantiles', 'hyperparameters', 'training_time']
+2026-03-10 23:38:36,912 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (0 rows)
+2026-03-10 23:50:42,979 - run_pipeline - INFO - Running single step: forecast
+2026-03-10 23:50:43,786 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 23:50:43,786 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-10 23:50:43,787 - utils.orchestrator - INFO - ================================================================================
+2026-03-10 23:50:43,846 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-10 23:50:43,846 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-10 23:50:43,859 - utils.orchestrator - INFO - Statistical forecasts for 2 series...
+2026-03-10 23:50:44,065 - utils.orchestrator - INFO - ML forecasts for 2 series (min_obs=20)...
+2026-03-10 23:50:44,085 - forecasting.ml_models - INFO - Generating ML forecasts for 2 series (skipped 0 with < 20 observations)
+2026-03-10 23:50:44,086 - utils.orchestrator - INFO - Neural forecasts for 2 series (min_obs=30)...
+2026-03-10 23:50:44,108 - utils.orchestrator - WARNING - Neural forecasting failed: NeuralForecast is required. Install: pip install neuralforecast
+2026-03-10 23:50:44,108 - utils.orchestrator - INFO - Foundation model forecasts for 2 series...
+2026-03-10 23:50:44,129 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 2 series only
+2026-03-10 23:50:44,132 - db.db - WARNING - bulk_insert: no rows for ['unique_id', 'method', 'point_forecast', 'quantiles', 'hyperparameters', 'training_time']
+2026-03-10 23:50:44,133 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (0 rows)
+2026-03-11 00:06:37,469 - run_pipeline - INFO - Running single step: forecast
+2026-03-11 00:06:38,282 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:06:38,282 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-11 00:06:38,282 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:06:38,343 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-11 00:06:38,344 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-11 00:06:38,377 - utils.orchestrator - INFO - Statistical forecasts for 2 series...
+2026-03-11 00:06:38,590 - utils.orchestrator - INFO - ML forecasts for 2 series (min_obs=20)...
+2026-03-11 00:06:38,606 - forecasting.ml_models - INFO - Generating ML forecasts for 2 series (skipped 0 with < 20 observations)
+2026-03-11 00:06:38,607 - utils.orchestrator - INFO - Neural forecasts for 2 series (min_obs=30)...
+2026-03-11 00:06:38,621 - utils.orchestrator - WARNING - Neural forecasting failed: NeuralForecast is required. Install: pip install neuralforecast
+2026-03-11 00:06:38,621 - utils.orchestrator - INFO - Foundation model forecasts for 2 series...
+2026-03-11 00:06:38,654 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 2 series only
+2026-03-11 00:06:38,693 - db.db - INFO - bulk_insert: 5 rows -> zcube.forecast_results
+2026-03-11 00:06:38,694 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (5 rows)
+2026-03-11 00:26:42,620 - run_pipeline - INFO - Running single step: forecast
+2026-03-11 00:26:43,469 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:26:43,469 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-11 00:26:43,469 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:26:43,525 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-11 00:26:43,526 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-11 00:26:43,563 - utils.orchestrator - INFO - Statistical forecasts for 1 series...
+2026-03-11 00:26:43,641 - utils.orchestrator - INFO - ML forecasts for 1 series (min_obs=20)...
+2026-03-11 00:26:43,659 - forecasting.ml_models - INFO - Generating ML forecasts for 1 series (skipped 0 with < 20 observations)
+2026-03-11 00:26:43,663 - utils.orchestrator - INFO - Neural forecasts for 1 series (min_obs=30)...
+2026-03-11 00:26:43,680 - utils.orchestrator - INFO - Foundation model forecasts for 1 series...
+2026-03-11 00:26:43,699 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 1 series only
+2026-03-11 00:26:43,735 - db.db - INFO - bulk_insert: 3 rows -> zcube.forecast_results
+2026-03-11 00:26:43,736 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (3 rows)
+2026-03-11 00:26:51,487 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:58236' processes=8 threads=16, memory=111.76 GiB>
+2026-03-11 00:26:51,487 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-11 00:26:51,487 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:26:51,487 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-11 00:26:51,487 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:26:51,506 - utils.orchestrator - INFO - Loaded backtesting overrides for 1 series
+2026-03-11 00:26:51,506 - utils.orchestrator - INFO - Running parallel backtesting with Dask (1 series -> 1 batches of ~100)...
+2026-03-11 00:26:52,093 - utils.orchestrator - INFO - Backtest complete: 1/1 series processed
+2026-03-11 00:26:52,096 - utils.orchestrator - INFO - Targeted save: replacing data for 1 series only
+2026-03-11 00:26:52,119 - db.db - INFO - bulk_insert: 12 rows -> zcube.backtest_metrics
+2026-03-11 00:26:52,120 - utils.orchestrator - INFO - Backtest metrics saved to zcube.backtest_metrics (12 rows)
+2026-03-11 00:26:52,139 - utils.orchestrator - INFO - Backtest summary by method:
+                 mae       rmse
+method                         
+AutoARIMA  28.628526  34.113880
+AutoETS    29.141611  34.433724
+AutoTheta  30.263428  35.346131
+2026-03-11 00:26:52,189 - db.db - INFO - bulk_insert: 96 rows -> zcube.forecasts_by_origin
+2026-03-11 00:26:52,189 - utils.orchestrator - INFO - Per-origin forecasts saved to zcube.forecasts_by_origin (96 rows)
+2026-03-11 00:26:53,956 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:26:53,957 - utils.orchestrator - INFO - STEP 5: Best Method Selection
+2026-03-11 00:26:53,957 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:26:54,023 - selection.best_method - INFO - Loaded best_method weights from DB/config
+2026-03-11 00:26:54,024 - selection.best_method - INFO - MethodSelector initialised with weights: {'mae': 0.4, 'bias': 0.15, 'mase': 0.1, 'rmse': 0.2, 'coverage_90': 0.15}
+2026-03-11 00:26:54,064 - utils.orchestrator - INFO - Targeted save: replacing best methods for 1 series only
+2026-03-11 00:26:54,163 - db.db - INFO - bulk_insert: 1 rows -> zcube.best_method_per_series
+2026-03-11 00:26:54,164 - utils.orchestrator - INFO - Best methods saved to zcube.best_method_per_series (1 rows)
+2026-03-11 00:26:54,166 - utils.orchestrator - INFO - Best method distribution: {'AutoARIMA': 1}
+2026-03-11 00:27:45,606 - run_pipeline - INFO - Running single step: forecast
+2026-03-11 00:27:46,443 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:27:46,443 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-11 00:27:46,443 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:27:46,465 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-11 00:27:46,465 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-11 00:27:46,480 - utils.orchestrator - INFO - Statistical forecasts for 2 series...
+2026-03-11 00:27:46,713 - utils.orchestrator - INFO - ML forecasts for 2 series (min_obs=20)...
+2026-03-11 00:27:46,732 - forecasting.ml_models - INFO - Generating ML forecasts for 2 series (skipped 0 with < 20 observations)
+2026-03-11 00:27:46,735 - utils.orchestrator - INFO - Neural forecasts for 2 series (min_obs=30)...
+2026-03-11 00:27:46,755 - utils.orchestrator - INFO - Foundation model forecasts for 2 series...
+2026-03-11 00:27:46,798 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 2 series only
+2026-03-11 00:27:46,850 - db.db - INFO - bulk_insert: 5 rows -> zcube.forecast_results
+2026-03-11 00:27:46,850 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (5 rows)
+2026-03-11 00:30:58,404 - run_pipeline - INFO - Running single step: forecast
+2026-03-11 00:30:59,313 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:30:59,314 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-11 00:30:59,314 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:30:59,357 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-11 00:30:59,357 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-11 00:30:59,376 - utils.orchestrator - INFO - Statistical forecasts for 2 series...
+2026-03-11 00:30:59,596 - utils.orchestrator - INFO -   -> Statistical: 5 forecast rows
+2026-03-11 00:30:59,597 - utils.orchestrator - INFO - ML forecasts for 2 series (min_obs=20)...
+2026-03-11 00:30:59,627 - forecasting.ml_models - INFO - Generating ML forecasts for 2 series (skipped 0 with < 20 observations)
+2026-03-11 00:30:59,628 - utils.orchestrator - INFO -   -> ML: 0 forecast rows
+2026-03-11 00:30:59,628 - utils.orchestrator - INFO - Neural forecasts for 2 series (min_obs=30)...
+2026-03-11 00:30:59,643 - utils.orchestrator - INFO - Foundation model forecasts for 2 series...
+2026-03-11 00:30:59,661 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 2 series only
+2026-03-11 00:30:59,687 - db.db - INFO - bulk_insert: 5 rows -> zcube.forecast_results
+2026-03-11 00:30:59,688 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (5 rows)
+2026-03-11 00:44:06,759 - run_pipeline - INFO - Running single step: forecast
+2026-03-11 00:44:15,094 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:62418' processes=8 threads=16, memory=111.76 GiB>
+2026-03-11 00:44:15,095 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-11 00:44:15,095 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:44:15,095 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-11 00:44:15,095 - utils.orchestrator - INFO - ================================================================================
+2026-03-11 00:44:15,149 - utils.parameter_resolver - INFO - ParameterResolver loaded: 3990 assignments, 17 param sets, 1 override series
+2026-03-11 00:44:15,152 - utils.orchestrator - INFO - Parameter grouping (forecasting): 2 groups (0 individual overrides)
+2026-03-11 00:44:15,152 - utils.orchestrator - INFO - Running parallel forecasting with Dask, batch_size=100...
+2026-03-11 00:44:19,555 - utils.orchestrator - INFO -   3990 series -> 41 batches
+2026-03-11 00:50:13,270 - utils.orchestrator - INFO - Generated 10566 forecasts across 41 batches
+2026-03-11 00:50:33,560 - db.db - INFO - bulk_insert: 10,566 rows -> zcube.forecast_results
+2026-03-11 00:50:33,575 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (10566 rows)

@@ -73,14 +73,14 @@ class ProcessLogger:
 
     Usage::
 
-        pl = ProcessLogger("config/config.yaml", run_id="abc-123")
+        pl = ProcessLogger(run_id="abc-123")
         log_id = pl.start_step("etl")
         ...
         pl.end_step(log_id, "success", rows=42000, log_tail="last few lines")
     """
 
-    def __init__(self, config_path: Union[str, Path], run_id: str):
-        self.config_path = Path(config_path)
+    def __init__(self, config_path=None, run_id: str = ""):
+        self.config_path = Path(config_path) if config_path else None
         self.run_id = run_id
         self._start_times: dict[int, datetime] = {}
 
@@ -91,7 +91,7 @@ class ProcessLogger:
         if not _DB_OK:
             return None
         try:
-            return get_conn(self.config_path)
+            return get_conn()
         except Exception as exc:
             logger.warning("ProcessLogger: cannot connect to DB — %s", exc)
             return None

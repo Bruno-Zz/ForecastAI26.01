@@ -74,13 +74,16 @@ class MethodSelector:
             if config_override:
                 from utils.parameter_resolver import ParameterResolver
                 config = ParameterResolver.deep_merge(config, config_override)
-            weights = config.get("best_method", {}).get("weights", None)
+            weights = (
+                config.get("backtesting", {}).get("weights", None)
+                or config.get("best_method", {}).get("weights", None)  # backwards-compat shim
+            )
             if weights is not None:
-                self.logger.info("Loaded best_method weights from DB/config")
+                self.logger.info("Loaded backtesting weights from DB/config")
                 return {str(k): float(v) for k, v in weights.items()}
         except Exception as exc:
             self.logger.warning("Failed to extract weights: %s – using defaults.", exc)
-        self.logger.warning("Missing best_method.weights – using default weights.")
+        self.logger.warning("Missing backtesting.weights – using default weights.")
         return dict(_DEFAULT_WEIGHTS)
 
     # ------------------------------------------------------------------

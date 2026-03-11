@@ -18,6 +18,14 @@ import api from '../utils/api';
 const TABLEAU10 = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ac'];
 const ABC_COLORS = { A: '#22c55e', B: '#eab308', C: '#f97316', D: '#ef4444', X: '#3b82f6', Y: '#a855f7', Z: '#ec4899' };
 
+/** Split unique_id on the first underscore into {item, site}. */
+const parseSeriesId = (uid) => {
+  if (!uid) return { item: '', site: '' };
+  const idx = uid.indexOf('_');
+  if (idx === -1) return { item: uid, site: '' };
+  return { item: uid.slice(0, idx), site: uid.slice(idx + 1) };
+};
+
 /** Collapsible section wrapper */
 const Section = ({ title, storageKey, defaultOpen = true, children, id }) => {
   const [open, setOpen] = useState(() => {
@@ -102,7 +110,7 @@ export const Dashboard = () => {
   const [intermittentFilter, setIntermittentFilter] = useState('');
   const [bestMethodFilter, setBestMethodFilter] = useState('');
   const [classificationFilters, setClassificationFilters] = useState({}); // { configName: 'A' }
-  const [sortField, setSortField] = useState('unique_id');
+  const [sortField, setSortField] = useState('_item');
   const [sortDir, setSortDir] = useState('asc');
   const [accuracyZoom, setAccuracyZoom] = useState(null);
 
@@ -163,7 +171,11 @@ export const Dashboard = () => {
     let result = series || [];
     if (search) {
       const lower = search.toLowerCase();
-      result = result.filter(s => s.unique_id.toLowerCase().includes(lower));
+      result = result.filter(s =>
+        s.unique_id.toLowerCase().includes(lower) ||
+        (s.item_name && s.item_name.toLowerCase().includes(lower)) ||
+        (s.site_name && s.site_name.toLowerCase().includes(lower))
+      );
     }
     if (complexityFilter) result = result.filter(s => s.complexity_level === complexityFilter);
     if (intermittentFilter !== '') {
@@ -198,6 +210,12 @@ export const Dashboard = () => {
         const cfgName = sortField.slice('classifications.'.length);
         va = a.classifications?.[cfgName] ?? '';
         vb = b.classifications?.[cfgName] ?? '';
+      } else if (sortField === '_item') {
+        va = a.item_name ?? parseSeriesId(a.unique_id).item;
+        vb = b.item_name ?? parseSeriesId(b.unique_id).item;
+      } else if (sortField === '_site') {
+        va = a.site_name ?? parseSeriesId(a.unique_id).site;
+        vb = b.site_name ?? parseSeriesId(b.unique_id).site;
       } else {
         va = a[sortField]; vb = b[sortField];
       }
@@ -484,7 +502,8 @@ export const Dashboard = () => {
   }));
 
   const columns = [
-    { field: 'unique_id', label: 'Series ID', hideClass: '' },
+    { field: '_item', label: 'Item', hideClass: '' },
+    { field: '_site', label: 'Site', hideClass: 'hidden sm:table-cell' },
     { field: 'n_observations', label: 'Obs', hideClass: '' },
     { field: 'complexity_level', label: 'Complexity', hideClass: 'hidden sm:table-cell' },
     ...abcColumns,
@@ -714,7 +733,8 @@ export const Dashboard = () => {
                   onClick={() => navigate(`/series/${encodeURIComponent(s.unique_id)}`)}
                   className="hover:bg-blue-50 dark:hover:bg-blue-900/20 cursor-pointer transition-colors"
                 >
-                  <td className="px-3 py-2 font-medium text-blue-600 dark:text-blue-400 whitespace-nowrap">{s.unique_id}</td>
+                  <td className="px-3 py-2 font-medium text-blue-600 dark:text-blue-400 whitespace-nowrap">{s.item_name ?? parseSeriesId(s.unique_id).item}</td>
+                  <td className="px-3 py-2 text-gray-500 dark:text-gray-400 whitespace-nowrap hidden sm:table-cell">{s.site_name ?? parseSeriesId(s.unique_id).site}</td>
                   <td className="px-3 py-2 text-right text-gray-700 dark:text-gray-300">{s.n_observations}</td>
                   <td className="px-3 py-2 hidden sm:table-cell">
                     <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${

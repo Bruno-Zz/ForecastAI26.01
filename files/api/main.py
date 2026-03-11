@@ -140,9 +140,9 @@ PARAMETER_REGISTRY = [
         "description": "Metric weights and scoring",
     },
     {
-        "parameter_type": "best_method",
-        "label": "Method Selection",
-        "description": "Method selection strategy, per-group method lists, and composite scoring weights",
+        "parameter_type": "backtesting",
+        "label": "Backtesting",
+        "description": "Rolling-window backtest settings and composite scoring weights",
     },
     {
         "parameter_type": "meio",
@@ -207,6 +207,8 @@ class TimeSeriesInfo(BaseModel):
     best_method: Optional[str] = None
     best_method_source: Optional[str] = None  # 'backtested' or 'recommended'
     classifications: Optional[Dict[str, str]] = None  # { "config_name": "A", ... }
+    item_name: Optional[str] = None
+    site_name: Optional[str] = None
 
 
 class MethodCompatibilityRequest(BaseModel):
@@ -327,7 +329,7 @@ def load_data():
                 missing = forecast_uids - local_uids
                 if missing:
                     logger.info(
-                        f"Backfill: {len(missing)} series in forecasts but not in demand_actuals — querying source DB…"
+                        f"Backfill: {len(missing)} series in forecasts but not in demand_actuals - querying source DB..."
                     )
                     # Load data_source config from DB
                     from db.db import load_config_from_db
@@ -423,7 +425,7 @@ def load_data():
                                 )
                     else:
                         logger.warning(
-                            "Backfill: no source_db config — cannot load missing series"
+                            "Backfill: no source_db config - cannot load missing series"
                         )
         except Exception as backfill_err:
             logger.warning(
@@ -441,6 +443,27 @@ def load_data():
                     pdf[col] = pdf[col].apply(
                         lambda x: x if isinstance(x, list) else []
                     )
+            # Enrich with human-readable item/site names from demand_actuals
+            try:
+                names_df = pd.read_sql(
+                    f"""SELECT DISTINCT ON (unique_id) unique_id, item_name, site_name
+                        FROM {schema}.demand_actuals
+                        WHERE unique_id IS NOT NULL
+                        ORDER BY unique_id""",
+                    conn,
+                )
+                if not names_df.empty:
+                    pdf = pdf.merge(
+                        names_df[["unique_id", "item_name", "site_name"]],
+                        on="unique_id",
+                        how="left",
+                    )
+                    logger.info(
+                        f"Enriched characteristics with item/site names: "
+                        f"{names_df['unique_id'].nunique()} entries"
+                    )
+            except Exception as _name_err:
+                logger.warning(f"Could not load item/site names: {_name_err}")
             data_cache["characteristics"] = _to_dask(pdf, "characteristics")
             logger.info(f"Loaded characteristics from DB: {len(pdf)} series")
 
@@ -561,7 +584,7 @@ def seed_parameters() -> None:
     from db.db import load_config_from_db
     full_cfg = load_config_from_db()
 
-    conn = get_conn(config_path)
+    conn = get_conn()
     try:
         with conn.cursor() as cur:
             for meta in PARAMETER_REGISTRY:
@@ -614,6 +637,13 @@ def seed_parameters() -> None:
                     f"UPDATE {schema}.parameters SET parameters_set = %s::jsonb WHERE id = %s",
                     (json.dumps(cleaned, default=str), row_id),
                 )
+
+        # One-time migration: rename best_method parameter type → backtesting
+        cur.execute(
+            f"""UPDATE {schema}.parameters
+                SET parameter_type = 'backtesting'
+                WHERE parameter_type = 'best_method'""",
+        )
 
         conn.commit()
         logger.info("Seeded/patched default parameter sets into DB")
@@ -1399,8 +1429,6 @@ async def root():
             "forecasts": "/api/forecasts/{unique_id}",
             "metrics": "/api/metrics/{unique_id}",
             "analytics": "/api/analytics",
-            "best_methods": "/api/best-methods",
-            "series_best_method": "/api/series/{unique_id}/best-method",
             "forecast_origins": "/api/forecasts/{unique_id}/origins",
             "forecast_at_origin": "/api/forecasts/{unique_id}/origins/{origin_date}",
             "forecast_evolution": "/api/series/{unique_id}/forecast-evolution",
@@ -1433,7 +1461,12 @@ async def get_series_list(
 
     # Apply filters
     if search:
-        df = df[df["unique_id"].str.contains(search, case=False, na=False)]
+        mask = df["unique_id"].str.contains(search, case=False, na=False)
+        if "item_name" in df.columns:
+            mask = mask | df["item_name"].str.contains(search, case=False, na=False)
+        if "site_name" in df.columns:
+            mask = mask | df["site_name"].str.contains(search, case=False, na=False)
+        df = df[mask]
 
     if complexity:
         df = df[df["complexity_level"] == complexity]
@@ -1496,6 +1529,12 @@ async def get_series_list(
                 best_method_val = None
                 best_method_source_val = None
 
+        # Extract human-readable names (may be None if demand_actuals join missed)
+        raw_item_name = row.get("item_name", None)
+        raw_site_name = row.get("site_name", None)
+        item_name_val = str(raw_item_name) if raw_item_name and str(raw_item_name) != "nan" else None
+        site_name_val = str(raw_site_name) if raw_site_name and str(raw_site_name) != "nan" else None
+
         series_list.append(
             TimeSeriesInfo(
                 unique_id=uid,
@@ -1512,6 +1551,8 @@ async def get_series_list(
                 best_method=best_method_val,
                 best_method_source=best_method_source_val,
                 classifications=classifications_map.get(uid),
+                item_name=item_name_val,
+                site_name=site_name_val,
             )
         )
 
@@ -1908,9 +1949,11 @@ async def get_metrics(unique_id: str):
         )
 
     config = _get_config()
-    weights = config.get("best_method", {}).get(
-        "weights",
-        {"mae": 0.40, "rmse": 0.20, "bias": 0.15, "coverage_90": 0.15, "mase": 0.10},
+    _default_weights = {"mae": 0.40, "rmse": 0.20, "bias": 0.15, "coverage_90": 0.15, "mase": 0.10}
+    weights = (
+        config.get("backtesting", {}).get("weights")
+        or config.get("best_method", {}).get("weights")  # backwards-compat shim
+        or _default_weights
     )
 
     # Include composite ranking from best_methods if available
@@ -2129,21 +2172,19 @@ def _build_aggregate_demand(uid_set: set | None = None):
     forecast = []
     has_fc = data_cache.get("forecasts") is not None
     has_bm = data_cache.get("best_methods") is not None
-    if not has_fc or not has_bm:
-        logger.warning(f"aggregate-demand: skipping forecast — forecasts loaded={has_fc}, best_methods loaded={has_bm}")
-    elif has_fc and has_bm:
+    if not has_fc:
+        logger.warning(f"aggregate-demand: skipping forecast — forecasts not loaded (best_methods loaded={has_bm})")
+    else:
         fc_df = _compute(data_cache["forecasts"])
-        best_df = _compute(data_cache["best_methods"])
-        logger.info(
-            f"aggregate-demand: fc_df={len(fc_df)} rows cols={list(fc_df.columns)}, "
-            f"best_df={len(best_df)} rows cols={list(best_df.columns)}, "
-            f"included_uids={len(included_uids)}"
-        )
 
-        # Pre-build lookup dicts once (avoid repeated DataFrame filtering)
-        best_map = best_df.set_index("unique_id")["best_method"].to_dict()
-        last_dates = ts_df.groupby("unique_id")["date"].max().to_dict()
+        # Primary: backtested best method per series
+        best_map = {}
+        if has_bm:
+            best_df = _compute(data_cache["best_methods"])
+            best_map = best_df.set_index("unique_id")["best_method"].to_dict()
 
+        # Fallback: first recommended method from characterization; also build date_range_end map
+        recommended_map = {}
         chars_map = {}
         if data_cache.get("characteristics") is not None:
             chars_df = _compute(data_cache["characteristics"])
@@ -2154,6 +2195,25 @@ def _build_aggregate_demand(uid_set: set | None = None):
                     .set_index("unique_id")["date_range_end"]
                     .to_dict()
                 )
+            for _, row in chars_df.iterrows():
+                rec = row.get("recommended_methods")
+                if rec and isinstance(rec, list) and len(rec) > 0:
+                    recommended_map[row["unique_id"]] = str(rec[0])
+                elif rec and isinstance(rec, str):
+                    try:
+                        parsed = json.loads(rec)
+                        if parsed:
+                            recommended_map[row["unique_id"]] = str(parsed[0])
+                    except Exception:
+                        pass
+
+        logger.info(
+            f"aggregate-demand: fc_df={len(fc_df)} rows, "
+            f"best_map={len(best_map)} entries, recommended_map={len(recommended_map)} entries, "
+            f"included_uids={len(included_uids)}"
+        )
+
+        last_dates = ts_df.groupby("unique_id")["date"].max().to_dict()
 
         # Build a fast fc lookup: (unique_id, method) → point_forecast
         fc_subset = fc_df[fc_df["unique_id"].isin(included_uids)]
@@ -2183,7 +2243,7 @@ def _build_aggregate_demand(uid_set: set | None = None):
 
         date_sums = {}
         for uid in included_uids:
-            bm = best_map.get(uid)
+            bm = best_map.get(uid) or recommended_map.get(uid)
             if bm is None:
                 n_no_bm += 1
                 continue
@@ -2219,7 +2279,7 @@ def _build_aggregate_demand(uid_set: set | None = None):
                 n_ok += 1
 
         logger.info(
-            f"aggregate-demand: pipeline — {len(included_uids)} total, "
+            f"aggregate-demand: pipeline - {len(included_uids)} total, "
             f"{n_ok} ok, {n_no_bm} no_best_method, {n_no_fc} no_forecast_match, "
             f"{n_bad_type} bad_pf_type, {n_no_date} no_last_date, {n_date_err} date_errors"
         )
@@ -2230,7 +2290,7 @@ def _build_aggregate_demand(uid_set: set | None = None):
         ]
 
     logger.info(
-        f"aggregate-demand: result — {len(included_uids)} series, "
+        f"aggregate-demand: result - {len(included_uids)} series, "
         f"{len(historical)} hist months, {len(forecast)} fc months"
     )
     return {"historical": historical, "forecast": forecast}
@@ -2351,9 +2411,11 @@ async def get_series_best_method(unique_id: str):
         )
 
     config = _get_config()
-    weights = config.get("best_method", {}).get(
-        "weights",
-        {"mae": 0.40, "rmse": 0.20, "bias": 0.15, "coverage_90": 0.15, "mase": 0.10},
+    _default_weights = {"mae": 0.40, "rmse": 0.20, "bias": 0.15, "coverage_90": 0.15, "mase": 0.10}
+    weights = (
+        config.get("backtesting", {}).get("weights")
+        or config.get("best_method", {}).get("weights")  # backwards-compat shim
+        or _default_weights
     )
     ranking = _compute_composite_ranking(metrics_list, weights)
     if not ranking:
@@ -2372,6 +2434,71 @@ async def get_series_best_method(unique_id: str):
         "best_score": ranking.get(best),
         "runner_up_method": runner_up,
     }
+
+
+@app.get("/api/series/{unique_id}/parameters")
+async def get_series_parameters(unique_id: str):
+    """
+    Return the effective parameter version applied to a series for each
+    business type (characterization, outlier_detection, forecasting, backtesting).
+    Includes the version name, source (segment or default), and full parameters_set.
+    """
+    if not _DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="DB not available")
+
+    from utils.parameter_resolver import ParameterResolver
+    resolver = ParameterResolver()
+
+    # Display names and resolver keys for each business type
+    BTYPES = [
+        ("characterization", "characterization", "Characterization"),
+        ("outlier_detection", "outlier_detection", "Outlier Detection"),
+        ("forecasting", "forecasting", "Forecasting"),
+        ("backtesting", "best_method", "Backtesting"),  # DB column still uses best_method key
+    ]
+
+    schema = get_schema()
+    conn = get_conn()
+    result = {}
+    try:
+        with conn.cursor() as cur:
+            for btype_display, resolver_key, label in BTYPES:
+                param_id = resolver.get_param_id_for_series(unique_id, resolver_key)
+                resolved = resolver.resolve(unique_id, resolver_key)
+
+                # Fetch parameter version metadata from DB
+                param_meta = None
+                if param_id is not None:
+                    cur.execute(
+                        f"SELECT id, name, label, is_default FROM {schema}.parameters WHERE id = %s",
+                        (param_id,)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        param_meta = {
+                            "id": row[0],
+                            "name": row[1],
+                            "label": row[2] or row[1],
+                            "is_default": row[3],
+                            "source": "segment",
+                        }
+                if param_meta is None:
+                    param_meta = {
+                        "id": None,
+                        "name": "Default",
+                        "label": label,
+                        "is_default": True,
+                        "source": "default",
+                    }
+
+                result[btype_display] = {
+                    **param_meta,
+                    "parameters_set": resolved,
+                }
+    finally:
+        conn.close()
+
+    return {"unique_id": unique_id, "parameters": result}
 
 
 @app.get("/api/series/{unique_id}/outliers")
@@ -3547,7 +3674,7 @@ def _cleanup_stale_jobs():
             )
             job["exit_code"] = -2
             logger.warning(
-                f"Stale job {job['job_id']} (pid={pid}) marked as error — process not alive"
+                f"Stale job {job['job_id']} (pid={pid}) marked as error - process not alive"
             )
             continue
 
@@ -3568,7 +3695,7 @@ def _cleanup_stale_jobs():
                     )
                     job["exit_code"] = -3
                     logger.warning(
-                        f"Stale job {job['job_id']} timed out after {elapsed:.0f}s — killing process"
+                        f"Stale job {job['job_id']} timed out after {elapsed:.0f}s - killing process"
                     )
                     # Kill the process so it doesn't keep running in the background
                     kill_pid = job.get("pid")
@@ -3661,11 +3788,6 @@ PIPELINE_STEPS = {
         "arg": "backtest",
         "desc": "Rolling-window backtesting and metric computation",
     },
-    "best-method": {
-        "label": "Method Selection",
-        "arg": "best-method",
-        "desc": "Select the best method per series using composite scoring",
-    },
     "distributions": {
         "label": "Distributions",
         "arg": "distributions",
@@ -3680,7 +3802,6 @@ PIPELINE_STEP_ORDER = [
     "segmentation",
     "classification",
     "characterization",
-    "best-method",
     "forecast",
     "backtest",
     "distributions",

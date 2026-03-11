@@ -1,0 +1,10 @@
+implementation=CPython
+version=3.13
+shared=true
+abi3=false
+lib_name=python313
+lib_dir=C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0\libs
+executable=C:\Users\BrunoZindy\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\python.exe
+pointer_width=64
+build_flags=
+suppress_build_script_link_lines=false

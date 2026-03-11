@@ -209,13 +209,13 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
     from utils.process_logger import ProcessLogger, ListHandler
 
     orchestrator = ForecastOrchestrator(config_path)
-    pl = ProcessLogger(config_path, run_id=str(_uuid.uuid4()))
+    pl = ProcessLogger(run_id=str(_uuid.uuid4()))
 
     import pandas as pd
 
     if step == 'segmentation':
         from segmentation.segmentation import SegmentationEngine
-        engine = SegmentationEngine(config_path)
+        engine = SegmentationEngine()
         handler = ListHandler()
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
         logging.getLogger().addHandler(handler)
@@ -345,11 +345,29 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
         logging.getLogger().addHandler(handler)
         log_id = pl.start_step('forecast')
         from utils.orchestrator import DASK_AVAILABLE
-        if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
+        # Only spin up Dask when the workload genuinely needs parallel workers.
+        # For small segment / targeted-series runs (fits in one batch), Dask adds
+        # overhead and — on Windows — worker-process log output and exceptions are
+        # silently dropped because spawned processes don't inherit log handlers.
+        # The serial path (client=None) runs all 4 forecasters in-process and
+        # propagates errors to the visible job log.
+        _n_series_fc = len(chars_df['unique_id'].unique()) if not chars_df.empty else 0
+        _batch_size_fc = orchestrator.parallel_config.get('batch_size', 100)
+        _use_dask_fc = (
+            orchestrator.parallel_config.get('backend') == 'dask'
+            and DASK_AVAILABLE
+            and _n_series_fc > _batch_size_fc
+        )
+        if _use_dask_fc:
             orchestrator.start_dask_client()
         try:
+            # Use targeted delete (series_subset=True) whenever we are scoping
+            # to a subset of all series — either via --series filter OR via
+            # --segment-id.  This prevents truncating the ENTIRE forecast_results
+            # table when only a small segment is being re-forecast.
             forecasts_df = orchestrator.step_forecast(
-                df, chars_df, series_subset=bool(series_filter),
+                df, chars_df,
+                series_subset=bool(series_filter) or (segment_id is not None),
             )
             pl.end_step(log_id, 'success', rows=len(forecasts_df), log_tail=handler.get_tail())
         except Exception as exc:
@@ -375,7 +393,7 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
                 orchestrator.start_dask_client()
             try:
                 metrics_df, origin_df = orchestrator.step_backtest(
-                    df, chars_df, all_methods=True,
+                    df, chars_df, all_methods=True, series_subset=True,
                 )
                 pl.end_step(log_id, 'success', rows=len(metrics_df), log_tail=handler.get_tail())
             except Exception as exc:
@@ -387,18 +405,7 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
                 logging.getLogger().removeHandler(handler)
             print(f"Backtesting complete: {len(metrics_df)} metric rows")
 
-            # Best method step (logged)
-            if not metrics_df.empty:
-                log_id = pl.start_step('best-method')
-                try:
-                    best_df = orchestrator.step_select_best_methods(
-                        metrics_df, series_subset=True,
-                    )
-                    pl.end_step(log_id, 'success', rows=len(best_df))
-                except Exception as exc:
-                    pl.end_step(log_id, 'error', error=str(exc))
-                    raise
-                print(f"Best method selection complete: {len(best_df)} series ranked")
+            # Composite scoring now runs automatically inside step_backtest
 
     elif step == 'backtest':
         print("Loading demand data from PostgreSQL (corrected)...")
@@ -420,9 +427,21 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
         logging.getLogger().addHandler(handler)
         log_id = pl.start_step('backtest')
-        # Start Dask for parallel backtesting (mirrors forecast step behaviour)
         from utils.orchestrator import DASK_AVAILABLE
-        if orchestrator.parallel_config.get('backend') == 'dask' and DASK_AVAILABLE:
+        # Only spin up Dask when the workload genuinely needs parallel workers.
+        # For small segment / targeted-series runs (fits in one batch), Dask adds
+        # overhead and — on Windows — worker-process log output and exceptions are
+        # silently dropped because spawned processes don't inherit log handlers.
+        # The serial path (client=None) runs all backtesting in-process and
+        # propagates errors to the visible job log.
+        _n_series_bt = len(chars_df['unique_id'].unique()) if not chars_df.empty else 0
+        _batch_size_bt = orchestrator.parallel_config.get('batch_size', 100)
+        _use_dask_bt = (
+            orchestrator.parallel_config.get('backend') == 'dask'
+            and DASK_AVAILABLE
+            and _n_series_bt > _batch_size_bt
+        )
+        if _use_dask_bt:
             orchestrator.start_dask_client()
         try:
             metrics_df, origin_df = orchestrator.step_backtest(
@@ -437,18 +456,6 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
                 orchestrator.stop_dask_client()
             logging.getLogger().removeHandler(handler)
         print(f"Backtesting complete: {len(metrics_df)} metric rows, {len(origin_df)} origin forecast rows")
-
-    elif step == 'best-method':
-        print("Loading backtest metrics from PostgreSQL...")
-        metrics_df = _load_metrics_from_db(config_path)
-        log_id = pl.start_step('best-method')
-        try:
-            best_df = orchestrator.step_select_best_methods(metrics_df)
-            pl.end_step(log_id, 'success', rows=len(best_df))
-        except Exception as exc:
-            pl.end_step(log_id, 'error', error=str(exc))
-            raise
-        print(f"Best method selection complete: {len(best_df)} series ranked")
 
     elif step == 'distributions':
         print("Loading forecasts from PostgreSQL...")
@@ -475,7 +482,7 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
 
     else:
         print(f"Unknown step: {step}")
-        print("Available steps: etl, outlier-detection, segmentation, classification, characterize, forecast, backtest, best-method, distributions")
+        print("Available steps: etl, outlier-detection, segmentation, classification, characterize, forecast, backtest, distributions")
         sys.exit(1)
 
 

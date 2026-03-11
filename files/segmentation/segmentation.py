@@ -18,6 +18,7 @@ Criteria JSON schema (stored as JSONB in segment.criteria):
   Empty / null criteria dict  →  matches all series.
 
 Available field keys:
+  unique_id                           (the full series identifier, e.g. "10285_3137")
   item.name, item.xuid, item.description, item.type_id
   item.attributes.{key}          (dynamic JSONB keys)
   site.name, site.xuid, site.description, site.type_id
@@ -30,8 +31,7 @@ Available field keys:
 """
 
 import logging
-from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -41,8 +41,7 @@ logger = logging.getLogger(__name__)
 class SegmentationEngine:
     """Evaluate segment criteria and assign series to segments."""
 
-    def __init__(self, config_path: Union[str, Path]):
-        self.config_path = str(config_path)
+    def __init__(self, config_path=None):
         self._series_df: Optional[pd.DataFrame] = None  # lazy cache
 
     # ─────────────────────────────────────────────────────────────────────
@@ -66,8 +65,8 @@ class SegmentationEngine:
         """
         from db.db import get_conn, get_schema
 
-        schema = get_schema(self.config_path)
-        conn = get_conn(self.config_path)
+        schema = get_schema()
+        conn = get_conn()
         try:
             df = pd.read_sql(
                 f"SELECT unique_id, SUM(COALESCE(corrected_qty, qty)) AS total_qty "
@@ -95,7 +94,7 @@ class SegmentationEngine:
         result = df[["unique_id", "abc_class"]].copy()
 
         # Persist to DB
-        conn = get_conn(self.config_path)
+        conn = get_conn()
         try:
             with conn.cursor() as cur:
                 for _, row in result.iterrows():
@@ -152,7 +151,7 @@ class SegmentationEngine:
         from db.db import get_conn, get_schema
 
         matched_ids = self.evaluate_criteria(criteria)
-        schema = get_schema(self.config_path)
+        schema = get_schema()
 
         # Build lookup: unique_id → (item_id, site_id)
         df = self._get_series_df()
@@ -168,7 +167,7 @@ class SegmentationEngine:
             for uid in matched_ids
         ]
 
-        conn = get_conn(self.config_path)
+        conn = get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -218,8 +217,8 @@ class SegmentationEngine:
 
         from db.db import get_conn, get_schema
 
-        schema = get_schema(self.config_path)
-        conn = get_conn(self.config_path)
+        schema = get_schema()
+        conn = get_conn()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -278,8 +277,8 @@ class SegmentationEngine:
             "best_method",
         ]
 
-        schema = get_schema(self.config_path)
-        conn = get_conn(self.config_path)
+        schema = get_schema()
+        conn = get_conn()
         try:
             # Get all series (unique_id, item_id, site_id)
             with conn.cursor() as cur:
@@ -400,7 +399,7 @@ class SegmentationEngine:
         """Fast path for the 'All' segment — insert every unique_id directly."""
         from db.db import get_conn
 
-        conn = get_conn(self.config_path)
+        conn = get_conn()
         try:
             with conn.cursor() as cur:
                 # Fetch all unique (unique_id, item_id, site_id) combos
@@ -460,8 +459,8 @@ class SegmentationEngine:
 
         from db.db import get_conn, get_schema
 
-        schema = get_schema(self.config_path)
-        conn = get_conn(self.config_path)
+        schema = get_schema()
+        conn = get_conn()
         try:
             # Base: one row per unique_id with item / site / demand info
             # Include all useful columns from each table so the criteria
@@ -706,6 +705,8 @@ class SegmentationEngine:
         demand.has_trend         → has_trend
         demand.channel           → channel
         """
+        if field == "unique_id":
+            return "unique_id"
         if field.startswith("item.attributes."):
             key = field[len("item.attributes."):]
             return f"item_attr_{key}"

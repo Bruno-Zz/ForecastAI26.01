@@ -34,7 +34,7 @@ const PARAM_OPTIONS = {
   'output.formats.metrics':                             ['postgres', 'parquet', 'csv'],
   'output.formats.plots':                               ['png', 'svg', 'html'],
   'logging.level':                                      ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-  'best_method.method_selection_strategy':              ['auto', 'best_fit'],
+  'forecasting.method_selection_strategy':             ['auto', 'best_fit'],
 };
 
 /** Array parameters → dropdown per item row in the modal editor */
@@ -42,12 +42,12 @@ const ARRAY_ITEM_OPTIONS = {
   'forecasting.ml_models':                        ALL_FORECASTING_METHODS,
   'forecasting.statsforecast_models':             ALL_FORECASTING_METHODS,
   'forecasting.neuralforecast_models':            ALL_FORECASTING_METHODS,
-  'best_method.method_selection.sparse_data':     ALL_FORECASTING_METHODS,
-  'best_method.method_selection.intermittent':    ALL_FORECASTING_METHODS,
-  'best_method.method_selection.seasonal':        ALL_FORECASTING_METHODS,
-  'best_method.method_selection.complex':         ALL_FORECASTING_METHODS,
-  'best_method.method_selection.standard':        ALL_FORECASTING_METHODS,
-  'best_method.best_fit_methods':                 ALL_FORECASTING_METHODS,
+  'forecasting.method_selection.sparse_data':     ALL_FORECASTING_METHODS,
+  'forecasting.method_selection.intermittent':    ALL_FORECASTING_METHODS,
+  'forecasting.method_selection.seasonal':        ALL_FORECASTING_METHODS,
+  'forecasting.method_selection.complex':         ALL_FORECASTING_METHODS,
+  'forecasting.method_selection.standard':        ALL_FORECASTING_METHODS,
+  'forecasting.best_fit_methods':                 ALL_FORECASTING_METHODS,
   'meio.distributions':                           ['normal', 'gamma', 'negative_binomial', 'lognormal', 'poisson', 'weibull'],
   'evaluation.metrics.point_forecast':            ['mae', 'rmse', 'mape', 'smape', 'bias', 'mase'],
   'evaluation.metrics.probabilistic':             ['winkler_score', 'crps', 'coverage', 'quantile_loss'],
@@ -60,11 +60,11 @@ const ARRAY_ITEM_OPTIONS = {
  * Value null means "Auto – run all group methods".
  */
 const NULLABLE_METHOD_OPTIONS = {
-  'best_method.method_overrides.sparse_data':  ALL_FORECASTING_METHODS,
-  'best_method.method_overrides.intermittent': ALL_FORECASTING_METHODS,
-  'best_method.method_overrides.seasonal':     ALL_FORECASTING_METHODS,
-  'best_method.method_overrides.complex':      ALL_FORECASTING_METHODS,
-  'best_method.method_overrides.standard':     ALL_FORECASTING_METHODS,
+  'forecasting.method_overrides.sparse_data':    ALL_FORECASTING_METHODS,
+  'forecasting.method_overrides.intermittent':   ALL_FORECASTING_METHODS,
+  'forecasting.method_overrides.seasonal':       ALL_FORECASTING_METHODS,
+  'forecasting.method_overrides.complex':        ALL_FORECASTING_METHODS,
+  'forecasting.method_overrides.standard':       ALL_FORECASTING_METHODS,
 };
 
 /** Static compatibility hints shown as an amber ⚠ next to a method choice */
@@ -84,8 +84,14 @@ const METHOD_WARNINGS = {
 
 /* ─── Parameter type → tab assignment ─── */
 const BUSINESS_PARAM_TYPES = new Set([
-  'best_method', 'characterization', 'evaluation', 'forecasting', 'outlier_detection',
+  'backtesting', 'characterization', 'evaluation', 'forecasting', 'outlier_detection',
 ]);
+
+/** Desired display order for Business Config sub-tabs (pipeline execution order) */
+const BUSINESS_PARAM_TYPE_ORDER = [
+  'characterization', 'outlier_detection', 'forecasting', 'evaluation', 'backtesting',
+];
+
 const SYSTEM_PARAM_TYPES = new Set([
   'data_source', 'etl', 'hierarchical', 'meio', 'parallel', 'output', 'auth', 'logging', 'segmentation',
 ]);
@@ -624,16 +630,16 @@ function ParamField({ label, path, value, onChange, saving, parametersSet }) {
   const isObj = !isNull && !isArray && typeof value === 'object';
   const isSensitive = /password|secret|token|account_key/i.test(label);
 
-  // ── Strategy-aware visibility (best_method parameter type) ──
+  // ── Strategy-aware visibility ──
   // Hide method_overrides + per-group method_selection rows when strategy = best_fit
   if (
-    (path.startsWith('best_method.method_overrides.') ||
-     path.startsWith('best_method.method_selection.')) &&
+    (path.startsWith('forecasting.method_overrides.') ||
+     path.startsWith('forecasting.method_selection.')) &&
     parametersSet?.method_selection_strategy === 'best_fit'
   ) return null;
   // Hide best_fit_methods row when strategy = auto (or unset)
   if (
-    path === 'best_method.best_fit_methods' &&
+    path === 'forecasting.best_fit_methods' &&
     parametersSet?.method_selection_strategy !== 'best_fit'
   ) return null;
 
@@ -1038,9 +1044,15 @@ function ConfigTab({ filterTypes, title = 'System Configuration', subtitle = 'Ed
 
   const paramTypes = useMemo(() => {
     const seen = new Set();
-    return sections
+    const raw = sections
       .map(s => s.parameter_type)
       .filter(pt => { if (seen.has(pt)) return false; seen.add(pt); return true; });
+    // Sort by predefined pipeline execution order; unknowns go at the end
+    return raw.sort((a, b) => {
+      const ai = BUSINESS_PARAM_TYPE_ORDER.indexOf(a);
+      const bi = BUSINESS_PARAM_TYPE_ORDER.indexOf(b);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    });
   }, [sections]);
 
   // Versions for the active type, sorted by priority (sort_order ASC)

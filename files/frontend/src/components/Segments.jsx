@@ -9,6 +9,14 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../utils/api';
 
+/** Split unique_id on the first underscore into item and site. */
+const parseSeriesId = (uid) => {
+  if (!uid) return { item: '', site: '' };
+  const idx = uid.indexOf('_');
+  if (idx === -1) return { item: uid, site: '' };
+  return { item: uid.slice(0, idx), site: uid.slice(idx + 1) };
+};
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /**
@@ -772,9 +780,9 @@ function DetailModal({ segment, onClose, allFields }) {
             <table className="w-full text-xs">
               <thead className="bg-gray-50 dark:bg-gray-800 sticky top-0">
                 <tr>
-                  <th className="text-left px-3 py-2 font-medium text-gray-600 dark:text-gray-300">Series</th>
-                  <th className="text-left px-3 py-2 font-medium text-gray-600 dark:text-gray-300">Item</th>
-                  <th className="text-left px-3 py-2 font-medium text-gray-600 dark:text-gray-300">Site</th>
+                  <th className="text-left px-3 py-2 font-medium text-gray-600 dark:text-gray-300">Series (item@site)</th>
+                  <th className="text-left px-3 py-2 font-medium text-gray-600 dark:text-gray-300">Item Name</th>
+                  <th className="text-left px-3 py-2 font-medium text-gray-600 dark:text-gray-300">Site Name</th>
                   {extraItemCols.map(k => (
                     <th key={`ia_${k}`} className="text-left px-3 py-2 font-medium text-gray-600
                                                     dark:text-gray-300 whitespace-nowrap">
@@ -793,8 +801,8 @@ function DetailModal({ segment, onClose, allFields }) {
                 {(detail?.members || []).map(m => (
                   <tr key={m.unique_id}
                       className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                    <td className="px-3 py-1.5 font-mono text-gray-600 dark:text-gray-400 whitespace-nowrap">
-                      {m.unique_id}
+                    <td className="px-3 py-1.5 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                      {(m.item_name ?? parseSeriesId(m.unique_id).item)}@{(m.site_name ?? parseSeriesId(m.unique_id).site)}
                     </td>
                     <td className="px-3 py-1.5 text-gray-800 dark:text-gray-200 max-w-[200px] truncate"
                         title={m.item_name ?? ''}>

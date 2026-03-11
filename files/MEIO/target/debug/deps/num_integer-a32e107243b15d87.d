@@ -1,0 +1,7 @@
+C:\allDev\ForecastAI2026.01\files\MEIO\target\debug\deps\num_integer-a32e107243b15d87.d: C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\lib.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\roots.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\average.rs
+
+C:\allDev\ForecastAI2026.01\files\MEIO\target\debug\deps\libnum_integer-a32e107243b15d87.rmeta: C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\lib.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\roots.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\average.rs
+
+C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\lib.rs:
+C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\roots.rs:
+C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\num-integer-0.1.46\src\average.rs:

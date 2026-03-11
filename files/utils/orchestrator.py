@@ -130,6 +130,49 @@ def _dask_forecast_batch(config_path: str,
         except Exception as e:
             logger.warning(f"ML forecasting failed in worker: {e}")
 
+    # Neural forecasts (NHITS, NBEATS, PatchTST, TFT, DeepAR) — deep-learning eligible series
+    if 'n_observations' in batch_chars.columns:
+        neural_eligible = batch_chars[batch_chars['n_observations'] >= _min_dl]
+    else:
+        neural_eligible = batch_chars[
+            batch_chars.get('sufficient_for_deep_learning', pd.Series(dtype=bool)).fillna(False)
+        ] if 'sufficient_for_deep_learning' in batch_chars.columns else pd.DataFrame()
+
+    if len(neural_eligible) > 0:
+        try:
+            neural_forecaster = NeuralForecaster(config_path, config_override=config_override)
+            neural_forecasts = neural_forecaster.forecast_multiple_series(
+                df=batch_df,
+                characteristics_df=neural_eligible,
+                show_progress=False,
+            )
+            if not neural_forecasts.empty:
+                all_forecasts.append(neural_forecasts)
+        except Exception as e:
+            _emsg = str(e)
+            if 'neuralforecast' in _emsg.lower() or 'NeuralForecast is required' in _emsg:
+                logger.debug(f"Neural forecasting skipped in worker (package not installed): {e}")
+            else:
+                logger.warning(f"Neural forecasting failed in worker: {e}")
+
+    # Foundation model (TimesFM) — runs on all series regardless of data sufficiency
+    try:
+        found_forecaster = FoundationForecaster(config_path, config_override=config_override)
+        if found_forecaster.model is not None:
+            found_forecasts = found_forecaster.forecast_multiple_series(
+                df=batch_df,
+                characteristics_df=batch_chars,
+                show_progress=False,
+            )
+            if not found_forecasts.empty:
+                all_forecasts.append(found_forecasts)
+    except Exception as e:
+        _emsg = str(e)
+        if 'timesfm' in _emsg.lower():
+            logger.debug(f"Foundation model skipped in worker (package not installed): {e}")
+        else:
+            logger.warning(f"Foundation model forecasting failed in worker: {e}")
+
     if all_forecasts:
         return pd.concat(all_forecasts, ignore_index=True)
     return pd.DataFrame()
@@ -588,7 +631,7 @@ class ForecastOrchestrator:
 
     def _make_process_logger(self) -> "ProcessLogger":
         """Create a new ProcessLogger for this pipeline run."""
-        return ProcessLogger(self.config_path, run_id=str(uuid.uuid4()))
+        return ProcessLogger(run_id=str(uuid.uuid4()))
 
     def _run_step(self, pl: "ProcessLogger", step_name: str, fn, *args, **kwargs):
         """
@@ -602,7 +645,7 @@ class ForecastOrchestrator:
         """
         # Attach a list-handler to capture log lines for this step
         handler = ListHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s — %(message)s"))
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
         root_logger = logging.getLogger()
         root_logger.addHandler(handler)
 
@@ -750,7 +793,7 @@ class ForecastOrchestrator:
         self.logger.info("=" * 80)
 
         from segmentation.segmentation import SegmentationEngine
-        engine = SegmentationEngine(self.config_path)
+        engine = SegmentationEngine()
         results = engine.run_all()
         for seg_name, count in results.items():
             self.logger.info(f"  '{seg_name}': {count} series")
@@ -772,7 +815,7 @@ class ForecastOrchestrator:
         summaries = classifier.run_all_active()
         for s in summaries:
             self.logger.info(
-                "  '%s': %d series — %s",
+                "  '%s': %d series - %s",
                 s["name"], s["total"],
                 ", ".join(f"{k}={v}" for k, v in sorted(s.get("per_class", {}).items())),
             )
@@ -814,8 +857,7 @@ class ForecastOrchestrator:
                 cols = list(characteristics_df.columns)
                 rows = [tuple(jsonb_serialize(v) for v in row)
                         for row in characteristics_df.itertuples(index=False, name=None)]
-                bulk_insert(str(self.config_path),
-                            f"{schema}.time_series_characteristics", cols, rows, truncate=True)
+                bulk_insert(None, f"{schema}.time_series_characteristics", cols, rows, truncate=True)
             except Exception as exc:
                 self.logger.error(f"Could not save grouped characteristics: {exc}")
                 raise
@@ -872,6 +914,7 @@ class ForecastOrchestrator:
                 characteristics_df=characteristics_df,
                 show_progress=False,
             )
+            self.logger.info(f"  -> Statistical: {len(stat_forecasts)} forecast rows")
             if not stat_forecasts.empty:
                 all_forecasts.append(stat_forecasts)
         except Exception as e:
@@ -899,6 +942,7 @@ class ForecastOrchestrator:
                     characteristics_df=ml_eligible,
                     show_progress=False,
                 )
+                self.logger.info(f"  -> ML: {len(ml_forecasts)} forecast rows")
                 if not ml_forecasts.empty:
                     all_forecasts.append(ml_forecasts)
             except Exception as e:
@@ -924,7 +968,11 @@ class ForecastOrchestrator:
                 if not neural_forecasts.empty:
                     all_forecasts.append(neural_forecasts)
             except Exception as e:
-                self.logger.warning(f"Neural forecasting failed: {e}")
+                _emsg = str(e)
+                if 'neuralforecast' in _emsg.lower() or 'NeuralForecast is required' in _emsg:
+                    self.logger.debug(f"Neural forecasting skipped (package not installed): {e}")
+                else:
+                    self.logger.warning(f"Neural forecasting failed: {e}")
 
         # --- Foundation model (TimesFM) ---
         self.logger.info(f"Foundation model forecasts for {len(characteristics_df)} series...")
@@ -939,7 +987,11 @@ class ForecastOrchestrator:
                 if not foundation_forecasts.empty:
                     all_forecasts.append(foundation_forecasts)
         except Exception as e:
-            self.logger.warning(f"Foundation model forecasting failed: {e}")
+            _emsg = str(e)
+            if 'timesfm' in _emsg.lower() or 'timesfm' in _emsg.lower():
+                self.logger.debug(f"Foundation model skipped (package not installed): {e}")
+            else:
+                self.logger.warning(f"Foundation model forecasting failed: {e}")
 
         # Combine
         if all_forecasts:
@@ -1014,7 +1066,7 @@ class ForecastOrchestrator:
                     futures.append(future)
 
             n_batches = len(futures)
-            self.logger.info(f"  {n_series} series → {n_batches} batches")
+            self.logger.info(f"  {n_series} series -> {n_batches} batches")
             print(f"[FORECAST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total={n_batches}", flush=True)
 
             results = []
@@ -1068,7 +1120,7 @@ class ForecastOrchestrator:
             cols = list(forecasts_df.columns)
             rows = [tuple(jsonb_serialize(v) for v in row)
                     for row in forecasts_df.itertuples(index=False, name=None)]
-            n = bulk_insert(str(self.config_path), f"{schema}.forecast_results",
+            n = bulk_insert(None, f"{schema}.forecast_results",
                             cols, rows,
                             truncate=not series_subset,
                             delete_where=_delete_clause)
@@ -1082,18 +1134,23 @@ class ForecastOrchestrator:
     def step_backtest(self,
                       df: pd.DataFrame,
                       characteristics_df: pd.DataFrame,
-                      all_methods: bool = False) -> tuple:
+                      all_methods: bool = False,
+                      series_subset: bool = False) -> tuple:
         """
         Step 4: Rolling-window backtesting with per-origin forecast storage.
 
         Runs one Dask future per series when a Dask client is available,
-        otherwise falls back to sequential execution.
+        otherwise falls back to sequential execution.  After metrics are
+        saved the composite scoring (formerly 'best-method' step) runs
+        automatically as part of this step.
 
         Args:
             df: Time series data
             characteristics_df: Series characteristics
             all_methods: When True, backtest ML methods (LightGBM, XGBoost)
                          alongside statistical methods.
+            series_subset: When True, use targeted delete/replace for the
+                           scored rankings (used for segment/series-filtered runs).
 
         Returns:
             Tuple of (metrics_df, forecasts_by_origin_df)
@@ -1131,8 +1188,8 @@ class ForecastOrchestrator:
         try:
             from db.db import get_conn, get_schema
             import json as _json
-            conn = get_conn(str(self.config_path))
-            schema = get_schema(str(self.config_path))
+            conn = get_conn()
+            schema = get_schema()
             with conn.cursor() as cur:
                 cur.execute(
                     f"SELECT unique_id, overrides FROM {schema}.hyperparameter_overrides "
@@ -1159,7 +1216,7 @@ class ForecastOrchestrator:
             n_batches = (n_series + batch_size - 1) // batch_size
             self.logger.info(
                 f"Running parallel backtesting with Dask "
-                f"({n_series} series → {n_batches} batches of ~{batch_size})..."
+                f"({n_series} series -> {n_batches} batches of ~{batch_size})..."
             )
             print(f"[BACKTEST_PROGRESS] completed=0 total={n_series} batches_done=0 batches_total={n_batches}", flush=True)
 
@@ -1328,7 +1385,7 @@ class ForecastOrchestrator:
                 cols = list(metrics_df.columns)
                 rows = [tuple(jsonb_serialize(v) for v in row)
                         for row in metrics_df.itertuples(index=False, name=None)]
-                n = bulk_insert(str(self.config_path), f"{schema}.backtest_metrics",
+                n = bulk_insert(None, f"{schema}.backtest_metrics",
                                 cols, rows,
                                 truncate=not _is_subset,
                                 delete_where=_delete_clause)
@@ -1345,7 +1402,7 @@ class ForecastOrchestrator:
                 cols = list(origin_df.columns)
                 rows = [tuple(jsonb_serialize(v) for v in row)
                         for row in origin_df.itertuples(index=False, name=None)]
-                n = bulk_insert(str(self.config_path), f"{schema}.forecasts_by_origin",
+                n = bulk_insert(None, f"{schema}.forecasts_by_origin",
                                 cols, rows,
                                 truncate=not _is_subset,
                                 delete_where=_delete_clause)
@@ -1354,12 +1411,21 @@ class ForecastOrchestrator:
                 self.logger.error(f"Could not save origin forecasts to DB: {db_err}")
                 raise
 
+        # ── Auto-score: compute composite rankings as part of backtest ──
+        if not metrics_df.empty:
+            try:
+                self._score_and_save_best_methods(metrics_df, series_subset=series_subset)
+            except Exception as score_err:
+                self.logger.warning(f"Composite scoring failed (non-fatal): {score_err}")
+
         return metrics_df, origin_df
 
-    def step_select_best_methods(self, metrics_df: pd.DataFrame,
-                                 series_subset: bool = False) -> pd.DataFrame:
+    def _score_and_save_best_methods(self, metrics_df: pd.DataFrame,
+                                     series_subset: bool = False) -> pd.DataFrame:
         """
-        Step 5: Select best forecasting method per series.
+        Internal: compute composite method scores from backtest metrics and
+        save rankings to best_method_per_series. Called automatically by
+        step_backtest — not a user-facing pipeline step.
 
         Args:
             metrics_df: Backtest metrics from step 4
@@ -1369,12 +1435,10 @@ class ForecastOrchestrator:
         Returns:
             DataFrame with best method per series
         """
-        self.logger.info("=" * 80)
-        self.logger.info("STEP 5: Best Method Selection")
-        self.logger.info("=" * 80)
+        self.logger.info("SCORING: Computing composite method rankings from backtest metrics...")
 
         if metrics_df.empty:
-            self.logger.warning("No metrics available for best method selection")
+            self.logger.warning("No metrics available for composite scoring")
             return pd.DataFrame()
 
         best_methods_df = self.method_selector.select_best_methods(metrics_df)
@@ -1394,7 +1458,7 @@ class ForecastOrchestrator:
             cols = list(best_methods_df.columns)
             rows = [tuple(jsonb_serialize(v) for v in row)
                     for row in best_methods_df.itertuples(index=False, name=None)]
-            n = bulk_insert(str(self.config_path), f"{schema}.best_method_per_series",
+            n = bulk_insert(None, f"{schema}.best_method_per_series",
                             cols, rows,
                             truncate=not series_subset,
                             delete_where=_delete_clause)
@@ -1435,7 +1499,7 @@ class ForecastOrchestrator:
             n_batches = (n_rows + batch_size - 1) // batch_size
             self.logger.info(
                 f"Running parallel distribution fitting with Dask "
-                f"({n_rows} rows → {n_batches} batches of ~{batch_size})..."
+                f"({n_rows} rows -> {n_batches} batches of ~{batch_size})..."
             )
             futures = []
             for b in range(n_batches):
@@ -1467,7 +1531,7 @@ class ForecastOrchestrator:
             cols = list(distributions_df.columns)
             rows = [tuple(jsonb_serialize(v) for v in row)
                     for row in distributions_df.itertuples(index=False, name=None)]
-            n = bulk_insert(str(self.config_path), f"{schema}.fitted_distributions",
+            n = bulk_insert(None, f"{schema}.fitted_distributions",
                             cols, rows, truncate=True)
             self.logger.info(f"Distributions saved to {schema}.fitted_distributions ({n} rows)")
         except Exception as db_err:
@@ -1597,14 +1661,11 @@ class ForecastOrchestrator:
                 metrics_df = load_table(str(self.config_path),
                                         f"{_schema}.backtest_metrics")
 
-            # Step 5: Best method selection
-            if not skip_best_method and not metrics_df.empty:
-                best_methods_df = self._run_step(pl, "best_method_selection", self.step_select_best_methods, metrics_df)
+            # Composite scoring runs automatically inside step_backtest
+            if not metrics_df.empty:
                 output_paths['best_methods'] = 'PostgreSQL: best_method_per_series'
-            else:
-                self.logger.info("Skipping best method selection")
 
-            # Step 6: Distribution fitting
+            # Step 5: Distribution fitting
             if not skip_distributions and not forecasts_df.empty:
                 distributions_df = self._run_step(pl, "distribution_fitting", self.step_fit_distributions, forecasts_df)
                 output_paths['distributions'] = 'PostgreSQL: fitted_distributions'

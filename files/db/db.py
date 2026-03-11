@@ -1094,7 +1094,7 @@ def bulk_insert(
                 page_size=page_size,
             )
         conn.commit()
-        logger.info(f"bulk_insert: {len(rows):,} rows → {table_name}")
+        logger.info(f"bulk_insert: {len(rows):,} rows -> {table_name}")
         return len(rows)
     except Exception:
         conn.rollback()

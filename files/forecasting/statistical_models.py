@@ -364,18 +364,17 @@ class StatisticalForecaster:
         if 'ds' not in series_df.columns or 'y' not in series_df.columns:
             raise ValueError("DataFrame must have columns: unique_id, ds, y")
         
-        # Determine season length
-        season_length = None
+        # Determine season length for guard checks and seasonal models.
+        # Non-seasonal series always use season_length=1 so that min-obs guards
+        # like "need >= 2*season_length" don't block short but perfectly valid
+        # non-seasonal series (e.g. 57 weekly obs with has_seasonality=False).
+        freq_map = {'D': 7, 'W': 52, 'M': 12, 'ME': 12, 'Q': 4, 'QE': 4, 'Y': 1, 'YE': 1, 'A': 1}
         if characteristics.get('has_seasonality'):
             seasonal_periods = characteristics.get('seasonal_periods', [])
-            if seasonal_periods:
-                # Map frequency to season length
-                freq_map = {'D': 7, 'W': 52, 'M': 12, 'ME': 12, 'Q': 4, 'QE': 4, 'Y': 1, 'YE': 1, 'A': 1}
-                season_length = seasonal_periods[0] if seasonal_periods else freq_map.get(self.frequency, 1)
-
-        if season_length is None:
-            freq_map = {'D': 7, 'W': 52, 'M': 12, 'ME': 12, 'Q': 4, 'QE': 4, 'Y': 1, 'YE': 1, 'A': 1}
-            season_length = freq_map.get(self.frequency, 1)
+            # Use first explicit period; fall back to frequency default
+            season_length = seasonal_periods[0] if seasonal_periods else freq_map.get(self.frequency, 1)
+        else:
+            season_length = 1
         
         n_obs = len(series_df)
 
@@ -641,10 +640,17 @@ class StatisticalForecaster:
                     f"{unique_id}: skipping non-statistical methods: {skipped}"
                 )
             if not methods:
-                self.logger.warning(
-                    f"{unique_id}: no supported statistical methods found in {all_methods}, skipping"
+                # No statistical methods in recommended_methods — use a safe fallback so
+                # neural/foundation-only series still get a baseline statistical forecast.
+                # This handles the case where recommended_methods is empty (e.g. after a
+                # migration script removed the only method) or contains only non-statistical
+                # methods (NHITS, TimesFM, LightGBM) that this forecaster cannot run.
+                _fallback = ['AutoETS', 'AutoARIMA', 'AutoTheta']
+                self.logger.info(
+                    f"{unique_id}: recommended_methods={all_methods!r} has no statistical "
+                    f"methods; using fallback {_fallback}"
                 )
-                continue
+                methods = _fallback
 
             # Convert characteristics to dict
             characteristics = char_row.to_dict()
@@ -652,16 +658,31 @@ class StatisticalForecaster:
             # Extract per-series overrides (if any)
             series_overrides = (overrides_map or {}).get(unique_id, None)
 
-            # Generate forecasts
-            results = self.forecast_single_series(
-                df=df,
-                unique_id=unique_id,
-                methods=methods,
-                characteristics=characteristics,
-                overrides_map=series_overrides,
-            )
-
-            all_results.extend(results)
+            # Generate forecasts — wrap each series in its own try/except so that
+            # one problematic series cannot kill the whole batch.
+            try:
+                results = self.forecast_single_series(
+                    df=df,
+                    unique_id=unique_id,
+                    methods=methods,
+                    characteristics=characteristics,
+                    overrides_map=series_overrides,
+                )
+                if results:
+                    self.logger.debug(
+                        f"{unique_id}: {len(results)} statistical forecast(s) "
+                        f"({[r.method for r in results]})"
+                    )
+                else:
+                    self.logger.info(
+                        f"{unique_id}: 0 statistical forecasts produced "
+                        f"(attempted methods={methods})"
+                    )
+                all_results.extend(results)
+            except Exception as series_exc:
+                self.logger.warning(
+                    f"{unique_id}: forecast_single_series raised unexpectedly: {series_exc}"
+                )
 
         # Convert to DataFrame
         results_data = [result.to_dict() for result in all_results]

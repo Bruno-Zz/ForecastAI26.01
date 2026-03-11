@@ -209,7 +209,7 @@ const parseUniqueId = (uid) => {
 const SECTION_ORDER_KEY = 'tsv_section_order';
 const DEFAULT_SECTION_ORDER = [
   'toggles', 'main_chart', 'forecast_table', 'outlier',
-  'rationale', 'metrics', 'hyperparameters', 'ridge', 'evolution',
+  'rationale', 'parameters', 'metrics', 'hyperparameters', 'ridge', 'evolution',
 ];
 
 function useSectionOrder() {
@@ -297,12 +297,37 @@ const Section = ({
   );
 };
 
+// ---- Parameter key-value compact display ----
+// Renders a flat list of key=value pairs from a (possibly nested) object, max 2 levels deep
+function ParameterKeyValues({ params, prefix = '', depth = 0 }) {
+  if (!params || typeof params !== 'object' || depth > 1) return null;
+  return (
+    <div className="space-y-0.5">
+      {Object.entries(params).map(([k, v]) => {
+        const fullKey = prefix ? `${prefix}.${k}` : k;
+        if (v !== null && typeof v === 'object' && !Array.isArray(v) && depth < 1) {
+          return <ParameterKeyValues key={k} params={v} prefix={fullKey} depth={depth + 1} />;
+        }
+        const display = Array.isArray(v) ? (v.length > 0 ? v.join(', ') : '—') : String(v ?? '—');
+        return (
+          <div key={k} className="flex justify-between gap-2 text-[10px]">
+            <span className="text-gray-400 dark:text-gray-500 truncate flex-shrink-0 max-w-[50%]">{fullKey}</span>
+            <span className="text-gray-700 dark:text-gray-300 font-mono text-right truncate">{display}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ---- Searchable multi-select dropdown with recent history ----
 // `values` is an array of selected strings; `onChange` receives the new array
-const SearchableDropdown = ({ label, values = [], onChange, options, recentOptions, disabled, placeholder }) => {
+// `getLabel` (optional) maps a value to its display label; defaults to identity
+const SearchableDropdown = ({ label, values = [], onChange, options, recentOptions, disabled, placeholder, getLabel }) => {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const ref = useRef(null);
+  const getLbl = getLabel || (v => v);
 
   // Close on outside click
   useEffect(() => {
@@ -319,13 +344,13 @@ const SearchableDropdown = ({ label, values = [], onChange, options, recentOptio
     }
   };
 
-  const filteredRecent = recentOptions.filter(o => o.toLowerCase().includes(search.toLowerCase()));
+  const filteredRecent = recentOptions.filter(o => getLbl(o).toLowerCase().includes(search.toLowerCase()));
   const filteredAll = options.filter(o =>
-    o.toLowerCase().includes(search.toLowerCase()) &&
+    getLbl(o).toLowerCase().includes(search.toLowerCase()) &&
     !recentOptions.includes(o)
   );
   const hasRecent = filteredRecent.length > 0 && search === '';
-  const displayText = values.length === 0 ? '' : values.length === 1 ? values[0] : `${values.length} selected`;
+  const displayText = values.length === 0 ? '' : values.length === 1 ? getLbl(values[0]) : `${values.length} selected`;
 
   return (
     <div ref={ref} className="relative flex-1 min-w-0">
@@ -382,7 +407,7 @@ const SearchableDropdown = ({ label, values = [], onChange, options, recentOptio
                   className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 dark:hover:bg-blue-900/30 hover:text-blue-700 dark:hover:text-blue-300 flex items-center gap-2 ${values.includes(o) ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' : 'dark:text-gray-300'}`}>
                   <span className={`w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center text-xs ${values.includes(o) ? 'bg-blue-500 border-blue-500 text-white' : 'border-gray-300 dark:border-gray-600'}`}>{values.includes(o) ? '✓' : ''}</span>
                   <span className="text-gray-400 flex-shrink-0">🕐</span>
-                  <span>{o}</span>
+                  <span>{getLbl(o)}</span>
                 </button>
               ))}
               {filteredAll.length > 0 && <div className="border-t border-gray-100 dark:border-gray-700" />}
@@ -401,7 +426,7 @@ const SearchableDropdown = ({ label, values = [], onChange, options, recentOptio
                 <button key={o} onClick={() => toggleOption(o)}
                   className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 dark:hover:bg-blue-900/30 hover:text-blue-700 dark:hover:text-blue-300 flex items-center gap-2 ${values.includes(o) ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' : 'dark:text-gray-300'}`}>
                   <span className={`w-4 h-4 rounded border flex-shrink-0 flex items-center justify-center text-xs ${values.includes(o) ? 'bg-blue-500 border-blue-500 text-white' : 'border-gray-300 dark:border-gray-600'}`}>{values.includes(o) ? '✓' : ''}</span>
-                  <span>{o}</span>
+                  <span>{getLbl(o)}</span>
                 </button>
               ))}
             </>
@@ -1063,6 +1088,16 @@ export const TimeSeriesViewer = () => {
   const [methodExplanation, setMethodExplanation] = useState(null);
   const [distributions, setDistributions] = useState(null);
 
+  // ---- Series parameters (applied parameter versions) ----
+  const [seriesParameters, setSeriesParameters] = useState(null);
+
+  // ---- Series browse table ----
+  const [seriesTableOpen, setSeriesTableOpen] = useState(false);
+  const [seriesTableSort, setSeriesTableSort] = useState({ col: '_item', dir: 'asc' });
+  const [seriesTableSearch, setSeriesTableSearch] = useState('');
+  const [seriesTablePage, setSeriesTablePage] = useState(0);
+  const SERIES_TABLE_PAGE_SIZE = 50;
+
   // ---- Metrics table sorting ----
   const [metricsSortField, setMetricsSortField] = useState('mae');
   const [metricsSortDir, setMetricsSortDir] = useState('asc');
@@ -1232,10 +1267,32 @@ export const TimeSeriesViewer = () => {
     return allSeriesList.filter(s => segmentMemberSet.has(s.unique_id));
   }, [allSeriesList, segmentMemberSet]);
 
+  // ---- Name lookup maps: item_id → item_name, site_id → site_name ----
+  const itemNameMap = useMemo(() => {
+    const map = {};
+    filteredSeriesList.forEach(s => {
+      const { item } = parseUniqueId(s.unique_id);
+      if (!(item in map) && s.item_name) map[item] = s.item_name;
+    });
+    return map;
+  }, [filteredSeriesList]);
+
+  const siteNameMap = useMemo(() => {
+    const map = {};
+    filteredSeriesList.forEach(s => {
+      const { site } = parseUniqueId(s.unique_id);
+      if (!(site in map) && s.site_name) map[site] = s.site_name;
+    });
+    return map;
+  }, [filteredSeriesList]);
+
   const allItems = useMemo(() => {
     const items = [...new Set(filteredSeriesList.map(s => parseUniqueId(s.unique_id).item))];
-    return items.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  }, [filteredSeriesList]);
+    return items.sort((a, b) => {
+      const na = itemNameMap[a] || a, nb = itemNameMap[b] || b;
+      return na.localeCompare(nb, undefined, { numeric: true });
+    });
+  }, [filteredSeriesList, itemNameMap]);
 
   const availableSites = useMemo(() => {
     // When no items selected → show all sites in segment (empty = "all items")
@@ -1243,8 +1300,39 @@ export const TimeSeriesViewer = () => {
       ? filteredSeriesList
       : filteredSeriesList.filter(s => selectedItems.includes(parseUniqueId(s.unique_id).item));
     const sites = source.map(s => parseUniqueId(s.unique_id).site);
-    return [...new Set(sites)].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  }, [filteredSeriesList, selectedItems]);
+    return [...new Set(sites)].sort((a, b) => {
+      const na = siteNameMap[a] || a, nb = siteNameMap[b] || b;
+      return na.localeCompare(nb, undefined, { numeric: true });
+    });
+  }, [filteredSeriesList, selectedItems, siteNameMap]);
+
+  // ---- Series browse table: filtered + sorted rows ----
+  const seriesTableRows = useMemo(() => {
+    let rows = filteredSeriesList;
+    if (seriesTableSearch) {
+      const q = seriesTableSearch.toLowerCase();
+      rows = rows.filter(s =>
+        s.unique_id.toLowerCase().includes(q) ||
+        (s.item_name && s.item_name.toLowerCase().includes(q)) ||
+        (s.site_name && s.site_name.toLowerCase().includes(q))
+      );
+    }
+    rows = [...rows].sort((a, b) => {
+      let va, vb;
+      if (seriesTableSort.col === '_item') {
+        va = a.item_name ?? parseUniqueId(a.unique_id).item;
+        vb = b.item_name ?? parseUniqueId(b.unique_id).item;
+      } else if (seriesTableSort.col === '_site') {
+        va = a.site_name ?? parseUniqueId(a.unique_id).site;
+        vb = b.site_name ?? parseUniqueId(b.unique_id).site;
+      } else {
+        va = a[seriesTableSort.col] ?? ''; vb = b[seriesTableSort.col] ?? '';
+      }
+      const cmp = String(va).localeCompare(String(vb), undefined, { numeric: true });
+      return seriesTableSort.dir === 'asc' ? cmp : -cmp;
+    });
+    return rows;
+  }, [filteredSeriesList, seriesTableSearch, seriesTableSort]);
 
   // ---- Trigger multi-series load when selection changes ----
   useEffect(() => {
@@ -1515,6 +1603,11 @@ export const TimeSeriesViewer = () => {
         setHpSavedOverrides(hpRes.data.overrides || {});
         setHpEdits({});  // clear local edits on fresh load
       } catch { /* no overrides yet — that's fine */ }
+
+      // Load applied parameter versions (non-blocking)
+      api.get(`/series/${encodeURIComponent(decodedId)}/parameters`)
+        .then(res => setSeriesParameters(res.data))
+        .catch(() => setSeriesParameters(null));
 
       // Load forecast convergence data (non-blocking)
       try {
@@ -2472,6 +2565,7 @@ export const TimeSeriesViewer = () => {
               options={allItems}
               recentOptions={recentItems}
               placeholder="Search item..."
+              getLabel={id => itemNameMap[id] || id}
             />
             <SearchableDropdown
               label="Site"
@@ -2481,6 +2575,7 @@ export const TimeSeriesViewer = () => {
               recentOptions={recentSites.filter(s => availableSites.includes(s))}
               disabled={availableSites.length === 0}
               placeholder="Search site..."
+              getLabel={id => siteNameMap[id] || id}
             />
             {/* Time aggregation granularity */}
             <div className="flex flex-col gap-1 flex-shrink-0">
@@ -2607,7 +2702,7 @@ export const TimeSeriesViewer = () => {
                 {multiLoading && <span className="text-blue-500 animate-pulse">Loading...</span>}
               </>
             ) : (selectedItem && selectedSite && (
-              <span>Current series: <span className="font-mono font-medium text-gray-600 dark:text-gray-300">{selectedItem}_{selectedSite}</span></span>
+              <span>Current series: <span className="font-mono font-medium text-gray-600 dark:text-gray-300">{itemNameMap[selectedItem] ?? selectedItem}@{siteNameMap[selectedSite] ?? selectedSite}</span></span>
             ))}
           </div>
         </div>
@@ -2642,6 +2737,7 @@ export const TimeSeriesViewer = () => {
               options={allItems}
               recentOptions={recentItems}
               placeholder="Search item..."
+              getLabel={id => itemNameMap[id] || id}
             />
             <SearchableDropdown
               label="Site"
@@ -2651,6 +2747,7 @@ export const TimeSeriesViewer = () => {
               recentOptions={recentSites.filter(s => availableSites.includes(s))}
               disabled={availableSites.length === 0}
               placeholder="Search site..."
+              getLabel={id => siteNameMap[id] || id}
             />
             {/* Mobile time aggregation */}
             <div className="flex items-center gap-2">
@@ -2760,16 +2857,154 @@ export const TimeSeriesViewer = () => {
           )}
           {!isMultiMode && selectedItem && selectedSite && (
             <div className="mt-2 text-xs text-gray-400 dark:text-gray-500">
-              <span className="font-mono font-medium text-gray-600 dark:text-gray-300">{selectedItem}_{selectedSite}</span>
+              <span className="font-mono font-medium text-gray-600 dark:text-gray-300">{itemNameMap[selectedItem] ?? selectedItem}@{siteNameMap[selectedSite] ?? selectedSite}</span>
             </div>
           )}
+        </div>
+
+        {/* ── Browse all series (collapsible table) ── */}
+        <div className="border-t border-gray-100 dark:border-gray-700">
+          <button
+            onClick={() => { setSeriesTableOpen(o => !o); setSeriesTablePage(0); }}
+            className="w-full flex items-center justify-between px-4 py-2 text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
+          >
+            <span className="flex items-center gap-1.5 font-medium">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+              </svg>
+              Browse all series
+              <span className="bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300 px-1.5 py-0.5 rounded-full font-mono text-[10px]">
+                {filteredSeriesList.length}
+              </span>
+            </span>
+            <svg className={`w-3.5 h-3.5 transition-transform ${seriesTableOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7"/>
+            </svg>
+          </button>
+
+          {seriesTableOpen && (() => {
+            const COLS = [
+              { key: '_item', label: 'Item' },
+              { key: '_site', label: 'Site' },
+              { key: 'n_observations', label: 'Obs' },
+              { key: 'complexity_level', label: 'Complexity' },
+              { key: 'is_intermittent', label: 'Interm.' },
+              { key: 'has_seasonality', label: 'Seasonal' },
+              { key: 'best_method', label: 'Best Method' },
+            ];
+            const totalPages = Math.ceil(seriesTableRows.length / SERIES_TABLE_PAGE_SIZE);
+            const pageRows = seriesTableRows.slice(
+              seriesTablePage * SERIES_TABLE_PAGE_SIZE,
+              (seriesTablePage + 1) * SERIES_TABLE_PAGE_SIZE
+            );
+            const toggleSort = (col) => {
+              setSeriesTableSort(prev =>
+                prev.col === col
+                  ? { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+                  : { col, dir: 'asc' }
+              );
+              setSeriesTablePage(0);
+            };
+            return (
+              <div className="px-4 pb-3">
+                {/* Search */}
+                <div className="mb-2">
+                  <input
+                    type="text"
+                    value={seriesTableSearch}
+                    onChange={e => { setSeriesTableSearch(e.target.value); setSeriesTablePage(0); }}
+                    placeholder="Search by unique_id…"
+                    className="w-full px-3 py-1.5 text-xs border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                  />
+                </div>
+                {/* Table */}
+                <div className="overflow-x-auto rounded border border-gray-200 dark:border-gray-700">
+                  <table className="w-full text-xs">
+                    <thead className="bg-gray-50 dark:bg-gray-700/60">
+                      <tr>
+                        {COLS.map(c => (
+                          <th
+                            key={c.key}
+                            onClick={() => toggleSort(c.key)}
+                            className="px-2 py-1.5 text-left font-medium text-gray-500 dark:text-gray-400 cursor-pointer hover:text-gray-700 dark:hover:text-gray-200 select-none whitespace-nowrap"
+                          >
+                            {c.label}
+                            {seriesTableSort.col === c.key && (
+                              <span className="ml-0.5">{seriesTableSort.dir === 'asc' ? '↑' : '↓'}</span>
+                            )}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                      {pageRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={COLS.length} className="px-2 py-3 text-center text-gray-400 dark:text-gray-500">No series found</td>
+                        </tr>
+                      ) : pageRows.map(s => {
+                        const isActive = s.unique_id === decodedId;
+                        return (
+                          <tr
+                            key={s.unique_id}
+                            onClick={() => { navigate(`/series/${encodeURIComponent(s.unique_id)}`); setSeriesTableOpen(false); }}
+                            className={`cursor-pointer transition-colors ${isActive
+                              ? 'bg-indigo-50 dark:bg-indigo-900/30 font-semibold'
+                              : 'hover:bg-gray-50 dark:hover:bg-gray-700/40'}`}
+                          >
+                            <td className="px-2 py-1.5 font-medium text-blue-600 dark:text-blue-400 whitespace-nowrap">
+                              {isActive && <span className="text-indigo-500 mr-1">▶</span>}
+                              {s.item_name ?? parseUniqueId(s.unique_id).item}
+                            </td>
+                            <td className="px-2 py-1.5 text-gray-500 dark:text-gray-400 whitespace-nowrap">{s.site_name ?? parseUniqueId(s.unique_id).site}</td>
+                            <td className="px-2 py-1.5 text-gray-500 dark:text-gray-400 text-right">{s.n_observations ?? '—'}</td>
+                            <td className="px-2 py-1.5">
+                              {s.complexity_level ? (
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                  s.complexity_level === 'high' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
+                                  s.complexity_level === 'medium' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :
+                                  'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                                }`}>{s.complexity_level}</span>
+                              ) : '—'}
+                            </td>
+                            <td className="px-2 py-1.5 text-center">
+                              {s.is_intermittent ? <span className="text-amber-500">✓</span> : <span className="text-gray-300 dark:text-gray-600">—</span>}
+                            </td>
+                            <td className="px-2 py-1.5 text-center">
+                              {s.has_seasonality ? <span className="text-violet-500">✓</span> : <span className="text-gray-300 dark:text-gray-600">—</span>}
+                            </td>
+                            <td className="px-2 py-1.5 text-gray-500 dark:text-gray-400 font-mono whitespace-nowrap">{s.best_method ?? '—'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {/* Pagination */}
+                {totalPages > 1 && (
+                  <div className="flex items-center justify-between mt-2 text-xs text-gray-400 dark:text-gray-500">
+                    <span>{seriesTableRows.length} series · page {seriesTablePage + 1}/{totalPages}</span>
+                    <div className="flex gap-1">
+                      <button onClick={() => setSeriesTablePage(p => Math.max(0, p - 1))} disabled={seriesTablePage === 0}
+                        className="px-2 py-0.5 rounded border border-gray-200 dark:border-gray-600 disabled:opacity-40 hover:bg-gray-100 dark:hover:bg-gray-700">‹</button>
+                      <button onClick={() => setSeriesTablePage(p => Math.min(totalPages - 1, p + 1))} disabled={seriesTablePage >= totalPages - 1}
+                        className="px-2 py-0.5 rounded border border-gray-200 dark:border-gray-600 disabled:opacity-40 hover:bg-gray-100 dark:hover:bg-gray-700">›</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       </div>
 
       {/* Header — hidden in multi-series mode */}
       {!isMultiMode && (
         <div id="tsv-header" className="mb-6">
-          <h1 className="text-2xl sm:text-3xl font-bold mb-3 dark:text-white">Series: {decodedId}</h1>
+          <h1 className="text-2xl sm:text-3xl font-bold mb-3 dark:text-white">
+            {characteristics?.item_name ?? itemNameMap[parseUniqueId(decodedId).item] ?? parseUniqueId(decodedId).item}
+            <span className="text-gray-400 dark:text-gray-500 font-normal mx-1">@</span>
+            {characteristics?.site_name ?? siteNameMap[parseUniqueId(decodedId).site] ?? parseUniqueId(decodedId).site}
+          </h1>
           {characteristics && (
             <div className="flex flex-wrap gap-2 text-sm">
               <span className="bg-gray-100 dark:bg-gray-700 dark:text-gray-300 px-3 py-1 rounded-full">{characteristics.n_observations} observations</span>
@@ -3097,6 +3332,41 @@ export const TimeSeriesViewer = () => {
         } else {
           sectionNodes['rationale'] = null;
         }
+
+        /* parameters — applied parameter versions for each business type */
+        sectionNodes['parameters'] = (!isMultiMode && seriesParameters) ? (
+          <Section key="parameters" title="Parameters Applied" storageKey="tsv_parameters_open" defaultOpen={false} {...dp('parameters')}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-3">
+              {['characterization', 'outlier_detection', 'forecasting', 'backtesting'].map(btype => {
+                const info = seriesParameters.parameters?.[btype];
+                if (!info) return null;
+                const btypeLabel = {
+                  characterization: 'Characterization',
+                  outlier_detection: 'Outlier Detection',
+                  forecasting: 'Forecasting',
+                  backtesting: 'Backtesting',
+                }[btype];
+                return (
+                  <div key={btype} className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
+                        {btypeLabel}
+                      </span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                        info.source === 'segment'
+                          ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+                          : 'bg-gray-200 text-gray-500 dark:bg-gray-700 dark:text-gray-400'
+                      }`}>
+                        {info.source === 'segment' ? info.name : 'Default'}
+                      </span>
+                    </div>
+                    <ParameterKeyValues params={info.parameters_set} />
+                  </div>
+                );
+              })}
+            </div>
+          </Section>
+        ) : null;
 
         sectionNodes['scoring'] = null;
 

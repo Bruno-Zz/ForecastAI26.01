@@ -186,8 +186,13 @@ class TimeSeriesCharacterizer:
             self.config = ParameterResolver.deep_merge(self.config, config_override)
 
         self.char_config = self.config['characterization']
-        _bm_cfg = self.config.get('best_method', {})
-        self.method_selection = _bm_cfg.get('method_selection', {})
+        # Method-selection config: check forecasting.* first (current UI location),
+        # then backtesting.* (data migrated from old best_method parameter type).
+        _fc_cfg = self.config.get('forecasting', {})
+        _bk_cfg = self.config.get('backtesting', {})
+        self.method_selection = (
+            _fc_cfg.get('method_selection') or _bk_cfg.get('method_selection') or {}
+        )
         self.output_config = self.config.get('output', {})
         self.logger = logging.getLogger(__name__)
 
@@ -200,9 +205,15 @@ class TimeSeriesCharacterizer:
         self.complexity_cfg = self.char_config.get('complexity', {})
 
         # Method selection strategy (per parameter version / per segment)
-        self.method_selection_strategy = _bm_cfg.get('method_selection_strategy', 'auto')
-        self.best_fit_methods = _bm_cfg.get('best_fit_methods', [])
-        self.method_overrides = _bm_cfg.get('method_overrides', {})
+        self.method_selection_strategy = (
+            _fc_cfg.get('method_selection_strategy') or _bk_cfg.get('method_selection_strategy') or 'auto'
+        )
+        self.best_fit_methods = (
+            _fc_cfg.get('best_fit_methods') or _bk_cfg.get('best_fit_methods') or []
+        )
+        self.method_overrides = (
+            _fc_cfg.get('method_overrides') or _bk_cfg.get('method_overrides') or {}
+        )
 
         # Frequency used as a fallback when date information is unavailable
         self.frequency = (

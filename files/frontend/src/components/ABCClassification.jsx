@@ -13,6 +13,14 @@ import { formatNumber } from '../utils/formatting';
 import api from '../utils/api';
 
 const METRIC_LABELS = { hits: 'Order Hits', demand: 'Demand Volume', value: 'Demand Value' };
+
+/** Split unique_id on the first underscore into item and site. */
+const parseSeriesId = (uid) => {
+  if (!uid) return { item: '', site: '' };
+  const idx = uid.indexOf('_');
+  if (idx === -1) return { item: uid, site: '' };
+  return { item: uid.slice(0, idx), site: uid.slice(idx + 1) };
+};
 const METHOD_LABELS = { cumulative_pct: 'Cumulative %', rank_pct: 'Rank %', rank_absolute: 'Rank Absolute' };
 const GRANULARITY_LABELS = { item_site: 'Item / Site', item: 'Item (all sites)' };
 const CLASS_COLORS = { A: '#22c55e', B: '#eab308', C: '#f97316', D: '#ef4444', X: '#3b82f6', Y: '#a855f7', Z: '#ec4899' };
@@ -222,7 +230,10 @@ export const ABCClassification = () => {
           marker: { color: barColors },
           name: 'Metric Value',
           hovertemplate: '%{customdata}<br>Value: %{y:,.0f}<extra></extra>',
-          customdata: data.map(d => d.unique_id),
+          customdata: data.map(d => {
+            const p = parseSeriesId(d.unique_id);
+            return `${d.item_name ?? p.item}@${d.site_name ?? p.site}`;
+          }),
         },
         {
           type: 'scatter',
@@ -598,7 +609,8 @@ export const ABCClassification = () => {
                     <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 text-sm">
                       <thead className="bg-gray-50 dark:bg-gray-900 sticky top-0">
                         <tr>
-                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Series</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Item</th>
+                          <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Site</th>
                           <th className="px-3 py-2 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Class</th>
                           <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Metric</th>
                           <th className="px-3 py-2 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Rank</th>
@@ -608,7 +620,8 @@ export const ABCClassification = () => {
                       <tbody className="divide-y divide-gray-200 dark:divide-gray-700 bg-white dark:bg-gray-800">
                         {results.results.slice(0, 500).map((r, i) => (
                           <tr key={i} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-                            <td className="px-3 py-1.5 font-mono text-xs text-gray-700 dark:text-gray-300">{r.unique_id}</td>
+                            <td className="px-3 py-1.5 text-xs text-blue-600 dark:text-blue-400">{r.item_name ?? parseSeriesId(r.unique_id).item}</td>
+                            <td className="px-3 py-1.5 text-xs text-gray-500 dark:text-gray-400">{r.site_name ?? parseSeriesId(r.unique_id).site}</td>
                             <td className="px-3 py-1.5 text-center">
                               <span
                                 className="inline-flex items-center justify-center w-6 h-6 rounded text-xs font-bold text-white"

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "frontend-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend", "run", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "backend-main",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["api/main.py"],
+      "port": 8000
+    }
+  ]
+}

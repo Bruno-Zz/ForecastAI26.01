@@ -1,0 +1,14 @@
+C:\allDev\ForecastAI2026.01\files\MEIO\target\debug\deps\serde-6e5c490cfbc40ff4.d: C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\allDev\ForecastAI2026.01\files\MEIO\target\debug\build\serde-a3d5cc7c79f19dbb\out/private.rs
+
+C:\allDev\ForecastAI2026.01\files\MEIO\target\debug\deps\libserde-6e5c490cfbc40ff4.rlib: C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\allDev\ForecastAI2026.01\files\MEIO\target\debug\build\serde-a3d5cc7c79f19dbb\out/private.rs
+
+C:\allDev\ForecastAI2026.01\files\MEIO\target\debug\deps\libserde-6e5c490cfbc40ff4.rmeta: C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs C:\allDev\ForecastAI2026.01\files\MEIO\target\debug\build\serde-a3d5cc7c79f19dbb\out/private.rs
+
+C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs:
+C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs:
+C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs:
+C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs:
+C:\Users\BrunoZindy\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs:
+C:\allDev\ForecastAI2026.01\files\MEIO\target\debug\build\serde-a3d5cc7c79f19dbb\out/private.rs:
+
+# env-dep:OUT_DIR=C:\\allDev\\ForecastAI2026.01\\files\\MEIO\\target\\debug\\build\\serde-a3d5cc7c79f19dbb\\out
