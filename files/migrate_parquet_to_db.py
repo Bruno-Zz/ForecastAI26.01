@@ -40,7 +40,7 @@ def _safe_json(val):
 
 
 def migrate_characteristics():
-    """Load time_series_characteristics.parquet → zcube.time_series_characteristics."""
+    """Load time_series_characteristics.parquet -> zcube.time_series_characteristics."""
     pq = _files_dir / "output" / "time_series_characteristics.parquet"
     if not pq.exists():
         logger.warning(f"Skipping characteristics — {pq} not found")
@@ -67,7 +67,7 @@ def migrate_characteristics():
 
 
 def migrate_forecasts():
-    """Load forecasts_all_methods.parquet → zcube.forecast_results."""
+    """Load forecasts_all_methods.parquet -> zcube.forecast_results."""
     pq = _files_dir / "output" / "forecasts_all_methods.parquet"
     if not pq.exists():
         logger.warning(f"Skipping forecasts — {pq} not found")
@@ -94,7 +94,7 @@ def migrate_forecasts():
 
 
 def migrate_backtest_metrics():
-    """Load backtest_metrics.parquet → zcube.backtest_metrics."""
+    """Load backtest_metrics.parquet -> zcube.backtest_metrics."""
     pq = _files_dir / "output" / "backtest_metrics.parquet"
     if not pq.exists():
         logger.warning(f"Skipping backtest_metrics — {pq} not found")
@@ -124,7 +124,7 @@ def migrate_backtest_metrics():
 
 
 def migrate_best_methods():
-    """Load best_method_per_series.parquet → zcube.best_method_per_series."""
+    """Load best_method_per_series.parquet -> zcube.best_method_per_series."""
     pq = _files_dir / "output" / "best_method_per_series.parquet"
     if not pq.exists():
         logger.warning(f"Skipping best_methods — {pq} not found")
@@ -151,7 +151,7 @@ def migrate_best_methods():
 
 
 def migrate_outliers():
-    """Load detected_outliers.parquet → zcube.detected_outliers."""
+    """Load detected_outliers.parquet -> zcube.detected_outliers."""
     pq = _files_dir / "output" / "detected_outliers.parquet"
     if not pq.exists():
         logger.warning(f"Skipping outliers — {pq} not found")
@@ -176,7 +176,7 @@ def migrate_outliers():
 
 
 def migrate_forecasts_by_origin():
-    """Load forecasts_by_origin.parquet → zcube.forecasts_by_origin."""
+    """Load forecasts_by_origin.parquet -> zcube.forecasts_by_origin."""
     pq = _files_dir / "output" / "forecasts_by_origin.parquet"
     if not pq.exists():
         logger.warning(f"Skipping forecasts_by_origin — {pq} not found")
@@ -293,7 +293,7 @@ def _fallback_demand_from_outliers():
 
 def main():
     logger.info("=" * 60)
-    logger.info("Starting parquet → PostgreSQL migration")
+    logger.info("Starting parquet -> PostgreSQL migration")
     logger.info("=" * 60)
 
     # Ensure schema exists

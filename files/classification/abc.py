@@ -223,7 +223,7 @@ class ABCClassifier:
         elif metric == "demand":
             metric_expr = "SUM(COALESCE(da.corrected_qty, da.qty))"
         elif metric == "value":
-            # Fallback chain: item_site.cost_price → item.attributes->>'price' → 1
+            # Fallback chain: item_site.cost_price -> item.attributes->>'price' -> 1
             price_info = self.check_price_available()
             if price_info["item_site"]:
                 price_join = (
@@ -297,18 +297,18 @@ class ABCClassifier:
         df["class_label"] = labels[-1]
 
         if method == "cumulative_pct":
-            # thresholds = [80, 95] → A if cum_pct ≤ 80, B if ≤ 95, C otherwise
+            # thresholds = [80, 95] -> A if cum_pct ≤ 80, B if ≤ 95, C otherwise
             for i in range(len(thresholds) - 1, -1, -1):
                 df.loc[df["cumulative_pct"] <= thresholds[i], "class_label"] = labels[i]
 
         elif method == "rank_pct":
-            # thresholds = [20, 50] → A if rank in top 20%, B if top 50%, C otherwise
+            # thresholds = [20, 50] -> A if rank in top 20%, B if top 50%, C otherwise
             for i in range(len(thresholds) - 1, -1, -1):
                 cutoff_rank = max(1, int(np.ceil(n * thresholds[i] / 100)))
                 df.loc[df["rank"] <= cutoff_rank, "class_label"] = labels[i]
 
         elif method == "rank_absolute":
-            # thresholds = [100, 500] → A if rank ≤ 100, B if rank ≤ 500, C otherwise
+            # thresholds = [100, 500] -> A if rank ≤ 100, B if rank ≤ 500, C otherwise
             for i in range(len(thresholds) - 1, -1, -1):
                 df.loc[df["rank"] <= thresholds[i], "class_label"] = labels[i]
 

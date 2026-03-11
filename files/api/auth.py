@@ -673,7 +673,7 @@ def seed_default_admin(config_path=None) -> None:
     """Create the default admin user on first run if no users exist.
 
     Default admin credentials are read from the 'auth' parameter set in the DB
-    (Settings → System Configuration → Auth).  The legacy *config_path*
+    (Settings -> System Configuration -> Auth).  The legacy *config_path*
     parameter is accepted but ignored.
     """
     try:

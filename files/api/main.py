@@ -443,13 +443,33 @@ def load_data():
                     pdf[col] = pdf[col].apply(
                         lambda x: x if isinstance(x, list) else []
                     )
-            # Enrich with human-readable item/site names from demand_actuals
+            # Enrich with human-readable item/site names.
+            # Two join strategies used together so both FK-based unique_ids
+            # (e.g. "10173_2238") and xuid-based unique_ids (e.g. "ITEM01_STORE01")
+            # get resolved.  COALESCE prefers the xuid match (more direct) and
+            # falls back to the integer-FK match.
             try:
                 names_df = pd.read_sql(
-                    f"""SELECT DISTINCT ON (unique_id) unique_id, item_name, site_name
-                        FROM {schema}.demand_actuals
-                        WHERE unique_id IS NOT NULL
-                        ORDER BY unique_id""",
+                    f"""SELECT
+                               parts.uid  AS unique_id,
+                               COALESCE(MAX(i_x.name), MAX(i_fk.name)) AS item_name,
+                               COALESCE(MAX(s_x.name), MAX(s_fk.name)) AS site_name
+                        FROM (
+                            SELECT DISTINCT
+                                   unique_id  AS uid,
+                                   item_id::text AS item_id_text,
+                                   site_id::text AS site_id_text,
+                                   LEFT(unique_id, STRPOS(unique_id, '_') - 1)   AS item_part,
+                                   SUBSTR(unique_id, STRPOS(unique_id, '_') + 1) AS site_part
+                            FROM {schema}.demand_actuals
+                            WHERE unique_id IS NOT NULL
+                              AND STRPOS(unique_id, '_') > 0
+                        ) parts
+                        LEFT JOIN {schema}.item  i_fk ON i_fk.id::text   = parts.item_id_text
+                        LEFT JOIN {schema}.site  s_fk ON s_fk.id::text   = parts.site_id_text
+                        LEFT JOIN {schema}.item  i_x  ON i_x.xuid::text  = parts.item_part
+                        LEFT JOIN {schema}.site  s_x  ON s_x.xuid::text  = parts.site_part
+                        GROUP BY parts.uid""",
                     conn,
                 )
                 if not names_df.empty:
@@ -621,7 +641,7 @@ def seed_parameters() -> None:
                             (json.dumps(merged, default=str), row_id),
                         )
 
-        # One-time migration: strip keys that moved from forecasting → best_method
+        # One-time migration: strip keys that moved from forecasting -> best_method
         _moved_from_forecasting = {
             'method_selection', 'method_selection_strategy',
             'best_fit_methods', 'method_overrides',
@@ -638,7 +658,7 @@ def seed_parameters() -> None:
                     (json.dumps(cleaned, default=str), row_id),
                 )
 
-        # One-time migration: rename best_method parameter type → backtesting
+        # One-time migration: rename best_method parameter type -> backtesting
         cur.execute(
             f"""UPDATE {schema}.parameters
                 SET parameter_type = 'backtesting'
@@ -2215,7 +2235,7 @@ def _build_aggregate_demand(uid_set: set | None = None):
 
         last_dates = ts_df.groupby("unique_id")["date"].max().to_dict()
 
-        # Build a fast fc lookup: (unique_id, method) → point_forecast
+        # Build a fast fc lookup: (unique_id, method) -> point_forecast
         fc_subset = fc_df[fc_df["unique_id"].isin(included_uids)]
         fc_lookup = {}
         for _, row in fc_subset.iterrows():
@@ -2907,6 +2927,215 @@ async def get_forecast_convergence(unique_id: str, method: Optional[str] = None)
     return {"unique_id": unique_id, "methods": methods_list, "targets": targets}
 
 
+@app.get("/api/series/{unique_id}/backtest-forecasts")
+async def get_backtest_forecasts(unique_id: str):
+    """
+    Get all backtest forecast origins with per-step forecast values and computed dates.
+
+    Returns a structured payload for the Backtest Playback UI:
+    - All forecast origins sorted oldest -> newest
+    - For each origin: per-method step-level forecasts with computed calendar dates
+    - Per-origin MAE per method (from backtest_metrics or computed on-the-fly)
+    - periods_ago: how many frequency-periods before the last historical date each origin is
+    """
+    # ── Helper: return empty payload — never 503/404, let UI show "no data" ──
+    def _empty_bt_response():
+        lhd = None
+        if data_cache["time_series"] is not None:
+            try:
+                ts = _compute(data_cache["time_series"])
+                s = ts[ts["unique_id"] == unique_id].sort_values("date")
+                if not s.empty and "date" in s.columns:
+                    dates = pd.to_datetime(s["date"].dropna()).sort_values()
+                    if len(dates) > 0:
+                        lhd = dates.max().strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        return {
+            "unique_id": unique_id,
+            "frequency": "MS",
+            "last_historical_date": lhd,
+            "origins": [],
+        }
+
+    if data_cache["forecasts_by_origin"] is None:
+        return _empty_bt_response()
+
+    fbo_df = _compute(data_cache["forecasts_by_origin"])
+
+    # ── Determine column names ────────────────────────────────────────────────
+    if "forecast_origin" in fbo_df.columns:
+        origin_col = "forecast_origin"
+    elif "origin" in fbo_df.columns:
+        origin_col = "origin"
+    elif "origin_date" in fbo_df.columns:
+        origin_col = "origin_date"
+    else:
+        return _empty_bt_response()
+
+    actual_col = "actual_value" if "actual_value" in fbo_df.columns else "actual"
+    has_horizon = "horizon_step" in fbo_df.columns
+
+    # ── Filter by unique_id ───────────────────────────────────────────────────
+    series_df = fbo_df[fbo_df["unique_id"] == unique_id].copy()
+    if series_df.empty:
+        return _empty_bt_response()
+
+    # Ensure origin is datetime
+    if not pd.api.types.is_datetime64_any_dtype(series_df[origin_col]):
+        series_df[origin_col] = pd.to_datetime(series_df[origin_col])
+
+    # ── Infer frequency from time_series date gaps ────────────────────────────
+    freq_str = "MS"
+    last_historical_date = None
+
+    if data_cache["time_series"] is not None:
+        ts_df = _compute(data_cache["time_series"])
+        ts_series = ts_df[ts_df["unique_id"] == unique_id].sort_values("date")
+        if not ts_series.empty and "date" in ts_series.columns:
+            dates = pd.to_datetime(ts_series["date"].dropna()).sort_values()
+            if len(dates) >= 2:
+                gaps = dates.diff().dropna().dt.days
+                median_gap = float(gaps.median())
+                if median_gap <= 1.5:
+                    freq_str = "D"
+                elif median_gap <= 10:
+                    freq_str = "W"
+                elif median_gap <= 45:
+                    freq_str = "MS"
+                elif median_gap <= 100:
+                    freq_str = "QS"
+                else:
+                    freq_str = "YS"
+            if len(dates) > 0:
+                last_historical_date = dates.max().strftime("%Y-%m-%d")
+
+    # ── Build MAE lookup from backtest_metrics ────────────────────────────────
+    # Key: (method_str, origin_str "YYYY-MM-DD") -> mae float
+    mae_lookup: dict = {}
+    if data_cache["metrics"] is not None:
+        met_df = _compute(data_cache["metrics"])
+        met_series = met_df[met_df["unique_id"] == unique_id]
+        met_origin_col = None
+        for c in ["forecast_origin", "origin", "origin_date"]:
+            if c in met_series.columns:
+                met_origin_col = c
+                break
+        if (
+            met_origin_col is not None
+            and "mae" in met_series.columns
+            and "method" in met_series.columns
+        ):
+            for _, row in met_series.iterrows():
+                try:
+                    ov = row[met_origin_col]
+                    os = ov.strftime("%Y-%m-%d") if hasattr(ov, "strftime") else str(ov)[:10]
+                    mv = row["mae"]
+                    if pd.notna(mv):
+                        mae_lookup[(str(row["method"]), os)] = float(mv)
+                except Exception:
+                    pass
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+    def _forecast_date(origin_ts, step: int, freq: str):
+        """Return the calendar date that is `step` periods after origin_ts."""
+        try:
+            dr = pd.date_range(start=origin_ts, periods=int(step) + 1, freq=freq)
+            return dr[-1].strftime("%Y-%m-%d")
+        except Exception:
+            return None
+
+    def _periods_ago(origin_ts, last_hist: str, freq: str):
+        """How many frequency-periods is origin_ts before last_hist?"""
+        if last_hist is None:
+            return None
+        try:
+            last_dt = pd.Timestamp(last_hist)
+            if pd.Timestamp(origin_ts) > last_dt:
+                return 0
+            dr = pd.date_range(start=origin_ts, end=last_dt, freq=freq)
+            return max(0, len(dr) - 1)
+        except Exception:
+            return None
+
+    # ── Group rows by origin date ─────────────────────────────────────────────
+    origins_list = []
+    unique_origins = series_df[origin_col].drop_duplicates().sort_values()
+
+    for origin_ts in unique_origins:
+        origin_str = (
+            origin_ts.strftime("%Y-%m-%d")
+            if hasattr(origin_ts, "strftime")
+            else str(origin_ts)[:10]
+        )
+        periods_ago = _periods_ago(origin_ts, last_historical_date, freq_str)
+
+        origin_rows = series_df[series_df[origin_col] == origin_ts]
+        methods_dict: dict = {}
+
+        for method_name, mgroup in origin_rows.groupby("method"):
+            m = str(method_name)
+
+            # Sort / assign horizon steps
+            if has_horizon:
+                mgroup_sorted = mgroup.sort_values("horizon_step")
+            else:
+                mgroup_sorted = mgroup.reset_index(drop=True)
+                mgroup_sorted = mgroup_sorted.assign(
+                    horizon_step=range(1, len(mgroup_sorted) + 1)
+                )
+
+            steps = []
+            for _, row in mgroup_sorted.iterrows():
+                step = int(row.get("horizon_step", 1))
+                pf = row.get("point_forecast", None)
+                av = row[actual_col] if actual_col in row.index else None
+
+                steps.append(
+                    {
+                        "step": step,
+                        "date": _forecast_date(origin_ts, step, freq_str),
+                        "forecast": (
+                            float(pf)
+                            if pf is not None and pd.notna(pf)
+                            else None
+                        ),
+                        "actual": (
+                            float(av)
+                            if av is not None and pd.notna(av)
+                            else None
+                        ),
+                    }
+                )
+
+            # MAE: lookup first, else compute from steps
+            mae = mae_lookup.get((m, origin_str))
+            if mae is None:
+                errs = [
+                    abs(s["forecast"] - s["actual"])
+                    for s in steps
+                    if s["forecast"] is not None and s["actual"] is not None
+                ]
+                mae = float(np.mean(errs)) if errs else None
+
+            methods_dict[m] = {"steps": steps, "mae": mae}
+
+        origins_list.append(
+            {
+                "forecast_origin": origin_str,
+                "periods_ago": periods_ago,
+                "methods": methods_dict,
+            }
+        )
+
+    return {
+        "unique_id": unique_id,
+        "frequency": freq_str,
+        "last_historical_date": last_historical_date,
+        "origins": origins_list,
+    }
+
+
 @app.get("/api/series/{unique_id}/vega-spec")
 async def get_vega_spec(unique_id: str):
     """
@@ -3082,7 +3311,7 @@ async def get_sparklines(unique_ids: List[str] = Body(...)):
 
     result = {}
     for uid in unique_ids:
-        # Historical: last 12 months → interpolated to weekly
+        # Historical: last 12 months -> interpolated to weekly
         series_rows = ts_df[ts_df["unique_id"] == uid].sort_values("date")
         if series_rows.empty:
             continue
@@ -3090,7 +3319,7 @@ async def get_sparklines(unique_ids: List[str] = Body(...)):
         hist_values = series_rows["y"].tolist()
         hist_weekly = monthly_to_weekly(hist_dates, hist_values, n_months=12)
 
-        # Forecast: first 12 months from best method → interpolated to weekly
+        # Forecast: first 12 months from best method -> interpolated to weekly
         fc_weekly = []
         if forecasts_df is not None:
             uid_forecasts = forecasts_df[forecasts_df["unique_id"] == uid]

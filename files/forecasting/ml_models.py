@@ -137,7 +137,7 @@ class MLForecaster:
         """
         Generate engineered features from a univariate time series.
 
-        Features produced (window sizes are frequency-aware, e.g. weekly → 4/8/13/26):
+        Features produced (window sizes are frequency-aware, e.g. weekly -> 4/8/13/26):
             - Lag features at frequency-scaled periods (short + medium + long range)
             - Seasonal lag (if has_seasonality) at the dominant seasonal period
             - Rolling statistics (mean, std, min, max) for frequency-scaled windows

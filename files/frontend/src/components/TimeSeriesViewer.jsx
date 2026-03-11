@@ -32,6 +32,15 @@ const METHOD_COLORS = {
 };
 const getMethodColor = (method) => METHOD_COLORS[method] || '#6b7280';
 
+// Convert #rrggbb hex colour to rgba(...) with given alpha (0-1)
+const hexToRgba = (hex, alpha) => {
+  const h = (hex || '#6b7280').replace('#', '');
+  const r = parseInt(h.substring(0, 2), 16) || 0;
+  const g = parseInt(h.substring(2, 4), 16) || 0;
+  const b = parseInt(h.substring(4, 6), 16) || 0;
+  return `rgba(${r},${g},${b},${alpha})`;
+};
+
 /* ─── ListEditorPopup ──────────────────────────────────────────────────
  * A small popup for editing array values (e.g. confidence_levels).
  * Displays each item as an editable row with add / delete controls.
@@ -1113,7 +1122,19 @@ export const TimeSeriesViewer = () => {
   // ---- Forecast convergence ----
   const [convergenceData, setConvergenceData] = useState(null);
   const [convergenceMethod, setConvergenceMethod] = useState(''); // '' = best method
-  const [convergenceView, setConvergenceView] = useState('convergence'); // 'convergence' | 'racing'
+  const [convergenceView, setConvergenceView] = useState('convergence'); // 'convergence' | 'racing' | 'backtest_playback'
+
+  // ---- Backtest Playback ----
+  const [backtestData, setBacktestData] = useState(null);
+  const [backtestLoading, setBacktestLoading] = useState(false);
+  const [backtestLoaded, setBacktestLoaded] = useState(false);
+  const [backtestError, setBacktestError] = useState(null);
+  const [btOriginIdx, setBtOriginIdx] = useState(0);
+  const [btIsPlaying, setBtIsPlaying] = useState(false);
+  const [btPlaySpeed, setBtPlaySpeed] = useState(1000); // ms per step
+  const [btVisibleMethods, setBtVisibleMethods] = useState({});
+  const [showBacktestOverlay, setShowBacktestOverlay] = useState(false);
+  const btPlayTimerRef = useRef(null);
 
   // ---- Method visibility ----
   const [visibleMethods, setVisibleMethods] = useState({});
@@ -1285,6 +1306,15 @@ export const TimeSeriesViewer = () => {
     });
     return map;
   }, [filteredSeriesList]);
+
+  // ---- Persist human-readable label for the sidebar (item name / site name) ----
+  // IMPORTANT: must be placed AFTER itemNameMap and siteNameMap declarations to avoid TDZ
+  useEffect(() => {
+    const { item, site } = parseUniqueId(decodedId);
+    const itemName = characteristics?.item_name ?? itemNameMap[item] ?? item;
+    const siteName = characteristics?.site_name ?? siteNameMap[site] ?? site;
+    localStorage.setItem('last_series_label', `${itemName} / ${siteName}`);
+  }, [decodedId, characteristics, itemNameMap, siteNameMap]);
 
   const allItems = useMemo(() => {
     const items = [...new Set(filteredSeriesList.map(s => parseUniqueId(s.unique_id).item))];
@@ -1513,8 +1543,20 @@ export const TimeSeriesViewer = () => {
     // Reset zoom to full range whenever the active series changes
     setZoomStart(0);
     setZoomEnd(99999);
+    // Reset backtest playback state for the new series
+    setBacktestData(null);
+    setBacktestLoaded(false);
+    setBacktestLoading(false);
+    setBacktestError(null);
+    setBtIsPlaying(false);
+    setBtOriginIdx(0);
+    setShowBacktestOverlay(false);
+    if (btPlayTimerRef.current) { clearInterval(btPlayTimerRef.current); btPlayTimerRef.current = null; }
     loadData();
-    return () => { if (playTimerRef.current) clearInterval(playTimerRef.current); };
+    return () => {
+      if (playTimerRef.current) clearInterval(playTimerRef.current);
+      if (btPlayTimerRef.current) clearInterval(btPlayTimerRef.current);
+    };
   }, [decodedId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadData = async () => {
@@ -1695,6 +1737,35 @@ export const TimeSeriesViewer = () => {
   }, [decodedId]);
 
   useEffect(() => { loadAdjustments(); }, [loadAdjustments]);
+
+  // ---- Lazy backtest data loader ----
+  const loadBacktestData = useCallback(async () => {
+    if (backtestLoaded || backtestLoading || !!multiSeriesData) return;
+    setBacktestLoading(true);
+    setBacktestError(null);
+    try {
+      const res = await api.get(`/series/${encodeURIComponent(decodedId)}/backtest-forecasts`);
+      setBacktestData(res.data);
+      setBacktestLoaded(true);
+      // Initialize all methods as visible from first origin's keys
+      const methods = Object.keys(res.data?.origins?.[0]?.methods || {});
+      if (methods.length) {
+        setBtVisibleMethods(Object.fromEntries(methods.map(m => [m, true])));
+      }
+    } catch (err) {
+      const status = err?.response?.status;
+      setBacktestError(
+        status === 503
+          ? 'No backtest data yet — run the full forecasting pipeline first.'
+          : status === 404
+            ? 'No backtest history found for this series.'
+            : 'Failed to load backtest data. Please try again.'
+      );
+      setBacktestLoaded(true); // mark as attempted so button disappears
+    } finally {
+      setBacktestLoading(false);
+    }
+  }, [backtestLoaded, backtestLoading, multiSeriesData, decodedId]);
 
   const saveAdjustment = useCallback((forecastDate, adjType, value, note) => {
     const key = `${forecastDate}|${adjType}`;
@@ -1879,6 +1950,46 @@ export const TimeSeriesViewer = () => {
       }, 800);
     }
   }, [isPlaying, origins.length]);
+
+  // ---- Backtest animation ----
+  const btTogglePlay = useCallback(() => {
+    if (btIsPlaying) {
+      clearInterval(btPlayTimerRef.current); btPlayTimerRef.current = null;
+      setBtIsPlaying(false);
+    } else {
+      const total = backtestData?.origins?.length || 0;
+      if (!total) return;
+      // Restart from beginning if at the end
+      setBtOriginIdx(prev => (prev >= total - 1 ? 0 : prev));
+      setBtIsPlaying(true);
+      btPlayTimerRef.current = setInterval(() => {
+        setBtOriginIdx(prev => {
+          if (prev >= total - 1) {
+            clearInterval(btPlayTimerRef.current); btPlayTimerRef.current = null;
+            setBtIsPlaying(false); return prev;
+          }
+          return prev + 1;
+        });
+      }, btPlaySpeed);
+    }
+  }, [btIsPlaying, backtestData, btPlaySpeed]);
+
+  // Restart interval when speed changes while already playing
+  useEffect(() => {
+    if (!btIsPlaying || !backtestData) return;
+    const total = backtestData.origins.length;
+    clearInterval(btPlayTimerRef.current);
+    btPlayTimerRef.current = setInterval(() => {
+      setBtOriginIdx(prev => {
+        if (prev >= total - 1) {
+          clearInterval(btPlayTimerRef.current); btPlayTimerRef.current = null;
+          setBtIsPlaying(false); return prev;
+        }
+        return prev + 1;
+      });
+    }, btPlaySpeed);
+    return () => clearInterval(btPlayTimerRef.current);
+  }, [btPlaySpeed, btIsPlaying, backtestData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleMethod = (method) => setVisibleMethods(prev => ({ ...prev, [method]: !prev[method] }));
   const toggleBand = (method) => setBandVisibleMethods(prev => ({ ...prev, [method]: !prev[method] }));
@@ -2224,6 +2335,27 @@ export const TimeSeriesViewer = () => {
         hovertemplate: '%{x|%Y-%m-%d}<br>Override: %{y:,.0f}<br>%{customdata[0]}<extra>Override</extra>' });
     }
 
+    // ── Backtest overlay (faded forecast lines for all origins) ──
+    if (showBacktestOverlay && backtestData?.origins?.length) {
+      backtestData.origins.forEach(origin => {
+        Object.entries(origin.methods).forEach(([method, mdata]) => {
+          if (visibleMethods[method] === false || !mdata.steps?.length) return;
+          const steps = mdata.steps.filter(s => s.forecast != null);
+          if (!steps.length) return;
+          const color = hexToRgba(getMethodColor(method), 0.22);
+          traces.push({
+            type: 'scatter', mode: 'lines', showlegend: false,
+            legendgroup: `bt_${method}`,
+            name: `${method} [${origin.forecast_origin}]`,
+            x: [origin.forecast_origin, ...steps.map(s => s.date)],
+            y: [null, ...steps.map(s => s.forecast)],
+            line: { color, width: 1.2, dash: 'dot' },
+            hovertemplate: `%{x|%Y-%m-%d}<br>${method}: %{y:,.0f}<br><i>${origin.forecast_origin}</i><extra>${method}</extra>`,
+          });
+        });
+      });
+    }
+
     return {
       data: traces,
       layout: {
@@ -2235,7 +2367,7 @@ export const TimeSeriesViewer = () => {
         hovermode: 'closest',
       },
     };
-  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, bandVisibleMethods, activeMethodDomain, daysPerPeriod, plotlyBase, isDark]);
+  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, bandVisibleMethods, activeMethodDomain, daysPerPeriod, plotlyBase, isDark, showBacktestOverlay, backtestData]);
 
   const racingBarsSpec = useMemo(() => {
     const src = originForecasts?.forecasts?.length > 0 ? originForecasts.forecasts : activeForecasts;
@@ -2269,6 +2401,68 @@ export const TimeSeriesViewer = () => {
       },
     };
   }, [originForecasts, activeForecasts, selectedPeriod, visibleMethods, activeMethodDomain, plotlyBase, locale]);
+
+  // ---- Backtest Playback chart spec ----
+  const btPlaybackSpec = useMemo(() => {
+    if (!backtestData?.origins?.length) return null;
+    const origin = backtestData.origins[Math.min(btOriginIdx, backtestData.origins.length - 1)];
+    if (!origin) return null;
+
+    const traces = [];
+
+    // Historical bars (gray, faded)
+    const hist = activeHistoricalData || [];
+    if (hist.length > 0) {
+      traces.push({
+        type: 'bar', name: 'Historical',
+        x: hist.map(d => d.date),
+        y: hist.map(d => d.value),
+        marker: { color: isDark ? 'rgba(148,163,184,0.45)' : 'rgba(100,116,139,0.35)' },
+        hovertemplate: '%{x|%Y-%m-%d}<br>Actual: %{y:,.0f}<extra>Historical</extra>',
+      });
+    }
+
+    // Collect actual dots from the first method's steps (actuals are same for all methods)
+    const firstMethod = Object.values(origin.methods)[0];
+    const actualDots = (firstMethod?.steps || []).filter(s => s.actual != null);
+    if (actualDots.length > 0) {
+      traces.push({
+        type: 'scatter', mode: 'markers', name: 'Actual (test)',
+        x: actualDots.map(s => s.date),
+        y: actualDots.map(s => s.actual),
+        marker: { color: isDark ? '#e2e8f0' : '#1e293b', size: 8, symbol: 'circle' },
+        hovertemplate: '%{x|%Y-%m-%d}<br>Actual: %{y:,.0f}<extra>Actual</extra>',
+      });
+    }
+
+    // Forecast lines per method
+    Object.entries(origin.methods).forEach(([method, mdata]) => {
+      if (btVisibleMethods[method] === false) return;
+      const steps = (mdata.steps || []).filter(s => s.forecast != null);
+      if (!steps.length) return;
+      const color = getMethodColor(method);
+      traces.push({
+        type: 'scatter', mode: 'lines+markers', name: method,
+        x: [origin.forecast_origin, ...steps.map(s => s.date)],
+        y: [null, ...steps.map(s => s.forecast)],
+        line: { color, width: 2, dash: 'dash' },
+        marker: { color, size: 5 },
+        hovertemplate: `%{x|%Y-%m-%d}<br>${method}: %{y:,.0f}<extra>${method}</extra>`,
+      });
+    });
+
+    return {
+      data: traces,
+      layout: {
+        ...plotlyBase, height: 360,
+        xaxis: { ...plotlyBase.xaxis, type: 'date' },
+        yaxis: { ...plotlyBase.yaxis, title: 'Demand' },
+        barmode: 'overlay',
+        legend: { orientation: 'h', y: 1.08, font: { size: 10 } },
+        hovermode: 'closest',
+      },
+    };
+  }, [backtestData, btOriginIdx, btVisibleMethods, activeHistoricalData, plotlyBase, isDark]);
 
   // ---- Forecast Convergence chart (Plotly grouped bars) ----
   const convergenceChart = useMemo(() => {
@@ -3089,7 +3283,27 @@ export const TimeSeriesViewer = () => {
         /* main_chart */
         sectionNodes['main_chart'] = (
           <Section key="main_chart" id="tsv-main-chart" title={`Historical Data & Forecasts${horizonLength ? ` (${horizonLength}-${periodLabel} horizon)` : ''}`} storageKey="tsv_main_chart_open" {...dp('main_chart')}>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">Shaded bands: 50% (dark) and 90% (light) prediction intervals.</p>
+            <div className="flex items-center gap-3 mb-3 flex-wrap">
+              <p className="text-sm text-gray-500 dark:text-gray-400 flex-1">Shaded bands: 50% (dark) and 90% (light) prediction intervals.</p>
+              {!isMultiMode && (
+                backtestLoading
+                  ? <span className="text-xs text-gray-400 px-3 py-1.5 bg-gray-100 dark:bg-gray-700 rounded-lg">Loading backtest…</span>
+                  : <button
+                      onClick={() => {
+                        const next = !showBacktestOverlay;
+                        setShowBacktestOverlay(next);
+                        if (next && !backtestLoaded) loadBacktestData();
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
+                        showBacktestOverlay
+                          ? 'bg-indigo-600 text-white border-indigo-600 hover:bg-indigo-700'
+                          : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700'
+                      }`}
+                    >
+                      {showBacktestOverlay ? '◎ Hide Backtest Overlay' : '◎ Show Backtest Overlay'}
+                    </button>
+              )}
+            </div>
             {mainChartSpec ? (
               <div className="w-full overflow-x-auto"><Plot data={mainChartSpec.data} layout={mainChartSpec.layout} config={plotlyConfig} useResizeHandler style={{width:'100%'}} /></div>
             ) : <div className="text-gray-400 dark:text-gray-500 py-8 text-center">No data available</div>}
@@ -3990,16 +4204,17 @@ export const TimeSeriesViewer = () => {
           </Section>
         ) : null;
 
-        /* evolution — combined: Forecast Convergence + Racing Bars */
+        /* evolution — combined: Forecast Convergence + Racing Bars + Backtest Playback */
         {
           const hasConvergence = convergenceChart != null;
           const hasRacing = origins.length > 0 || activeForecasts.length > 0;
+          const hasBacktest = !isMultiMode; // always show tab in single-series mode
           // Auto-select available view if current selection is unavailable
-          const effectiveView = (convergenceView === 'convergence' && !hasConvergence) ? 'racing'
-                              : (convergenceView === 'racing' && !hasRacing) ? 'convergence'
+          const effectiveView = (convergenceView === 'convergence' && !hasConvergence) ? (hasRacing ? 'racing' : 'backtest_playback')
+                              : (convergenceView === 'racing' && !hasRacing) ? (hasConvergence ? 'convergence' : 'backtest_playback')
                               : convergenceView;
 
-          if ((hasConvergence || hasRacing) && !isMultiMode) {
+          if ((hasConvergence || hasRacing || hasBacktest) && !isMultiMode) {
             sectionNodes['evolution'] = (
               <Section key="evolution" title="Forecast Evolution" storageKey="tsv_evolution_open" {...dp('evolution')}>
                 {/* View toggle tabs */}
@@ -4016,6 +4231,14 @@ export const TimeSeriesViewer = () => {
                       Method Comparison
                     </button>
                   )}
+                  <button
+                    onClick={() => {
+                      setConvergenceView('backtest_playback');
+                      if (!backtestLoaded && !backtestLoading) loadBacktestData();
+                    }}
+                    className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${effectiveView === 'backtest_playback' ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400' : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}`}>
+                    Backtest Playback
+                  </button>
                 </div>
 
                 {/* ── Convergence View ── */}
@@ -4100,6 +4323,136 @@ export const TimeSeriesViewer = () => {
                       ? <div className="w-full overflow-x-auto"><Plot data={racingBarsSpec.data} layout={racingBarsSpec.layout} config={plotlyConfig} useResizeHandler style={{width:'100%'}} /></div>
                       : <div className="text-gray-400 dark:text-gray-500 py-4 text-center text-sm">No comparison data</div>
                     }
+                  </div>
+                )}
+
+                {/* ── Backtest Playback View ── */}
+                {effectiveView === 'backtest_playback' && (
+                  <div>
+                    <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                      Step through historical forecast origins to see how predictions evolved over time.
+                    </p>
+
+                    {/* Loading spinner */}
+                    {backtestLoading && (
+                      <div className="flex items-center gap-2 text-gray-400 py-6 justify-center">
+                        <span className="animate-spin text-lg">⟳</span>
+                        <span className="text-sm">Loading backtest data…</span>
+                      </div>
+                    )}
+
+                    {/* Error state (load was attempted but API returned error) */}
+                    {!backtestLoading && backtestLoaded && backtestError && (
+                      <div className="py-6 text-center">
+                        <p className="text-amber-600 dark:text-amber-400 text-sm mb-3">⚠ {backtestError}</p>
+                        <button
+                          onClick={() => { setBacktestLoaded(false); setBacktestError(null); loadBacktestData(); }}
+                          className="px-3 py-1.5 rounded-lg text-sm bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 transition-colors"
+                        >Retry</button>
+                      </div>
+                    )}
+
+                    {/* No data state (API returned 200 but origins=[]) */}
+                    {!backtestLoading && backtestLoaded && !backtestError && !backtestData?.origins?.length && (
+                      <div className="text-gray-400 dark:text-gray-500 py-6 text-center text-sm">
+                        No backtest history available — run the full forecasting pipeline to generate backtest data.
+                      </div>
+                    )}
+
+                    {/* Not yet loaded prompt (only if load was never tried) */}
+                    {!backtestLoading && !backtestLoaded && (
+                      <div className="text-center py-6">
+                        <button onClick={loadBacktestData} className="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition-colors">
+                          Load Backtest Data
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Main content when data available */}
+                    {backtestData?.origins?.length > 0 && (() => {
+                      const origins_bt = backtestData.origins;
+                      const curOrigin = origins_bt[Math.min(btOriginIdx, origins_bt.length - 1)];
+                      const allMethods = Object.keys(curOrigin?.methods || {});
+                      return (
+                        <>
+                          {/* Method pills with MAE badges */}
+                          <div className="flex items-center gap-2 mb-4 flex-wrap">
+                            <span className="text-xs text-gray-500 dark:text-gray-400">Methods:</span>
+                            {allMethods.map(m => {
+                              const mae = curOrigin?.methods?.[m]?.mae;
+                              const visible = btVisibleMethods[m] !== false;
+                              const color = getMethodColor(m);
+                              return (
+                                <button key={m}
+                                  onClick={() => setBtVisibleMethods(prev => ({ ...prev, [m]: !visible }))}
+                                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                                    visible ? 'text-white border-transparent' : 'bg-transparent border-gray-300 dark:border-gray-600 text-gray-400 dark:text-gray-500'
+                                  }`}
+                                  style={visible ? { backgroundColor: color, borderColor: color } : {}}
+                                >
+                                  {m}
+                                  {mae != null && (
+                                    <span className={`text-xs ${visible ? 'opacity-80' : 'text-gray-400'}`}>
+                                      MAE {mae.toFixed(1)}
+                                    </span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          {/* Playback controls */}
+                          <div className="flex items-center gap-2 mb-4 flex-wrap">
+                            <button
+                              onClick={() => setBtOriginIdx(prev => Math.max(0, prev - 1))}
+                              disabled={btOriginIdx === 0}
+                              className="px-3 py-1.5 rounded-lg text-sm bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-40 transition-colors"
+                            >‹ Prev</button>
+                            <button
+                              onClick={btTogglePlay}
+                              className={`px-4 py-1.5 rounded-lg text-white text-sm font-medium transition-colors ${btIsPlaying ? 'bg-rose-500 hover:bg-rose-600' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+                            >{btIsPlaying ? '■ Pause' : '▶ Play'}</button>
+                            <button
+                              onClick={() => setBtOriginIdx(prev => Math.min(origins_bt.length - 1, prev + 1))}
+                              disabled={btOriginIdx >= origins_bt.length - 1}
+                              className="px-3 py-1.5 rounded-lg text-sm bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-40 transition-colors"
+                            >Next ›</button>
+                            <div className="flex-1 min-w-28">
+                              <input type="range" min={0} max={origins_bt.length - 1} value={btOriginIdx}
+                                onChange={e => { if (btIsPlaying) { clearInterval(btPlayTimerRef.current); setBtIsPlaying(false); } setBtOriginIdx(parseInt(e.target.value)); }}
+                                className="w-full accent-indigo-500" />
+                            </div>
+                            <div className="text-sm font-mono bg-indigo-50 dark:bg-indigo-900/30 text-indigo-800 dark:text-indigo-300 px-3 py-1.5 rounded-lg min-w-28 text-center font-medium">
+                              {curOrigin?.forecast_origin || '-'}
+                              {curOrigin?.periods_ago != null && (
+                                <span className="ml-1 text-xs opacity-70">({curOrigin.periods_ago}p ago)</span>
+                              )}
+                            </div>
+                            <select value={btPlaySpeed} onChange={e => setBtPlaySpeed(Number(e.target.value))}
+                              className="text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 px-2 py-1.5">
+                              <option value={500}>0.5s/step</option>
+                              <option value={1000}>1s/step</option>
+                              <option value={2000}>2s/step</option>
+                              <option value={3000}>3s/step</option>
+                            </select>
+                          </div>
+
+                          {/* Playback chart */}
+                          {btPlaybackSpec
+                            ? <div className="w-full overflow-x-auto">
+                                <Plot data={btPlaybackSpec.data} layout={btPlaybackSpec.layout} config={plotlyConfig} useResizeHandler style={{width:'100%'}} />
+                              </div>
+                            : <div className="text-gray-400 dark:text-gray-500 py-4 text-center text-sm">Loading chart…</div>
+                          }
+
+                          {/* Step count indicator */}
+                          <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 text-center">
+                            Origin {btOriginIdx + 1} of {origins_bt.length}
+                            {backtestData.frequency && ` · ${backtestData.frequency} frequency`}
+                          </p>
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
               </Section>

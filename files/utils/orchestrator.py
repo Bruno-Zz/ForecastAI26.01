@@ -724,7 +724,7 @@ class ForecastOrchestrator:
             conn = get_conn(config_path)
             try:
                 with conn.cursor() as cur:
-                    # Build a mapping of (unique_id, date) → corrected y value
+                    # Build a mapping of (unique_id, date) -> corrected y value
                     updates = []
                     for _, row in corrected_df.iterrows():
                         updates.append((float(row['y']), str(row['unique_id']), str(row['date'])))
@@ -786,7 +786,7 @@ class ForecastOrchestrator:
         Step 1c: Compute ABC classification and assign series to all segments.
 
         Returns:
-            Dict mapping segment_name → count of assigned series
+            Dict mapping segment_name -> count of assigned series
         """
         self.logger.info("=" * 80)
         self.logger.info("STEP 1c: Segmentation — ABC Classification + Segment Assignment")
@@ -998,6 +998,75 @@ class ForecastOrchestrator:
             combined = pd.concat(all_forecasts, ignore_index=True)
             return combined
         return pd.DataFrame()
+
+    # ─── Incremental processing helpers ──────────────────────────────────────
+
+    def _get_changed_series(self, characteristics_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Filter characteristics_df to only the series whose demand data has changed
+        since the last successful forecast run (data_hash != forecast_hash).
+
+        Falls back to returning the full DataFrame if the series_hashes table
+        cannot be read (e.g. first run, table absent, permission issue).
+        """
+        from db.db import get_conn, get_schema
+        schema = get_schema(str(self.config_path))
+        try:
+            conn = get_conn()
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT unique_id, data_hash, forecast_hash "
+                    f"FROM {schema}.series_hashes"
+                )
+                stored = {uid: (dh, fh) for uid, dh, fh in cur.fetchall()}
+            conn.close()
+        except Exception as exc:
+            self.logger.warning(
+                f"Could not load series_hashes (skipping incremental filter): {exc}"
+            )
+            return characteristics_df
+
+        changed = [
+            uid for uid in characteristics_df['unique_id']
+            if uid not in stored or stored[uid][0] != stored[uid][1]
+        ]
+        n_total = len(characteristics_df)
+        if not changed:
+            self.logger.info("Incremental processing: all series unchanged — skipping forecast")
+            return pd.DataFrame(columns=characteristics_df.columns)
+        self.logger.info(
+            f"Incremental processing: {len(changed)}/{n_total} series changed, forecasting those"
+        )
+        return characteristics_df[characteristics_df['unique_id'].isin(set(changed))].copy()
+
+    def _mark_series_forecast(self, uid_list: list) -> None:
+        """
+        After a successful forecast run, mark all processed series as up-to-date
+        by setting forecast_hash = data_hash in series_hashes.
+        """
+        import psycopg2.extras
+        from db.db import get_conn, get_schema
+        if not uid_list:
+            return
+        schema = get_schema(str(self.config_path))
+        try:
+            conn = get_conn()
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    f"UPDATE {schema}.series_hashes "
+                    f"SET forecast_hash = data_hash "
+                    f"WHERE unique_id = %s",
+                    [(uid,) for uid in uid_list],
+                    template="(%s)",
+                )
+            conn.commit()
+            conn.close()
+            self.logger.info(
+                f"Incremental processing: marked {len(uid_list)} series as up-to-date"
+            )
+        except Exception as exc:
+            self.logger.warning(f"Could not mark series as forecast: {exc}")
 
     def step_forecast(self,
                       df: pd.DataFrame,
@@ -1638,8 +1707,20 @@ class ForecastOrchestrator:
 
             # Step 3: Forecasting
             if not skip_forecasting:
-                forecasts_df = self._run_step(pl, "forecasting", self.step_forecast, df, characteristics_df)
-                output_paths['forecasts'] = 'PostgreSQL: forecast_results'
+                _perf_cfg = self.config.get('performance', {})
+                _fc_chars = characteristics_df
+                if _perf_cfg.get('incremental_processing', False):
+                    _fc_chars = self._get_changed_series(characteristics_df)
+                if _fc_chars.empty:
+                    forecasts_df = pd.DataFrame()
+                    self.logger.info("Incremental processing: nothing to forecast — skipping step")
+                else:
+                    forecasts_df = self._run_step(
+                        pl, "forecasting", self.step_forecast, df, _fc_chars
+                    )
+                    output_paths['forecasts'] = 'PostgreSQL: forecast_results'
+                    if _perf_cfg.get('incremental_processing', False):
+                        self._mark_series_forecast(_fc_chars['unique_id'].tolist())
             else:
                 self.logger.info("Skipping forecasting step -- loading from PostgreSQL...")
                 from db.db import load_table, get_schema

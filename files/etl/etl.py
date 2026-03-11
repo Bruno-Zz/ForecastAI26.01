@@ -29,7 +29,7 @@ _files_dir = Path(__file__).resolve().parent.parent
 if str(_files_dir) not in sys.path:
     sys.path.insert(0, str(_files_dir))
 
-from db.db import get_conn, init_schema
+from db.db import get_conn, get_schema, init_schema
 
 
 class ETLPipeline:
@@ -197,7 +197,7 @@ class ETLPipeline:
                 d.{col_site}  AS site_id,
                 {channel_expr} AS channel,
                 d.{col_date}  AS date,
-                d.{col_qty}   AS y,
+                ABS(d.{col_qty})   AS y,
                 ''            AS item_name,
                 ''            AS site_name
             FROM {tbl} d
@@ -231,7 +231,7 @@ class ETLPipeline:
                 d.site_id,
                 d.channel,
                 d.{self.date_column}  AS date,
-                d.{self.value_column} AS y,
+                ABS(d.{self.value_column}) AS y,
                 COALESCE(d.item_name, i.name, '') AS item_name,
                 COALESCE(d.site_name, s.name, '') AS site_name
             FROM {demand_table} d
@@ -450,12 +450,17 @@ class ETLPipeline:
         # Build rows list
         rows = []
         for _, row in df.iterrows():
+            item_id = int(row.get("item_id", 0) or 0)
+            site_id = int(row.get("site_id", 0) or 0)
+            # Skip orphan rows early (item_id/site_id = 0 means no FK match)
+            if item_id == 0 or site_id == 0:
+                continue
             rows.append((
-                int(row.get("item_id", 0) or 0),
-                int(row.get("site_id", 0) or 0),
+                item_id,
+                site_id,
                 str(row.get("channel", "") or ""),
                 row["date"].date() if hasattr(row["date"], "date") else row["date"],
-                float(row["y"]),
+                abs(float(row["y"])),   # enforce non-negative demand (ABS safety net)
                 str(row.get("item_name", "") or ""),
                 str(row.get("site_name", "") or ""),
                 str(row["unique_id"]),
@@ -464,6 +469,10 @@ class ETLPipeline:
         if not rows:
             self.logger.warning("No rows to insert into demand_actuals")
             return 0
+
+        schema = get_schema()
+        item_table = f"{schema}.item"
+        site_table = f"{schema}.site"
 
         conn = get_conn()
         try:
@@ -480,13 +489,89 @@ class ETLPipeline:
                 """
                 self.logger.info(f"Inserting {len(rows):,} rows into {demand_table}...")
                 psycopg2.extras.execute_values(cur, insert_sql, rows, page_size=5000)
+
+                # Back-fill item_name / site_name from the dimension tables.
+                # Source-DB rows are extracted with empty name strings; this
+                # UPDATE resolves them from the freshly loaded item/site tables.
+                self.logger.info("Back-filling item_name / site_name from dimension tables...")
+                cur.execute(f"""
+                    UPDATE {demand_table} da
+                    SET item_name = COALESCE(NULLIF(da.item_name, ''), i.name, ''),
+                        site_name = COALESCE(NULLIF(da.site_name, ''), s.name, '')
+                    FROM {item_table} i, {site_table} s
+                    WHERE da.item_id = i.id
+                      AND da.site_id = s.id
+                      AND (da.item_name = '' OR da.site_name = '')
+                """)
+                filled = cur.rowcount
+                self.logger.info(f"Back-filled names for {filled:,} row(s)")
+
+                # Remove orphan rows that have no matching item or site in the
+                # dimension tables (item_id = 0, NULL, or FK not found).
+                # These rows have no business meaning and would pollute forecasts.
+                self.logger.info("Removing orphan rows with no matching item or site...")
+                cur.execute(f"""
+                    DELETE FROM {demand_table}
+                    WHERE item_id IS NULL
+                       OR item_id = 0
+                       OR site_id IS NULL
+                       OR site_id = 0
+                       OR item_id NOT IN (SELECT id FROM {item_table} WHERE id IS NOT NULL)
+                       OR site_id NOT IN (SELECT id FROM {site_table} WHERE id IS NOT NULL)
+                """)
+                deleted = cur.rowcount
+                self.logger.info(f"Removed {deleted:,} orphan row(s) with no matching item/site")
+
             conn.commit()
             self.logger.info(f"Inserted {len(rows):,} rows into {demand_table}")
+            # After a successful load, record per-series data hashes for incremental
+            # processing.  Non-fatal: a hash failure must not block the ETL result.
+            try:
+                self._upsert_series_hashes(df)
+            except Exception as _hash_err:
+                self.logger.warning(f"Series hash upsert failed (non-fatal): {_hash_err}")
             return len(rows)
         except Exception as e:
             conn.rollback()
             self.logger.error(f"DB load failed: {e}", exc_info=True)
             raise
+        finally:
+            conn.close()
+
+    def _upsert_series_hashes(self, df: pd.DataFrame) -> None:
+        """
+        Compute an MD5 fingerprint per series from its sorted (date, qty) values
+        and upsert into zcube.series_hashes.  Used by incremental processing to
+        skip series that haven't changed since the last forecast run.
+        """
+        import hashlib
+        schema = get_schema()
+        table = f"{schema}.series_hashes"
+        rows = []
+        for uid, group in df.groupby('unique_id'):
+            sorted_vals = group.sort_values('date')[['date', 'y']].values
+            hash_input = '|'.join(f"{r[0]},{float(r[1]):.6f}" for r in sorted_vals)
+            data_hash = hashlib.md5(hash_input.encode()).hexdigest()
+            rows.append((str(uid), data_hash))
+        if not rows:
+            return
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    f"""INSERT INTO {table} (unique_id, data_hash, hashed_at)
+                        VALUES %s
+                        ON CONFLICT (unique_id) DO UPDATE
+                          SET data_hash = EXCLUDED.data_hash,
+                              hashed_at  = NOW()""",
+                    rows,
+                )
+            conn.commit()
+            self.logger.info(f"Upserted {len(rows):,} series hashes into {table}")
+        except Exception as e:
+            conn.rollback()
+            self.logger.warning(f"Could not upsert series hashes: {e}")
         finally:
             conn.close()
 
@@ -505,7 +590,7 @@ class ETLPipeline:
         table already has an ``attributes`` JSONB column its content is used
         as the base and the extra columns are merged on top of it.
 
-        If *type_names* is provided (a {type_id → name} dict) the resolved
+        If *type_names* is provided (a {type_id -> name} dict) the resolved
         ``type_name`` is added to the attributes automatically.
 
         Returns
@@ -564,7 +649,7 @@ class ETLPipeline:
                         else:
                             base[col] = str(val)
 
-                # Resolve type_id → type_name
+                # Resolve type_id -> type_name
                 tid = r.get("type_id")
                 if tid is not None and tid in type_names:
                     base["type_name"] = type_names[tid]
@@ -642,7 +727,7 @@ class ETLPipeline:
                     )
                     plan_rows = cur.fetchall()
 
-                # Build xuid → merged-attrs dict
+                # Build xuid -> merged-attrs dict
                 plan_attrs_by_xuid = {}
                 for pr in plan_rows:
                     xuid = pr["xuid"]
@@ -668,7 +753,7 @@ class ETLPipeline:
                             if isinstance(v, (int, float, bool, str)):
                                 merged[k] = v
                             elif isinstance(v, list):
-                                # list of strings → join
+                                # list of strings -> join
                                 merged[k] = ", ".join(str(x) for x in v)
                             else:
                                 merged[k] = str(v)
@@ -737,12 +822,12 @@ class ETLPipeline:
                         )
                     dst_conn.commit()
                     self.logger.info(
-                        f"    → {len(updates):,} {dim}(s) enriched "
+                        f"    -> {len(updates):,} {dim}(s) enriched "
                         f"with plan attributes"
                     )
                 else:
                     self.logger.info(
-                        f"    → no {dim} updates needed (already enriched)"
+                        f"    -> no {dim} updates needed (already enriched)"
                     )
 
             except Exception as exc:
@@ -755,11 +840,11 @@ class ETLPipeline:
         Extract dimension data from the source DB and load into the local
         zcube schema.
 
-        Extracted tables (source → local):
-            dp_plan.dp_item_type  →  zcube.item_type
-            dp_plan.dp_site_type  →  zcube.site_type
-            dp_plan.dp_item       →  zcube.item
-            dp_plan.dp_site       →  zcube.site
+        Extracted tables (source -> local):
+            dp_plan.dp_item_type  ->  zcube.item_type
+            dp_plan.dp_site_type  ->  zcube.site_type
+            dp_plan.dp_item       ->  zcube.item
+            dp_plan.dp_site       ->  zcube.site
 
         Uses INSERT … ON CONFLICT DO UPDATE (upsert) so the method is safe
         to call repeatedly.  Skips silently when source_db is not configured.
@@ -771,7 +856,7 @@ class ETLPipeline:
             return
 
         # Derive the source schema from the demand table name
-        # e.g. "dp_plan.calc_dp_actual"  →  "dp_plan"
+        # e.g. "dp_plan.calc_dp_actual"  ->  "dp_plan"
         src_schema = (
             self.source_demand_table.split(".")[0]
             if self.source_demand_table and "." in self.source_demand_table
@@ -783,11 +868,11 @@ class ETLPipeline:
         item_src      = f"{src_schema}.dp_item"
         site_src      = f"{src_schema}.dp_site"
 
-        local_schema = self.pg_config.get("schema", "zcube")
+        local_schema = get_schema()
 
         self.logger.info(
             f"Loading dimension tables from {src_schema} "
-            f"→ {local_schema}..."
+            f"-> {local_schema}..."
         )
 
         src_conn = self._get_source_conn()
@@ -796,7 +881,7 @@ class ETLPipeline:
         try:
             # ── Item types ────────────────────────────────────────────────
             self.logger.info(
-                f"  {item_type_src} → {local_schema}.item_type"
+                f"  {item_type_src} -> {local_schema}.item_type"
             )
             with src_conn.cursor(
                 cursor_factory=psycopg2.extras.DictCursor
@@ -825,12 +910,12 @@ class ETLPipeline:
                 )
             dst_conn.commit()
             self.logger.info(
-                f"    → {len(item_type_rows):,} item type(s) upserted"
+                f"    -> {len(item_type_rows):,} item type(s) upserted"
             )
 
             # ── Site types ────────────────────────────────────────────────
             self.logger.info(
-                f"  {site_type_src} → {local_schema}.site_type"
+                f"  {site_type_src} -> {local_schema}.site_type"
             )
             with src_conn.cursor(
                 cursor_factory=psycopg2.extras.DictCursor
@@ -859,7 +944,7 @@ class ETLPipeline:
                 )
             dst_conn.commit()
             self.logger.info(
-                f"    → {len(site_type_rows):,} site type(s) upserted"
+                f"    -> {len(site_type_rows):,} site type(s) upserted"
             )
 
             # ── Build type-name lookups so we can enrich attributes ─────
@@ -877,7 +962,7 @@ class ETLPipeline:
                     type_name_lookup[prefix] = {}
 
             # ── Items ─────────────────────────────────────────────────────
-            self.logger.info(f"  {item_src} → {local_schema}.item")
+            self.logger.info(f"  {item_src} -> {local_schema}.item")
             item_rows, item_extra = self._extract_dimension_rows(
                 src_conn, item_src, "item",
                 type_names=type_name_lookup.get("item", {}),
@@ -901,15 +986,15 @@ class ETLPipeline:
                 )
             dst_conn.commit()
             self.logger.info(
-                f"    → {len(item_rows):,} item(s) upserted"
+                f"    -> {len(item_rows):,} item(s) upserted"
             )
             if item_extra:
                 self.logger.info(
-                    f"    → extra columns gathered into attributes: {item_extra}"
+                    f"    -> extra columns gathered into attributes: {item_extra}"
                 )
 
             # ── Sites ─────────────────────────────────────────────────────
-            self.logger.info(f"  {site_src} → {local_schema}.site")
+            self.logger.info(f"  {site_src} -> {local_schema}.site")
             site_rows, site_extra = self._extract_dimension_rows(
                 src_conn, site_src, "site",
                 type_names=type_name_lookup.get("site", {}),
@@ -933,11 +1018,11 @@ class ETLPipeline:
                 )
             dst_conn.commit()
             self.logger.info(
-                f"    → {len(site_rows):,} site(s) upserted"
+                f"    -> {len(site_rows):,} site(s) upserted"
             )
             if site_extra:
                 self.logger.info(
-                    f"    → extra columns gathered into attributes: {site_extra}"
+                    f"    -> extra columns gathered into attributes: {site_extra}"
                 )
 
             # ── Enrich attributes from plan.item / plan.site ────────────
@@ -991,10 +1076,14 @@ class ETLPipeline:
         self.logger.info("=" * 80)
         self.logger.info("ETL PIPELINE START")
         self.logger.info(f"  Timestamp : {start_time.isoformat()}")
-        self.logger.info(
-            f"  Source    : {self.pg_config['host']}:"
-            f"{self.pg_config['port']}/{self.pg_config['database']}"
-        )
+        src_cfg = self.source_db_config
+        if src_cfg.get("host"):
+            self.logger.info(
+                f"  Source    : {src_cfg['host']}:"
+                f"{src_cfg.get('port', 5432)}/{src_cfg.get('database', '?')}"
+            )
+        else:
+            self.logger.info("  Source    : local fallback (no source_db configured)")
         self.logger.info(f"  Tables    : {list(self.tables.values())}")
         self.logger.info(f"  Frequency : {self.frequency}")
         self.logger.info(f"  Output    : {self.output_table}")

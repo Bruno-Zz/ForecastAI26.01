@@ -100,10 +100,11 @@ class StatisticalForecaster:
         # Extract configuration
         self.horizon = self.forecast_config['horizon']
         self.confidence_levels = self.forecast_config['confidence_levels']
+        self.n_jobs = self.config.get('performance', {}).get('n_jobs', 1)
 
         # Translate config frequency shorthand to the pandas 2.x offset aliases
         # that StatsForecast / utilsforecast expects.  'M' was deprecated in
-        # pandas 2.2 in favour of 'ME' (month-end); 'Q' → 'QE', 'Y'/'A' → 'YE'.
+        # pandas 2.2 in favour of 'ME' (month-end); 'Q' -> 'QE', 'Y'/'A' -> 'YE'.
         _FREQ_ALIAS = {'M': 'ME', 'Q': 'QE', 'Y': 'YE', 'A': 'YE'}
         raw_freq = self.forecast_config['frequency']
         self.frequency = _FREQ_ALIAS.get(raw_freq, raw_freq)
@@ -426,7 +427,7 @@ class StatisticalForecaster:
                 sf = StatsForecast(
                     models=[model],
                     freq=self.frequency,
-                    n_jobs=1  # Single job per series (parallelization at series level)
+                    n_jobs=1  # always 1 per-series; outer parallelism handled by joblib
                 )
 
                 # Intermittent-demand models (CrostonOptimized, ADIDA, IMAPA, TSB)
@@ -624,13 +625,12 @@ class StatisticalForecaster:
             'SeasonalNaive', 'HistoricAverage', 'Naive', 'SeasonalWindowAverage'
         }
 
-        for _, char_row in tqdm(characteristics_df.iterrows(),
-                                total=len(characteristics_df),
-                                desc="  Statistical forecasting",
-                                unit="series",
-                                disable=not show_progress):
-            unique_id = char_row['unique_id']
-            all_methods = char_row['recommended_methods']
+        rows_list = characteristics_df.to_dict('records')
+
+        # Inner function closed over self, df, KNOWN_METHODS, overrides_map
+        def _process_one(char_row_dict):
+            unique_id = char_row_dict['unique_id']
+            all_methods = char_row_dict.get('recommended_methods', [])
 
             # Filter to only methods this statistical forecaster supports
             methods = [m for m in all_methods if m in KNOWN_METHODS]
@@ -642,9 +642,6 @@ class StatisticalForecaster:
             if not methods:
                 # No statistical methods in recommended_methods — use a safe fallback so
                 # neural/foundation-only series still get a baseline statistical forecast.
-                # This handles the case where recommended_methods is empty (e.g. after a
-                # migration script removed the only method) or contains only non-statistical
-                # methods (NHITS, TimesFM, LightGBM) that this forecaster cannot run.
                 _fallback = ['AutoETS', 'AutoARIMA', 'AutoTheta']
                 self.logger.info(
                     f"{unique_id}: recommended_methods={all_methods!r} has no statistical "
@@ -652,20 +649,16 @@ class StatisticalForecaster:
                 )
                 methods = _fallback
 
-            # Convert characteristics to dict
-            characteristics = char_row.to_dict()
-
             # Extract per-series overrides (if any)
             series_overrides = (overrides_map or {}).get(unique_id, None)
 
-            # Generate forecasts — wrap each series in its own try/except so that
-            # one problematic series cannot kill the whole batch.
+            # Generate forecasts — wrap in try/except so one bad series can't kill the batch
             try:
                 results = self.forecast_single_series(
                     df=df,
                     unique_id=unique_id,
                     methods=methods,
-                    characteristics=characteristics,
+                    characteristics=char_row_dict,
                     overrides_map=series_overrides,
                 )
                 if results:
@@ -678,11 +671,32 @@ class StatisticalForecaster:
                         f"{unique_id}: 0 statistical forecasts produced "
                         f"(attempted methods={methods})"
                     )
-                all_results.extend(results)
+                return results
             except Exception as series_exc:
                 self.logger.warning(
                     f"{unique_id}: forecast_single_series raised unexpectedly: {series_exc}"
                 )
+                return []
+
+        if self.n_jobs == 1:
+            # Sequential (default) — identical to original behaviour
+            for char_row_dict in tqdm(rows_list,
+                                      desc="  Statistical forecasting",
+                                      unit="series",
+                                      disable=not show_progress):
+                all_results.extend(_process_one(char_row_dict))
+        else:
+            # Parallel outer loop via joblib (threads preferred — StatsForecast
+            # Cython internals release the GIL, so threading works well here)
+            from joblib import Parallel, delayed
+            nested = Parallel(n_jobs=self.n_jobs, prefer="threads")(
+                delayed(_process_one)(r)
+                for r in tqdm(rows_list,
+                              desc="  Statistical forecasting",
+                              unit="series",
+                              disable=not show_progress)
+            )
+            all_results = [item for sublist in nested for item in sublist]
 
         # Convert to DataFrame
         results_data = [result.to_dict() for result in all_results]

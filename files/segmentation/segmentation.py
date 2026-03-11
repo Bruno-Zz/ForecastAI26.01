@@ -15,7 +15,7 @@ Criteria JSON schema (stored as JSONB in segment.criteria):
       "valueType": "literal" | "field",
       "value": <scalar or list for 'in'> }
 
-  Empty / null criteria dict  →  matches all series.
+  Empty / null criteria dict  ->  matches all series.
 
 Available field keys:
   unique_id                           (the full series identifier, e.g. "10285_3137")
@@ -125,7 +125,7 @@ class SegmentationEngine:
         """
         Evaluate criteria against all known series.
 
-        Empty / null criteria → all unique_ids.
+        Empty / null criteria -> all unique_ids.
 
         Returns
         -------
@@ -153,7 +153,7 @@ class SegmentationEngine:
         matched_ids = self.evaluate_criteria(criteria)
         schema = get_schema()
 
-        # Build lookup: unique_id → (item_id, site_id)
+        # Build lookup: unique_id -> (item_id, site_id)
         df = self._get_series_df()
         uid_map = df.set_index("unique_id")[["item_id", "site_id"]].to_dict("index")
 
@@ -525,7 +525,7 @@ class SegmentationEngine:
 
             # ── Append dynamic classification columns ──
             # LEFT JOIN abc_results + abc_configuration to create columns like
-            # "classification.Demand Volume" → class_label for each active config.
+            # "classification.Demand Volume" -> class_label for each active config.
             try:
                 cls_df = pd.read_sql(
                     f"""
@@ -554,7 +554,7 @@ class SegmentationEngine:
         finally:
             conn.close()
 
-        # Expand item.attributes JSONB → item_attr_{key} columns
+        # Expand item.attributes JSONB -> item_attr_{key} columns
         df = self._expand_attributes(df, "item_attributes", "item_attr_")
         df = self._expand_attributes(df, "site_attributes", "site_attr_")
 
@@ -618,7 +618,7 @@ class SegmentationEngine:
         elif node_type == "condition":
             return self._apply_condition(df, node)
 
-        # Unknown node type → match all
+        # Unknown node type -> match all
         return pd.Series(True, index=df.index)
 
     def _apply_condition(self, df: pd.DataFrame, cond: dict) -> pd.Series:
@@ -628,7 +628,7 @@ class SegmentationEngine:
         value = cond.get("value")
         value_type = cond.get("valueType", "literal")
 
-        # Map field path → DataFrame column name
+        # Map field path -> DataFrame column name
         col_name = self._field_to_column(field)
         false_mask = pd.Series(False, index=df.index)
 
@@ -693,17 +693,17 @@ class SegmentationEngine:
         """
         Map a criteria field key to the corresponding DataFrame column name.
 
-        item.name                → item_name
-        item.xuid                → item_xuid
-        item.type_id             → item_type_name  (resolved via JOIN)
-        item.attributes.color    → item_attr_color
-        site.name                → site_name
-        site.type_id             → site_type_name  (resolved via JOIN)
-        site.attributes.country  → site_attr_country
-        demand.n_observations    → n_observations
-        demand.abc_class         → abc_class
-        demand.has_trend         → has_trend
-        demand.channel           → channel
+        item.name                -> item_name
+        item.xuid                -> item_xuid
+        item.type_id             -> item_type_name  (resolved via JOIN)
+        item.attributes.color    -> item_attr_color
+        site.name                -> site_name
+        site.type_id             -> site_type_name  (resolved via JOIN)
+        site.attributes.country  -> site_attr_country
+        demand.n_observations    -> n_observations
+        demand.abc_class         -> abc_class
+        demand.has_trend         -> has_trend
+        demand.channel           -> channel
         """
         if field == "unique_id":
             return "unique_id"
@@ -726,7 +726,7 @@ class SegmentationEngine:
             return f"site_{sub}"
         if field.startswith("demand."):
             return field[len("demand."):]
-        # classification.{config_name} → "classification.{config_name}" (kept as-is)
+        # classification.{config_name} -> "classification.{config_name}" (kept as-is)
         if field.startswith("classification."):
             return field
         return field

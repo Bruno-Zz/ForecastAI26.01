@@ -49,7 +49,7 @@ def _get_pg_config() -> dict:
     Read PostgreSQL connection settings.
 
     Priority:
-      1. config/config.yaml  →  database:  section
+      1. config/config.yaml  ->  database:  section
       2. DB_* environment variables (populated from .env or the process environment)
     """
     yaml_cfg: dict = {}
@@ -379,6 +379,23 @@ def init_schema(config_path=None) -> None:
     ) USING columnstore;
     CREATE INDEX IF NOT EXISTS idx_fbo_uid
         ON {schema}.forecasts_by_origin (unique_id, method);
+    CREATE INDEX IF NOT EXISTS idx_fbo_uid_origin
+        ON {schema}.forecasts_by_origin (unique_id, forecast_origin);
+
+    -- ─── Series hashes (incremental processing) ──────────────────────
+
+    CREATE TABLE IF NOT EXISTS {schema}.series_hashes (
+        unique_id     TEXT NOT NULL PRIMARY KEY,
+        data_hash     TEXT,          -- MD5 of sorted (date, qty) values at last ETL
+        forecast_hash TEXT,          -- data_hash value when last forecast was run
+        hashed_at     TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Composite indexes for query performance
+    CREATE INDEX IF NOT EXISTS idx_demand_uid_date
+        ON {schema}.demand_actuals (unique_id, date DESC);
+    CREATE INDEX IF NOT EXISTS idx_metrics_uid_origin
+        ON {schema}.backtest_metrics (unique_id, forecast_origin);
 
     -- ─── Best method per series ──────────────────────────────────────
 
@@ -537,7 +554,7 @@ def init_schema(config_path=None) -> None:
     CREATE INDEX IF NOT EXISTS idx_param_seg_seg
         ON {schema}.parameter_segment (segment_id);
 
-    -- Resolution: each series → assigned parameter version per business type
+    -- Resolution: each series -> assigned parameter version per business type
     CREATE TABLE IF NOT EXISTS {schema}.series_parameter_assignment (
         unique_id                       TEXT NOT NULL PRIMARY KEY,
         item_id                         BIGINT,
@@ -605,7 +622,7 @@ def init_schema(config_path=None) -> None:
 
     # Separate ALTER statements for adding columns to existing tables
     alter_stmts = [
-        # Migration: rename config_sections → parameters (if old table exists)
+        # Migration: rename config_sections -> parameters (if old table exists)
         f"""
         DO $$
         BEGIN
@@ -622,7 +639,7 @@ def init_schema(config_path=None) -> None:
             END IF;
         END $$;
         """,
-        # Migration: rename config_sections columns → parameter_type, parameters_set
+        # Migration: rename config_sections columns -> parameter_type, parameters_set
         f"""
         DO $$
         BEGIN
@@ -1004,6 +1021,17 @@ def init_schema(config_path=None) -> None:
                 INSERT INTO {schema}.segment (name, description, criteria, is_default)
                 VALUES ('All', 'All item/site combinations', '{{}}'::jsonb, TRUE)
                 ON CONFLICT (name) DO NOTHING
+            """)
+            # Seed default performance parameters
+            cur.execute(f"""
+                INSERT INTO {schema}.parameters
+                    (parameter_type, name, label, parameters_set, is_default, sort_order)
+                VALUES (
+                    'performance', 'Default', 'Default',
+                    '{{"n_jobs": 1, "incremental_processing": false}}'::jsonb,
+                    TRUE, 9999
+                )
+                ON CONFLICT (parameter_type, name) DO NOTHING
             """)
         conn.commit()
         logger.info(f"Schema '{schema}' tables created/verified")

@@ -1,9 +1,35 @@
-import { useState, useEffect, lazy, Suspense } from 'react';
+import { useState, useEffect, lazy, Suspense, Component } from 'react';
 import { Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import Login from './components/Login';
 import ThemeToggle from './components/ThemeToggle';
 import { useAuth } from './contexts/AuthContext';
 import { useTour } from './tour/useTour';
+
+/** Error boundary — catches render crashes so they show a message instead of a black screen */
+class PageErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(err) { return { error: err }; }
+  componentDidCatch(err, info) { console.error('Page render error:', err, info); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex flex-col items-center justify-center h-64 gap-4 p-8">
+          <p className="text-red-600 dark:text-red-400 font-semibold">Something went wrong rendering this page.</p>
+          <pre className="text-xs text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 rounded p-3 max-w-xl overflow-auto whitespace-pre-wrap">
+            {this.state.error?.message}
+          </pre>
+          <button
+            onClick={() => this.setState({ error: null })}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg"
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 /* ── Lazy-loaded route components (code-split into separate chunks) ── */
 const Dashboard = lazy(() => import('./components/Dashboard'));
@@ -27,10 +53,13 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
   const location = useLocation();
   const { user, isAdmin, logout } = useAuth();
   const [lastSeries, setLastSeries] = useState(null);
+  const [lastSeriesLabel, setLastSeriesLabel] = useState(null);
 
   useEffect(() => {
     const ls = localStorage.getItem('last_series');
+    const lsl = localStorage.getItem('last_series_label');
     if (ls) setLastSeries(ls);
+    setLastSeriesLabel(lsl || null);
   }, [location]);
 
   const navLink = (to, icon, label, disabled = false, navId = undefined) => {
@@ -88,7 +117,7 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
       <nav id="sidebar-nav" className="flex-1 p-2 space-y-1 overflow-hidden">
         {navLink('/', '🏠', 'Dashboard', false, 'nav-dashboard')}
         {lastSeries
-          ? navLink(`/series/${encodeURIComponent(lastSeries)}`, '📈', `Series: ${lastSeries}`, false, 'nav-series')
+          ? navLink(`/series/${encodeURIComponent(lastSeries)}`, '📈', lastSeriesLabel || lastSeries, false, 'nav-series')
           : navLink('/', '📈', 'Time Series', true, 'nav-series')
         }
         {navLink('/segments', '🗂️', 'Segments', false, 'nav-segments')}
@@ -235,6 +264,7 @@ function App() {
 
         {/* Page content */}
         <main className="flex-1 overflow-y-auto">
+          <PageErrorBoundary>
           <Suspense fallback={<PageSpinner />}>
             <Routes>
               <Route path="/" element={<Dashboard />} />
@@ -249,6 +279,7 @@ function App() {
               <Route path="/login" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>
+          </PageErrorBoundary>
         </main>
       </div>
     </div>

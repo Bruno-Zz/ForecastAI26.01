@@ -3,7 +3,7 @@ ForecastAI Pipeline Runner
 CLI entry point for running the full or partial forecasting pipeline.
 
 Usage:
-    # Full pipeline (ETL → Characterize → Forecast → Backtest → Best Method → Distributions)
+    # Full pipeline (ETL -> Characterize -> Forecast -> Backtest -> Best Method -> Distributions)
     python run_pipeline.py
 
     # Skip ETL (use existing data in PostgreSQL)
@@ -141,7 +141,7 @@ def _load_forecasts_from_db(config_path: str):
 
 
 def _load_segment_series(segment_id: int, config_path: str):
-    """Query segment_membership for the given segment_id → return list of unique_ids."""
+    """Query segment_membership for the given segment_id -> return list of unique_ids."""
     from db.db import get_conn, get_schema
     conn = get_conn(config_path)
     schema = get_schema(config_path)

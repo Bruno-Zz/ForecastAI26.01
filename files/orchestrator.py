@@ -237,7 +237,7 @@ class ForecastOrchestrator:
                              characteristics_path: str,
                              output_dir: str = "./output") -> Dict[str, str]:
         """
-        Run complete forecasting pipeline: forecast → evaluate → fit distributions.
+        Run complete forecasting pipeline: forecast -> evaluate -> fit distributions.
         
         Args:
             time_series_path: Path to time series parquet

@@ -93,7 +93,7 @@ const BUSINESS_PARAM_TYPE_ORDER = [
 ];
 
 const SYSTEM_PARAM_TYPES = new Set([
-  'data_source', 'etl', 'hierarchical', 'meio', 'parallel', 'output', 'auth', 'logging', 'segmentation',
+  'data_source', 'etl', 'hierarchical', 'meio', 'parallel', 'output', 'auth', 'logging', 'segmentation', 'performance',
 ]);
 
 const TABS = [
