@@ -34,7 +34,7 @@ class PageErrorBoundary extends Component {
 /* ── Lazy-loaded route components (code-split into separate chunks) ── */
 const Dashboard = lazy(() => import('./components/Dashboard'));
 const TimeSeriesViewer = lazy(() => import('./components/TimeSeriesViewer'));
-const PipelineRunner = lazy(() => import('./components/PipelineRunner'));
+const ProcessRunner = lazy(() => import('./components/ProcessRunner'));
 const ProcessLog = lazy(() => import('./components/ProcessLog'));
 const Settings = lazy(() => import('./components/Settings'));
 const Segments = lazy(() => import('./components/Segments'));
@@ -122,7 +122,7 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
         }
         {navLink('/segments', '🗂️', 'Segments', false, 'nav-segments')}
         {navLink('/abc', '🏷️', 'Classifications', false, 'nav-abc')}
-        {navLink('/pipeline', '⚙️', 'Pipeline', false, 'nav-pipeline')}
+        {navLink('/processes', '⚙️', 'Process Runner', false, 'nav-pipeline')}
         {navLink('/logs', '📋', 'Process Log', false, 'nav-logs')}
         {navLink('/settings', '🔧', 'Settings', false, 'nav-settings')}
         {navLink('/audit', '📝', 'Audit Log', false, 'nav-audit')}
@@ -271,7 +271,8 @@ function App() {
               <Route path="/series/:uniqueId" element={<TimeSeriesViewer />} />
               <Route path="/segments" element={<Segments />} />
               <Route path="/abc" element={<ABCClassification />} />
-              <Route path="/pipeline" element={<PipelineRunner />} />
+              <Route path="/processes" element={<ProcessRunner />} />
+              <Route path="/pipeline" element={<ProcessRunner />} />
               <Route path="/logs" element={<ProcessLog />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/audit" element={<AuditLog />} />

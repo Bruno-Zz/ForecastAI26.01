@@ -246,6 +246,43 @@ function LiveJobDetail({ job }) {
 }
 
 
+/* ─── Sort / Filter helpers ─── */
+const STATUS_FILTERS = ['all', 'success', 'error', 'interrupted', 'running'];
+
+function applyRunFilters(runs, statusFilter, sortKey, searchText) {
+  let result = [...runs];
+
+  // Status filter
+  if (statusFilter !== 'all') {
+    result = result.filter(r => r.overall_status === statusFilter);
+  }
+
+  // Text search (run_id prefix)
+  if (searchText.trim()) {
+    const q = searchText.trim().toLowerCase();
+    result = result.filter(r =>
+      r.run_id?.toLowerCase().includes(q) ||
+      r.overall_status?.toLowerCase().includes(q)
+    );
+  }
+
+  // Sort
+  if (sortKey === 'started_at_asc') {
+    result.sort((a, b) => new Date(a.run_started_at) - new Date(b.run_started_at));
+  } else if (sortKey === 'started_at_desc') {
+    result.sort((a, b) => new Date(b.run_started_at) - new Date(a.run_started_at));
+  } else if (sortKey === 'duration_desc') {
+    result.sort((a, b) => (b.total_duration_s ?? 0) - (a.total_duration_s ?? 0));
+  } else if (sortKey === 'duration_asc') {
+    result.sort((a, b) => (a.total_duration_s ?? 0) - (b.total_duration_s ?? 0));
+  } else if (sortKey === 'status') {
+    const order = { error: 0, interrupted: 1, running: 2, success: 3, pending: 4 };
+    result.sort((a, b) => (order[a.overall_status] ?? 9) - (order[b.overall_status] ?? 9));
+  }
+
+  return result;
+}
+
 /* ─── Main Component ─── */
 const ProcessLog = () => {
   const { locale } = useLocale();
@@ -256,6 +293,11 @@ const ProcessLog = () => {
   const [expandedRun, setExpandedRun] = useState(null);   // run_id or job_id
   const [expandedLive, setExpandedLive] = useState(null);  // job_id for live detail
   const pollRef = useRef(null);
+
+  // Sort / filter state
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [sortKey, setSortKey]           = useState('started_at_desc');
+  const [searchText, setSearchText]     = useState('');
 
   const fetchAll = useCallback(async () => {
     try {
@@ -423,10 +465,61 @@ const ProcessLog = () => {
 
       {/* ─── Historical Runs ─── */}
       <div id="logs-history">
-        <h2 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-3">
-          Run History
-          {dbRuns.length > 0 && <span className="ml-1.5 text-gray-300 dark:text-gray-600">({dbRuns.length})</span>}
-        </h2>
+        {/* Header + sort/filter controls */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-3">
+          <h2 className="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider flex-shrink-0">
+            Run History
+            {dbRuns.length > 0 && <span className="ml-1.5 text-gray-300 dark:text-gray-600">({dbRuns.length})</span>}
+          </h2>
+
+          {dbRuns.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
+              {/* Search */}
+              <div className="relative">
+                <svg className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11A6 6 0 115 11a6 6 0 0112 0z" />
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Search…"
+                  value={searchText}
+                  onChange={e => setSearchText(e.target.value)}
+                  className="pl-6 pr-2 py-1 text-xs rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-blue-500 w-28"
+                />
+              </div>
+
+              {/* Status filter pills */}
+              <div className="flex gap-1">
+                {STATUS_FILTERS.map(s => (
+                  <button
+                    key={s}
+                    onClick={() => setStatusFilter(s)}
+                    className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
+                      statusFilter === s
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+                    }`}
+                  >
+                    {s === 'all' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
+                  </button>
+                ))}
+              </div>
+
+              {/* Sort */}
+              <select
+                value={sortKey}
+                onChange={e => setSortKey(e.target.value)}
+                className="text-xs rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                <option value="started_at_desc">Newest first</option>
+                <option value="started_at_asc">Oldest first</option>
+                <option value="duration_desc">Longest duration</option>
+                <option value="duration_asc">Shortest duration</option>
+                <option value="status">By status</option>
+              </select>
+            </div>
+          )}
+        </div>
 
         {loading && dbRuns.length === 0 && (
           <div className="flex items-center gap-2 text-gray-400 dark:text-gray-500 py-8 justify-center">
@@ -448,9 +541,20 @@ const ProcessLog = () => {
           </div>
         )}
 
-        {dbRuns.length > 0 && (
+        {dbRuns.length > 0 && (() => {
+          const filteredRuns = applyRunFilters(dbRuns, statusFilter, sortKey, searchText);
+          return (
           <div className="space-y-2">
-            {dbRuns.map(run => {
+            {filteredRuns.length === 0 && (
+              <div className="py-8 text-center text-gray-400 dark:text-gray-500 text-sm italic">
+                No runs match the current filter.
+                <button onClick={() => { setStatusFilter('all'); setSearchText(''); }}
+                  className="ml-2 text-blue-500 dark:text-blue-400 hover:underline text-xs">
+                  Clear filters
+                </button>
+              </div>
+            )}
+            {filteredRuns.map(run => {
               const isExpanded = expandedRun === run.run_id;
               return (
                 <div key={run.run_id} className="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900/30 overflow-hidden">
@@ -513,7 +617,8 @@ const ProcessLog = () => {
               );
             })}
           </div>
-        )}
+          );
+        })()}
       </div>
     </div>
     </>

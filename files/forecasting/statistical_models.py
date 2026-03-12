@@ -90,7 +90,11 @@ class StatisticalForecaster:
     """
     Wrapper for Nixtla StatsForecast models with automatic hyperparameter tuning.
     """
-    
+
+    # Class-level set of (method, error_key) pairs that have already been warned.
+    # Shared across ALL instances so parallel workers don't each repeat the same message.
+    _class_warned_errors: set = set()
+
     def __init__(self, config_path: str = None, config_override: dict = None):
         """Initialize with configuration."""
         try:
@@ -640,27 +644,47 @@ class StatisticalForecaster:
                     self._missing_dep_methods.add(method)
                 continue
             except Exception as e:
+                err_str = str(e)
                 # Downgrade "Unknown method" to debug — expected when non-statistical
                 # methods (TimesFM, LightGBM…) are passed in without pre-filtering.
-                if "Unknown method" in str(e):
+                if "Unknown method" in err_str:
                     self.logger.debug(f"{unique_id}: skipping {method} — {e}")
+                elif "Zero denominator in linear smooth" in err_str:
+                    # Known supersmoother numerical limitation for certain data patterns
+                    # (e.g. constant segments, sparse zeros, unusual frequency ratios).
+                    # Not actionable — the series falls back to other methods.
+                    # Use the class-level set so the single warning fires only ONCE
+                    # even when multiple parallel workers each create their own instance.
+                    _err_key = (method, "zero_denominator")
+                    if _err_key not in StatisticalForecaster._class_warned_errors:
+                        StatisticalForecaster._class_warned_errors.add(_err_key)
+                        self.logger.warning(
+                            f"'{method}' skipped for some series: supersmoother "
+                            f"'Zero denominator' (data pattern incompatible with MSTL). "
+                            f"First occurrence: {unique_id}. "
+                            f"Subsequent occurrences logged at DEBUG only."
+                        )
+                    else:
+                        self.logger.debug(
+                            f"MSTL skipped {unique_id}: Zero denominator in linear smooth"
+                        )
                 else:
-                    # Throttle repeated failures for the same method: log the first
-                    # 3 fully, emit a summary at the 4th, then suppress to debug.
+                    # General throttle: warn fully for first 3 failures per method per
+                    # instance, emit a summary at the 4th, then suppress to debug.
                     cnt = self._method_error_counts.get(method, 0) + 1
                     self._method_error_counts[method] = cnt
                     if cnt <= 3:
                         self.logger.warning(
-                            f"Failed to forecast {unique_id} with {method}: {str(e)}"
+                            f"Failed to forecast {unique_id} with {method}: {err_str}"
                         )
                     elif cnt == 4:
                         self.logger.warning(
                             f"'{method}' has now failed {cnt} times this run "
-                            f"(further per-series warnings suppressed). Last error: {str(e)}"
+                            f"(further per-series warnings suppressed). Last: {err_str}"
                         )
                     else:
                         self.logger.debug(
-                            f"Failed to forecast {unique_id} with {method}: {str(e)}"
+                            f"Failed to forecast {unique_id} with {method}: {err_str}"
                         )
                 continue
         

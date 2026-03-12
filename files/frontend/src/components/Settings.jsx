@@ -82,6 +82,155 @@ const METHOD_WARNINGS = {
   MSTL:             'Best with seasonal data',
 };
 
+/* ─── Hover tooltips for every parameter field ─── */
+const PARAM_TOOLTIPS = {
+  // ── data_source ──
+  'data_source.type': 'Source connector: postgres reads from a PostgreSQL table, s3 from an S3 bucket, azure from Azure Blob Storage, csv from a local file.',
+  'data_source.postgres.host': 'Hostname or IP of the PostgreSQL demand database.',
+  'data_source.postgres.port': 'TCP port for the PostgreSQL demand database (default 5432).',
+  'data_source.postgres.database': 'Database name on the PostgreSQL server.',
+  'data_source.postgres.schema': 'Schema that contains the demand table.',
+  'data_source.postgres.table': 'Table name holding the demand history.',
+  'data_source.postgres.user': 'PostgreSQL username. Supports ${ENV_VAR} substitution.',
+  'data_source.postgres.password': 'PostgreSQL password.',
+  'data_source.source_db.host': 'Hostname of the source ERP/WMS database used by the ETL.',
+  'data_source.source_db.port': 'TCP port of the source database.',
+  'data_source.source_db.dbname': 'Database name on the source server.',
+  'data_source.source_db.user': 'Username for the source database connection.',
+  'data_source.source_db.password': 'Password for the source database connection.',
+  'data_source.source_db.sslmode': 'SSL mode for the source connection (disable / require / verify-full).',
+  'data_source.source_db.columns.item_id': 'Column in the source table that holds the item / SKU identifier.',
+  'data_source.source_db.columns.site_id': 'Column in the source table that holds the site / location identifier.',
+  'data_source.source_db.columns.date': 'Column in the source table that holds the transaction date.',
+  'data_source.source_db.columns.qty': 'Column in the source table that holds the demand quantity.',
+  'data_source.source_db.demand_table': 'Fully-qualified source table name (schema.table) queried by the ETL.',
+  'data_source.s3.bucket': 'AWS S3 bucket name containing the demand data files.',
+  'data_source.s3.prefix': 'S3 key prefix (folder path) to filter demand files.',
+  'data_source.s3.region': 'AWS region where the S3 bucket resides.',
+  'data_source.azure.container': 'Azure Blob Storage container name.',
+  'data_source.azure.account_name': 'Azure Storage account name.',
+  'data_source.azure.account_key': 'Azure Storage account access key.',
+  // ── etl ──
+  'etl.output_path': 'File path where the ETL saves an intermediate Parquet snapshot for auditing and debugging.',
+  'etl.partition_by': 'Columns used to partition the Parquet output. Useful for large datasets when you want fast filtering.',
+  'etl.query.date_column': 'Name of the date column in the source query result.',
+  'etl.query.value_column': 'Name of the demand / quantity column in the source query result.',
+  'etl.query.id_column': 'Name of the identifier column (item / SKU) in the source query result.',
+  'etl.query.hierarchy_columns': 'Additional columns pulled from source to carry hierarchical groupings (e.g. category, region).',
+  'etl.query.min_date': 'Earliest date to include (ISO format YYYY-MM-DD). Leave null for no lower bound.',
+  'etl.query.max_date': 'Latest date to include (ISO format YYYY-MM-DD). Leave null to default to today.',
+  'etl.query.min_observations': 'Series with fewer observations than this threshold after aggregation are dropped during ETL.',
+  'etl.aggregation.frequency': 'Target time frequency after aggregation: D=Daily, W=Weekly, M=Monthly, Q=Quarterly, Y=Yearly.',
+  'etl.aggregation.method': 'How to combine demand values when multiple rows fall within the same time bucket.',
+  // ── outlier_detection ──
+  'outlier_detection.enabled': 'Enable or disable automatic outlier detection and correction for all series.',
+  'outlier_detection.detection_method': 'Algorithm used to identify outliers. IQR: interquartile range fences. Z-score: standard deviation from mean. STL residuals: seasonal decomposition residuals.',
+  'outlier_detection.correction_method': 'How detected outliers are replaced: clip to fence, replace with rolling median, interpolate from neighbours, or remove the point entirely.',
+  'outlier_detection.iqr.multiplier': 'IQR fence multiplier k. Points beyond median ± k×IQR are flagged. Standard value: 1.5. Use 3.0 for a more lenient filter.',
+  'outlier_detection.zscore.threshold': 'Number of standard deviations from the mean beyond which a point is flagged as an outlier.',
+  'outlier_detection.zscore.use_mad': 'Use Median Absolute Deviation instead of standard deviation — more robust on skewed or heavy-tailed series.',
+  'outlier_detection.stl_residuals.seasonal_period': 'Seasonal period (in observations) used in the STL decomposition for residual-based detection.',
+  'outlier_detection.stl_residuals.residual_threshold': 'Number of sigma in the STL residual beyond which a point is flagged as an outlier.',
+  'outlier_detection.correction.interpolation_method': 'Interpolation strategy when correction_method is "interpolation": linear, nearest-neighbour, cubic, or polynomial spline.',
+  'outlier_detection.correction.median_window': 'Rolling window size (periods) used to compute the median replacement value.',
+  'outlier_detection.min_observations': 'Minimum observations required before outlier detection is applied to a series.',
+  // ── characterization ──
+  'characterization.seasonality.test_periods': 'Candidate seasonal periods (in observations) tested per series. For weekly data: [52]. For daily: [7, 30, 365].',
+  'characterization.seasonality.significance_level': 'P-value threshold for the seasonality test. Lower values → fewer series classified as seasonal.',
+  'characterization.seasonality.min_strength': 'Minimum seasonal strength (0–1) from STL decomposition required to classify a series as seasonal.',
+  'characterization.trend.method': 'Statistical test for trend detection: Mann-Kendall (rank-based, robust to outliers), OLS regression, or Spearman correlation.',
+  'characterization.trend.significance_level': 'P-value threshold for the trend test. Lower values → fewer series classified as trending.',
+  'characterization.intermittency.zero_threshold': 'Fraction of zero-demand periods above which a series is classified as intermittent.',
+  'characterization.intermittency.adi_threshold': 'Average Demand Interval threshold. ADI ≥ this value marks the series as intermittent.',
+  'characterization.intermittency.cov_threshold': 'Coefficient of Variation of inter-demand intervals. Used in the Syntetos-Boylan classification.',
+  'characterization.intermittency.min_positive_periods': 'Minimum number of non-zero demand periods required before the intermittency test is applied.',
+  'characterization.stationarity.test': 'Unit-root / stationarity test: ADF (Augmented Dickey-Fuller), KPSS, or Phillips-Perron. Guides differencing in ARIMA models.',
+  'characterization.stationarity.significance_level': 'P-value threshold for the stationarity test.',
+  'characterization.data_sufficiency.min_for_ml': 'Minimum observations needed to enable ML models (LightGBM, XGBoost) for a series.',
+  'characterization.data_sufficiency.min_for_deep_learning': 'Minimum observations needed to enable deep learning models (NHITS, NBEATS, TFT, PatchTST, DeepAR) for a series.',
+  'characterization.data_sufficiency.sparse_obs_per_year': 'Average observations per year below which a series is classified as sparse data.',
+  'characterization.complexity.low_threshold': 'Composite complexity score below this value → low complexity → series assigned to the "standard" demand group.',
+  'characterization.complexity.high_threshold': 'Composite complexity score above this value → high complexity → series assigned to the "complex" demand group.',
+  // ── forecasting ──
+  'forecasting.horizon': 'Number of future periods to forecast ahead. Should match your planning horizon (e.g. 13 for a 13-week view).',
+  'forecasting.frequency': 'Time frequency of the demand data: D=Daily, W=Weekly, M=Monthly, Q=Quarterly, Y=Yearly. Must match the ETL aggregation frequency.',
+  'forecasting.confidence_levels': 'Prediction interval confidence levels (%) to compute and store. These determine which quantiles appear in the forecast output.',
+  'forecasting.method_selection_strategy': '"auto": the system selects methods per demand group from the method_selection lists. "best_fit": you supply a fixed list evaluated against all series.',
+  'forecasting.method_selection.sparse_data': 'Candidate methods evaluated for series classified as sparse data (very few non-zero periods per year).',
+  'forecasting.method_selection.intermittent': 'Candidate methods evaluated for intermittent demand series (frequent zeros, irregular non-zero demand).',
+  'forecasting.method_selection.seasonal': 'Candidate methods evaluated for seasonal series without high complexity.',
+  'forecasting.method_selection.complex': 'Candidate methods evaluated for high-complexity series (multiple seasonalities, high variability, non-stationarity).',
+  'forecasting.method_selection.standard': 'Candidate methods evaluated for standard series (low complexity, no strong intermittency or unusual seasonality).',
+  'forecasting.method_overrides.sparse_data': 'Pin a single method for all sparse-data series instead of running the full candidate list. Leave on Auto for competitive selection.',
+  'forecasting.method_overrides.intermittent': 'Pin a single method for all intermittent series instead of running the full candidate list. Leave on Auto for competitive selection.',
+  'forecasting.method_overrides.seasonal': 'Pin a single method for all seasonal series. Leave on Auto for competitive selection.',
+  'forecasting.method_overrides.complex': 'Pin a single method for all complex series. Leave on Auto for competitive selection.',
+  'forecasting.method_overrides.standard': 'Pin a single method for all standard series. Leave on Auto for competitive selection.',
+  'forecasting.best_fit_methods': 'Methods evaluated against every series when strategy is "best_fit". The method with the best composite backtest score wins per series.',
+  'forecasting.statsforecast_models': 'Statistical models active in the pipeline. Fast and interpretable models from the StatsForecast library.',
+  'forecasting.neuralforecast_models': 'Deep learning models active in the pipeline. Require sufficient historical data and compute resources.',
+  'forecasting.ml_models': 'Machine learning tree-based models active in the pipeline.',
+  'forecasting.timesfm.model_name': 'TimesFM model variant to load (e.g. timesfm-1.0-200m).',
+  'forecasting.timesfm.context_length': 'Number of historical periods fed to TimesFM as input context.',
+  'forecasting.timesfm.horizon_length': 'Maximum horizon TimesFM can forecast. Must be ≥ forecasting.horizon.',
+  // ── evaluation ──
+  'evaluation.metrics.point_forecast': 'Point-forecast accuracy metrics computed during backtesting and shown in the accuracy chart.',
+  'evaluation.metrics.probabilistic': 'Probabilistic metrics evaluating the quality of prediction intervals (e.g. Winkler Score, CRPS).',
+  'evaluation.metrics.information_criteria': 'Model fit criteria extracted where available: AIC (penalises complexity), BIC (stronger penalty), AICc (corrected for small samples).',
+  // ── backtesting ──
+  'backtesting.n_windows': 'Number of rolling backtest windows. More windows → more reliable accuracy estimate but proportionally more compute time.',
+  'backtesting.step_size': 'Step in periods between consecutive backtest windows. 1 = fully overlapping; larger values reduce overlap and compute cost.',
+  'backtesting.min_train_size': 'Minimum observations in the training window. Series too short to satisfy this are skipped in backtesting.',
+  'backtesting.weights.mae': 'Weight of MAE in the composite method-ranking score. Higher = penalise average absolute error more. All weights should sum to 1.',
+  'backtesting.weights.rmse': 'Weight of RMSE in the composite score. Penalises large individual errors more heavily than MAE.',
+  'backtesting.weights.mape': 'Weight of MAPE in the composite score. Scale-independent but sensitive to near-zero actuals.',
+  'backtesting.weights.bias': 'Weight of Bias (mean signed error) in the composite score. Detects systematic over- or under-forecasting.',
+  'backtesting.weights.coverage_90': 'Weight of 90% prediction interval coverage in the composite score. Measures how well forecast uncertainty is calibrated.',
+  'backtesting.weights.direction_accuracy': 'Weight of directional accuracy (did the forecast predict the correct direction of change?) in the composite score.',
+  // ── hierarchical ──
+  'hierarchical.enabled': 'Enable hierarchical reconciliation so that forecasts at every level sum to a coherent total.',
+  'hierarchical.reconciliation_methods': 'Reconciliation algorithms: BottomUp aggregates from the leaf level; TopDown disaggregates; MinTrace minimises total forecast variance; ERM uses empirical risk minimisation.',
+  'hierarchical.structure.levels': 'Ordered list of column names defining the hierarchy from the top-most aggregate level down to the leaf.',
+  // ── meio ──
+  'meio.enabled': 'Enable Multi-Echelon Inventory Optimisation. Fits demand distributions and computes safety stock at each service level target.',
+  'meio.distributions': 'Probability distributions fitted to demand data for safety stock calculation. The best-fitting distribution is selected per series.',
+  'meio.fitting_method': 'Parameter estimation method for distribution fitting: MLE (maximum likelihood), quantile matching, or method of moments.',
+  'meio.service_levels': 'Target service levels (fill rates, 0–1) for which safety stock quantities are computed.',
+  // ── parallel ──
+  'parallel.backend': 'Parallelism backend: dask (distributed, multi-process), sequential (single-threaded, good for debugging), joblib (thread/process pools).',
+  'parallel.batch_size': 'Number of series processed per parallel batch. Larger batches reduce scheduling overhead but increase peak memory per worker.',
+  'parallel.dask.scheduler': 'Dask scheduler: processes (separate CPUs, avoids GIL), threads (shared memory, lighter overhead), synchronous (no parallelism, easiest to debug).',
+  'parallel.dask.n_workers': 'Number of Dask worker processes. Leave null to use all available CPU cores.',
+  'parallel.dask.threads_per_worker': 'Threads per Dask worker. Keep at 1 for CPU-bound statistical models to avoid contention.',
+  'parallel.dask.memory_limit': 'RAM limit per worker (e.g. "4GB"). "auto" lets Dask determine a limit based on total system memory.',
+  'parallel.dask.distributed.scheduler_address': 'Address of an existing Dask distributed scheduler (e.g. tcp://192.168.1.10:8786). Leave null to spin up a local cluster.',
+  // ── output ──
+  'output.base_path': 'Root directory for all file-based outputs (Parquet files, CSVs, plot images).',
+  'output.save.forecasts': 'Save forecast results to the configured output format.',
+  'output.save.characteristics': 'Save series characterisation results (demand group classification, seasonality flags, etc.).',
+  'output.save.metrics': 'Save backtesting accuracy metrics for each series and method.',
+  'output.save.distributions': 'Save fitted demand distributions (used by MEIO for safety stock calculations).',
+  'output.save.hyperparameters': 'Save the fitted model hyperparameters (e.g. ARIMA orders, ETS smoothing weights) for each series.',
+  'output.save.plots': 'Generate and save forecast visualisation plots for each series.',
+  'output.formats.forecasts': 'Output format for forecast data: postgres (write directly to DB), parquet, or csv.',
+  'output.formats.metrics': 'Output format for accuracy metrics.',
+  'output.formats.plots': 'Image format for forecast plots: png (static), svg (vector), or html (interactive Plotly).',
+  'output.compression': 'Compression codec for Parquet files: snappy (fast), gzip (smaller), zstd (best ratio), or none.',
+  // ── auth ──
+  'auth.jwt_secret': 'Secret key used to sign JWT tokens. Must be changed before deploying to production. Use a long random string.',
+  'auth.jwt_algorithm': 'JWT signing algorithm. HS256 (HMAC-SHA256) is recommended for symmetric shared-secret authentication.',
+  'auth.access_token_expire_minutes': 'Minutes before an access token expires and the user must re-authenticate or use a refresh token.',
+  'auth.refresh_token_expire_days': 'Days before a refresh token expires and the user must log in again.',
+  // ── logging ──
+  'logging.level': 'Minimum severity level to emit. DEBUG = all messages; INFO = normal operation; WARNING = problems; ERROR = failures; CRITICAL = crashes only.',
+  'logging.format': 'Python log format string applied to every log entry. See Python logging documentation for available fields.',
+  'logging.file': 'Path to the log file. Messages are written here in addition to (or instead of) the console.',
+  'logging.console': 'Also print log messages to stdout / stderr in addition to the log file.',
+  // ── performance ──
+  'n_jobs': 'Number of parallel workers for the forecasting loop. 1 = fully sequential (safest, default). -1 = all CPU threads. Values > 1 use joblib thread pools.',
+  'incremental_processing': 'When enabled, only series whose demand data changed since the last run are re-forecasted. Greatly speeds up incremental pipeline runs on large datasets.',
+};
+
 /* ─── Parameter type → tab assignment ─── */
 const BUSINESS_PARAM_TYPES = new Set([
   'backtesting', 'characterization', 'evaluation', 'forecasting', 'outlier_detection',
@@ -621,7 +770,7 @@ function JsonTableModal({ path, value, onSave, onClose, allowedValues }) {
 
 
 /* ─── Editable parameter field ─── */
-function ParamField({ label, path, value, onChange, saving, parametersSet }) {
+function ParamField({ label, path, value, onChange, saving, parametersSet, tooltip }) {
   const [modalOpen, setModalOpen] = useState(false);
   const isBool = typeof value === 'boolean';
   const isNumber = typeof value === 'number';
@@ -643,10 +792,24 @@ function ParamField({ label, path, value, onChange, saving, parametersSet }) {
     parametersSet?.method_selection_strategy !== 'best_fit'
   ) return null;
 
+  // ── Label with optional ⓘ tooltip badge ──
+  const LabelEl = (
+    <label className="text-xs text-gray-500 dark:text-gray-400 min-w-0 flex items-center gap-1">
+      <span className="break-all">{label}</span>
+      {tooltip && (
+        <span
+          title={tooltip}
+          aria-label={tooltip}
+          className="flex-shrink-0 inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-gray-200 dark:bg-gray-600 text-gray-500 dark:text-gray-300 text-[9px] font-bold cursor-help select-none leading-none"
+        >?</span>
+      )}
+    </label>
+  );
+
   if (isSensitive) {
     return (
       <div className="flex items-center justify-between gap-3 py-2 border-b border-gray-100 dark:border-gray-700/50 last:border-0">
-        <label className="text-xs text-gray-500 dark:text-gray-400 min-w-0 break-all">{label}</label>
+        {LabelEl}
         <span className="text-xs font-mono text-gray-400 dark:text-gray-500 italic">{'********'}</span>
       </div>
     );
@@ -655,7 +818,7 @@ function ParamField({ label, path, value, onChange, saving, parametersSet }) {
   if (isBool) {
     return (
       <div className="flex items-center justify-between gap-3 py-2 border-b border-gray-100 dark:border-gray-700/50 last:border-0">
-        <label className="text-xs text-gray-500 dark:text-gray-400 min-w-0 break-all">{label}</label>
+        {LabelEl}
         <button
           onClick={() => onChange(path, !value)}
           disabled={saving === path}
@@ -675,7 +838,7 @@ function ParamField({ label, path, value, onChange, saving, parametersSet }) {
 
     return (
       <div className="flex items-center justify-between gap-3 py-2 border-b border-gray-100 dark:border-gray-700/50 last:border-0">
-        <label className="text-xs text-gray-500 dark:text-gray-400 min-w-0 break-all">{label}</label>
+        {LabelEl}
         <button
           onClick={() => setModalOpen(true)}
           className="flex items-center gap-1.5 text-xs font-mono bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded px-2 py-1 max-w-[220px] text-left text-gray-600 dark:text-gray-300 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors group"
@@ -708,7 +871,7 @@ function ParamField({ label, path, value, onChange, saving, parametersSet }) {
     return (
       <div className="flex flex-col gap-0.5 py-2 border-b border-gray-100 dark:border-gray-700/50 last:border-0">
         <div className="flex items-center justify-between gap-3">
-          <label className="text-xs text-gray-500 dark:text-gray-400 min-w-0 break-all">{label}</label>
+          {LabelEl}
           <select
             value={value ?? '__auto__'}
             onChange={e => onChange(path, e.target.value === '__auto__' ? null : e.target.value)}
@@ -740,7 +903,7 @@ function ParamField({ label, path, value, onChange, saving, parametersSet }) {
     const allOpts = dropdownOpts.includes(String(value)) ? dropdownOpts : [String(value), ...dropdownOpts];
     return (
       <div className="flex items-center justify-between gap-3 py-2 border-b border-gray-100 dark:border-gray-700/50 last:border-0">
-        <label className="text-xs text-gray-500 dark:text-gray-400 min-w-0 break-all">{label}</label>
+        {LabelEl}
         <select
           value={String(value)}
           onChange={e => onChange(path, isNumber ? Number(e.target.value) : e.target.value)}
@@ -1355,6 +1518,7 @@ function ConfigTab({ filterTypes, title = 'System Configuration', subtitle = 'Ed
                   onChange={handleParamChange}
                   saving={saving}
                   parametersSet={activeVersionObj?.parameters_set}
+                  tooltip={PARAM_TOOLTIPS[path]}
                 />
               ))}
             </div>

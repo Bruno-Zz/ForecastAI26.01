@@ -375,6 +375,7 @@ export const Dashboard = () => {
     document.addEventListener('mouseup', onUp);
   }, [setColWidth]);
 
+
   // Unified column filters
   const [colFilters, setColFilters] = useState({});
   const [page, setPage] = useState(0);
@@ -697,6 +698,14 @@ export const Dashboard = () => {
     effectiveColOrder.map(id => allColDefs[id]).filter(c => c && !hiddenCols.has(c.id)),
     [effectiveColOrder, allColDefs, hiddenCols]);
 
+  // Sum of all visible column widths — used to set an explicit table pixel width so
+  // that table-layout:fixed gives each <col> its exact pixel value (rather than
+  // treating them as proportional hints when min-width:100% makes the table stretch).
+  const totalColWidth = useMemo(
+    () => visibleCols.reduce((sum, col) => sum + (colWidths[col.id] ?? getDefaultColWidth(col.id)), 0),
+    [visibleCols, colWidths]
+  );
+
   // ── Cell renderer ──
   const renderCell = useCallback((col, s) => {
     const td = 'px-3 py-2';
@@ -949,7 +958,10 @@ export const Dashboard = () => {
 
         {/* Table */}
         <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
-          <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 text-sm" style={{ tableLayout: 'fixed' }}>
+          <table
+            className="divide-y divide-gray-200 dark:divide-gray-700 text-sm"
+            style={{ tableLayout: 'fixed', width: totalColWidth || '100%' }}
+          >
             <colgroup>
               {visibleCols.map(col => (
                 <col key={col.id} style={{ width: colWidths[col.id] ?? getDefaultColWidth(col.id) }} />
