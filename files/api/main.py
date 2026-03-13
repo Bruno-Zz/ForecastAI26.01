@@ -697,7 +697,11 @@ async def startup_event():
             logger.warning(f"Parameter seed failed (non-fatal): {exc}")
         # Mark any leftover 'running' process_log rows as interrupted
         _mark_stale_db_steps()
-    load_data()
+    # Pre-warm data cache in a background thread so the server accepts
+    # requests immediately instead of blocking until all data is loaded.
+    import asyncio
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, load_data)
 
 
 @app.post("/api/reload")
@@ -3351,20 +3355,26 @@ async def get_sparklines(unique_ids: List[str] = Body(...)):
         weekly_vals = np.interp(weekly_ords, all_ords, all_vals)
         return [float(v) for v in weekly_vals]
 
+    # Pre-group by unique_id to avoid O(N*M) scans inside the per-uid loop
+    ts_grouped = {uid: grp.sort_values("date") for uid, grp in ts_df.groupby("unique_id")}
+    fc_grouped: dict = {}
+    if forecasts_df is not None:
+        fc_grouped = {uid: grp for uid, grp in forecasts_df.groupby("unique_id")}
+
     result = {}
     for uid in unique_ids:
-        # Historical: last 12 months -> interpolated to weekly
-        series_rows = ts_df[ts_df["unique_id"] == uid].sort_values("date")
-        if series_rows.empty:
+        # Historical: last 12 periods -> interpolated to weekly
+        series_rows = ts_grouped.get(uid)
+        if series_rows is None or series_rows.empty:
             continue
         hist_dates = series_rows["date"].tolist()
         hist_values = series_rows["y"].tolist()
         hist_weekly = monthly_to_weekly(hist_dates, hist_values, n_months=12)
 
-        # Forecast: first 12 months from best method -> interpolated to weekly
+        # Forecast: first 12 steps from best method -> interpolated to weekly
         fc_weekly = []
         if forecasts_df is not None:
-            uid_forecasts = forecasts_df[forecasts_df["unique_id"] == uid]
+            uid_forecasts = fc_grouped.get(uid, pd.DataFrame())
             if not uid_forecasts.empty:
                 best = best_method_map.get(uid)
                 if best:
@@ -4132,6 +4142,22 @@ def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = Non
                     "success" if exit_code == 0 else "error"
                 )
                 _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
+
+        # After a successful ETL run, run ANALYZE so the planner stats are current
+        if exit_code == 0 and step_arg == "etl" and _DB_AVAILABLE:
+            try:
+                _schema = get_schema()
+                _conn = get_conn()
+                with _conn.cursor() as _cur:
+                    _cur.execute(f"ANALYZE {_schema}.demand_actuals")
+                _conn.commit()
+                _conn.close()
+                with _pipeline_lock:
+                    _pipeline_jobs[job_id]["log_lines"].append(
+                        "[INFO] ANALYZE demand_actuals completed — query planner stats updated"
+                    )
+            except Exception as _ae:
+                logger.warning(f"ANALYZE after ETL failed (non-fatal): {_ae}")
 
     except Exception as exc:
         with _pipeline_lock:
@@ -6454,6 +6480,117 @@ async def upsert_adjustment(unique_id: str, body: AdjustmentIn, request: Request
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         conn.close()
+
+
+class CopyForecastRequest(BaseModel):
+    source_uid: str
+    horizon: Optional[int] = None   # if None, copies all forecast steps
+
+
+@app.post("/api/series/{unique_id}/copy-forecast", status_code=200)
+async def copy_forecast_to_series(unique_id: str, body: CopyForecastRequest, request: Request):
+    """
+    New Part Introduction: copy the best-method point forecast from source_uid
+    and save it as override entries for unique_id.  Creates one override row per
+    forecast period, using the source series' last_date + detected data frequency
+    to compute the target dates.
+    """
+    from api.auth import get_current_user as auth_get_current_user, _user_can_create_override
+    user = auth_get_current_user(request)
+    if not _user_can_create_override(user):
+        raise HTTPException(status_code=403, detail="Permission denied")
+    _require_db()
+
+    src = body.source_uid
+    if not src:
+        raise HTTPException(status_code=400, detail="source_uid is required")
+
+    # --- Resolve source forecast ---
+    if data_cache.get("forecasts") is None or data_cache.get("time_series") is None:
+        raise HTTPException(status_code=503, detail="Data not loaded")
+
+    ts_df  = _compute(data_cache["time_series"])
+    fc_df  = _compute(data_cache["forecasts"])
+    bm_df  = _compute(data_cache["best_methods"]) if data_cache.get("best_methods") is not None else None
+
+    src_rows = ts_df[ts_df["unique_id"] == src].sort_values("date")
+    if src_rows.empty:
+        raise HTTPException(status_code=404, detail=f"Source series '{src}' not found")
+
+    best_method = None
+    if bm_df is not None:
+        bm_row = bm_df[bm_df["unique_id"] == src]
+        if not bm_row.empty:
+            best_method = str(bm_row.iloc[0]["best_method"])
+
+    src_fc = fc_df[fc_df["unique_id"] == src]
+    if best_method:
+        m_fc = src_fc[src_fc["method"] == best_method]
+        if not m_fc.empty:
+            src_fc = m_fc
+    if src_fc.empty:
+        raise HTTPException(status_code=404, detail=f"No forecast for source '{src}'")
+
+    pf = src_fc.iloc[0]["point_forecast"]
+    if isinstance(pf, str):
+        try: pf = json.loads(pf)
+        except Exception: pf = None
+    if not isinstance(pf, (list, np.ndarray)):
+        raise HTTPException(status_code=422, detail="Source point_forecast is not a list")
+
+    pf = list(pf)
+    if body.horizon:
+        pf = pf[:body.horizon]
+
+    # Detect frequency from source series date spacing
+    date_diffs = src_rows["date"].sort_values().diff().dt.days.dropna()
+    median_days = float(date_diffs.median()) if not date_diffs.empty else 30
+    if median_days <= 8:
+        def _step(ld, i): return ld + pd.Timedelta(weeks=i + 1)
+    elif median_days <= 35:
+        def _step(ld, i): return ld + pd.DateOffset(months=i + 1)
+    elif median_days <= 100:
+        def _step(ld, i): return ld + pd.DateOffset(months=(i + 1) * 3)
+    else:
+        def _step(ld, i): return ld + pd.DateOffset(years=i + 1)
+
+    last_date = src_rows["date"].max()
+
+    # Build (date, value) pairs — aggregate steps to monthly if weekly
+    date_vals: dict = {}
+    for i, val in enumerate(pf):
+        fc_ts  = _step(last_date, i)
+        bucket = fc_ts.to_period("M").to_timestamp().strftime("%Y-%m-%d")
+        date_vals[bucket] = date_vals.get(bucket, 0.0) + float(val)
+
+    # Upsert overrides for the target uid
+    schema = get_schema()
+    conn = get_conn()
+    inserted = 0
+    try:
+        with conn.cursor() as cur:
+            for fc_date, value in sorted(date_vals.items()):
+                cur.execute(
+                    f"""
+                    INSERT INTO {schema}.forecast_adjustments
+                        (unique_id, forecast_date, adjustment_type, value, note, created_by, updated_at)
+                    VALUES (%s, %s, 'override', %s, %s, %s, NOW())
+                    ON CONFLICT (unique_id, forecast_date, adjustment_type)
+                    DO UPDATE SET value = EXCLUDED.value, note = EXCLUDED.note, updated_at = NOW()
+                    """,
+                    (unique_id, fc_date, value,
+                     f"Copied from {src} ({best_method or 'best'})",
+                     user.get("username", "planner") if user else "planner"),
+                )
+                inserted += 1
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+    return {"copied_periods": inserted, "source_uid": src, "source_method": best_method}
 
 
 @app.delete(

@@ -10,18 +10,18 @@ import './index.css';
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 
+// StrictMode intentionally removed — it causes double-invocation of effects
+// which leads to duplicate API calls and flickering on initial page load.
 ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <BrowserRouter>
-      <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
-        <ThemeProvider>
-          <LocaleProvider>
-            <AuthProvider>
-              <App />
-            </AuthProvider>
-          </LocaleProvider>
-        </ThemeProvider>
-      </GoogleOAuthProvider>
-    </BrowserRouter>
-  </React.StrictMode>
+  <BrowserRouter>
+    <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+      <ThemeProvider>
+        <LocaleProvider>
+          <AuthProvider>
+            <App />
+          </AuthProvider>
+        </LocaleProvider>
+      </ThemeProvider>
+    </GoogleOAuthProvider>
+  </BrowserRouter>
 );

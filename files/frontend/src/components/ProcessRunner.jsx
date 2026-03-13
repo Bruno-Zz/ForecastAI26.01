@@ -606,6 +606,8 @@ const PipelineEditor = ({ pipeline, onSave, onCancel, segments }) => {
   const [stepOrder, setStepOrder] = useState(pipeline?.steps || [...PROCESS_STEP_IDS]);
   const [segmentIds, setSegmentIds] = useState(pipeline?.segment_ids || []);
   const [nameError, setNameError] = useState('');
+  const [dragIndex, setDragIndex]     = useState(null);
+  const [dragOverIndex, setDragOverIndex] = useState(null);
 
   const moveStep = (index, dir) => {
     const arr = [...stepOrder];
@@ -614,6 +616,27 @@ const PipelineEditor = ({ pipeline, onSave, onCancel, segments }) => {
     [arr[index], arr[t]] = [arr[t], arr[index]];
     setStepOrder(arr);
   };
+
+  const handleDragStart = (e, index) => {
+    setDragIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+  };
+  const handleDragOver = (e, index) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (index !== dragOverIndex) setDragOverIndex(index);
+  };
+  const handleDrop = (e, index) => {
+    e.preventDefault();
+    if (dragIndex === null || dragIndex === index) { setDragIndex(null); setDragOverIndex(null); return; }
+    const arr = [...stepOrder];
+    const [moved] = arr.splice(dragIndex, 1);
+    arr.splice(index, 0, moved);
+    setStepOrder(arr);
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+  const handleDragEnd = () => { setDragIndex(null); setDragOverIndex(null); };
 
   const toggleStep = (stepId) => {
     setStepOrder(prev =>
@@ -663,7 +686,24 @@ const PipelineEditor = ({ pipeline, onSave, onCancel, segments }) => {
         </label>
         <div className="space-y-1.5">
           {stepOrder.map((stepId, i) => (
-            <div key={stepId} className="flex items-center gap-2 bg-gray-50 dark:bg-gray-700/50 rounded-lg px-3 py-2">
+            <div
+              key={stepId}
+              draggable
+              onDragStart={e => handleDragStart(e, i)}
+              onDragOver={e => handleDragOver(e, i)}
+              onDrop={e => handleDrop(e, i)}
+              onDragEnd={handleDragEnd}
+              className={`flex items-center gap-2 rounded-lg px-3 py-2 transition-all cursor-grab active:cursor-grabbing
+                ${dragOverIndex === i && dragIndex !== i
+                  ? 'bg-blue-50 dark:bg-blue-900/30 border-2 border-blue-400 dark:border-blue-500'
+                  : dragIndex === i
+                    ? 'opacity-40 bg-gray-100 dark:bg-gray-700 border-2 border-dashed border-gray-300 dark:border-gray-500'
+                    : 'bg-gray-50 dark:bg-gray-700/50 border border-transparent'}`}
+            >
+              {/* Drag grip */}
+              <svg className="w-3.5 h-3.5 text-gray-300 dark:text-gray-600 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M7 2a2 2 0 11.001 4A2 2 0 017 2zm0 6a2 2 0 11.001 4A2 2 0 017 6zm0 6a2 2 0 11.001 4A2 2 0 017 12zm6-12a2 2 0 11.001 4A2 2 0 0113 2zm0 6a2 2 0 11.001 4A2 2 0 0113 6zm0 6a2 2 0 11.001 4A2 2 0 0113 12z"/>
+              </svg>
               <span className="text-sm">{ICONS[stepId] || '⚙️'}</span>
               <span className="flex-1 text-sm text-gray-800 dark:text-gray-200 font-medium">
                 {STEP_LABELS[stepId] || stepId}

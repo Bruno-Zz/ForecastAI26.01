@@ -1080,6 +1080,13 @@ export const TimeSeriesViewer = () => {
   const [segmentMemberSet, setSegmentMemberSet] = useState(null); // null = no filter (All)
   const [segmentLoading, setSegmentLoading] = useState(false);
 
+  // ---- New Part Introduction ----
+  const [isNewPart, setIsNewPart]         = useState(false);
+  const [copyFcOpen, setCopyFcOpen]       = useState(false);
+  const [copyFcSource, setCopyFcSource]   = useState('');
+  const [copyFcLoading, setCopyFcLoading] = useState(false);
+  const [copyFcResult, setCopyFcResult]   = useState(null); // { copied_periods, source_uid }
+
   // ---- Time series data ----
   const [historicalData, setHistoricalData] = useState(null);
   const [originalData, setOriginalData] = useState(null);
@@ -1591,6 +1598,18 @@ export const TimeSeriesViewer = () => {
         if (d.original_data) setOriginalData(d.original_data);
         setHasOutlierCorrections(d.has_outlier_corrections || false);
         setNOutliers(d.n_outliers || 0);
+        // Detect "new part" — series exists but has no demand rows yet
+        const histEmpty = !d.data?.date?.length && !d.data?.y?.length;
+        setIsNewPart(histEmpty);
+        if (histEmpty && allSeriesList.length === 0) {
+          api.get('/series').then(r => setAllSeriesList(r.data?.series || r.data || [])).catch(() => {});
+        }
+      } else {
+        // 404 or no data → also treat as new part
+        setIsNewPart(true);
+        if (allSeriesList.length === 0) {
+          api.get('/series').then(r => setAllSeriesList(r.data?.series || r.data || [])).catch(() => {});
+        }
       }
       if (outlierRes.status === 'fulfilled') setOutlierInfo(outlierRes.value.data);
       if (forecastRes.status === 'fulfilled') {
@@ -4492,9 +4511,29 @@ export const TimeSeriesViewer = () => {
           }
         }
 
-        /* forecast_table */
-        sectionNodes['forecast_table'] = activeForecasts.length > 0 ? (
+        /* forecast_table — show for series with forecasts OR for new parts (so overrides can be entered) */
+        sectionNodes['forecast_table'] = (activeForecasts.length > 0 || isNewPart) ? (
           <div key="forecast_table" id="tsv-forecast-table">
+            {isNewPart && activeForecasts.length === 0 && (
+              <div className="mb-4 mx-0 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg">
+                <p className="text-sm text-amber-800 dark:text-amber-200 font-medium mb-1">⚠ No historical demand found for this series.</p>
+                <p className="text-xs text-amber-700 dark:text-amber-300 mb-3">
+                  This part has no recorded demand. You can enter manual overrides below to create a consensus forecast,
+                  or copy an existing series' forecast as a starting point.
+                </p>
+                <button
+                  onClick={() => setCopyFcOpen(true)}
+                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-lg transition-colors"
+                >
+                  📋 Copy Forecast From Another Series
+                </button>
+                {copyFcResult && (
+                  <span className="ml-3 text-xs text-emerald-600 dark:text-emerald-400">
+                    ✓ Copied {copyFcResult.copied_periods} periods from {copyFcResult.source_uid}
+                  </span>
+                )}
+              </div>
+            )}
             <ForecastTableWithAdjustments
               activeForecasts={activeForecasts}
               forecastDates={forecastDates}
@@ -4528,9 +4567,75 @@ export const TimeSeriesViewer = () => {
         </div>
       )}
 
-      {activeForecasts.length === 0 && activeMetrics.length === 0 && (
+      {activeForecasts.length === 0 && activeMetrics.length === 0 && !isNewPart && (
         <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-6 text-center">
           <p className="text-yellow-800 dark:text-yellow-300">No forecasts or backtest metrics available for this series.</p>
+        </div>
+      )}
+
+      {/* ── Copy Forecast Modal ─────────────────────────────── */}
+      {copyFcOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setCopyFcOpen(false)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
+            <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100 mb-1">Copy Forecast From Another Series</h3>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+              The selected series' best-method point forecast will be saved as overrides for <strong>{decodedId}</strong>.
+              You can then edit the values in the Forecast Table.
+            </p>
+            <div className="mb-4">
+              <label className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 block">Source Series</label>
+              <input
+                type="text"
+                value={copyFcSource}
+                onChange={e => setCopyFcSource(e.target.value)}
+                placeholder="Type a unique_id or item/site…"
+                list="copy-fc-series-list"
+                className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <datalist id="copy-fc-series-list">
+                {allSeriesList.slice(0, 200).map(s => (
+                  <option key={s.unique_id || s} value={s.unique_id || s}>
+                    {s.item_name || ''} {s.site_name || ''}
+                  </option>
+                ))}
+              </datalist>
+            </div>
+            {copyFcResult && (
+              <p className="text-xs text-emerald-600 dark:text-emerald-400 mb-3">
+                ✓ Copied {copyFcResult.copied_periods} periods from {copyFcResult.source_uid}. Reload the page to see the overrides.
+              </p>
+            )}
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => { setCopyFcOpen(false); setCopyFcResult(null); }}
+                className="px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={!copyFcSource.trim() || copyFcLoading}
+                onClick={async () => {
+                  setCopyFcLoading(true);
+                  try {
+                    const res = await api.post(`/series/${encodeURIComponent(decodedId)}/copy-forecast`, { source_uid: copyFcSource.trim() });
+                    setCopyFcResult(res.data);
+                    // Reload adjustments so they show in the table
+                    const adjRes = await api.get(`/adjustments/${encodeURIComponent(decodedId)}`);
+                    const adjMap = {};
+                    (adjRes.data || []).forEach(a => { adjMap[`${a.forecast_date}|${a.adjustment_type}`] = a; });
+                    setAdjustments(adjMap);
+                  } catch (err) {
+                    alert(err.response?.data?.detail || err.message || 'Copy failed');
+                  } finally {
+                    setCopyFcLoading(false);
+                  }
+                }}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
+              >
+                {copyFcLoading ? 'Copying…' : 'Copy Forecast'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

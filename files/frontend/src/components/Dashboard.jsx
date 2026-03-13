@@ -521,30 +521,35 @@ export const Dashboard = () => {
     });
   }, [series, colFilters, sortField, sortDir, accuracyZoom, accuracyPrecisionData]);
 
-  // Aggregate demand (debounced 400 ms)
-  const aggTimerRef = useRef(null);
+  // Aggregate demand (debounced 400 ms, aborted on re-render)
+  const aggTimerRef   = useRef(null);
+  const aggAbortRef   = useRef(null);
   useEffect(() => {
     if (aggTimerRef.current) clearTimeout(aggTimerRef.current);
+    if (aggAbortRef.current) aggAbortRef.current.abort();
     setAggLoading(true); setAggError(null);
     aggTimerRef.current = setTimeout(async () => {
+      const controller = new AbortController();
+      aggAbortRef.current = controller;
       try {
         const ids = filteredSeries.map(s => s.unique_id);
-        console.log(`[Dashboard] aggregate-demand: filteredSeries=${ids.length}, series=${series?.length}`);
         let res;
         if (ids.length > 0 && ids.length < (series?.length || 0)) {
-          res = await api.post('/analytics/aggregate-demand', { unique_ids: ids });
+          res = await api.post('/analytics/aggregate-demand', { unique_ids: ids }, { signal: controller.signal });
         } else {
-          res = await api.get('/analytics/aggregate-demand');
+          res = await api.get('/analytics/aggregate-demand', { signal: controller.signal });
         }
-        console.log(`[Dashboard] aggregate-demand response: hist=${res.data?.historical?.length}, fc=${res.data?.forecast?.length}`);
         setAggregateDemand(res.data);
       } catch (err) {
-        console.error('Failed to load aggregate demand:', err);
+        if (err.name === 'CanceledError' || err.name === 'AbortError') return; // stale request
         setAggError(err.response?.data?.detail || err.message || 'Unknown error');
         setAggregateDemand(null);
       } finally { setAggLoading(false); }
     }, 400);
-    return () => { if (aggTimerRef.current) clearTimeout(aggTimerRef.current); };
+    return () => {
+      if (aggTimerRef.current) clearTimeout(aggTimerRef.current);
+      if (aggAbortRef.current) aggAbortRef.current.abort();
+    };
   }, [filteredSeries, series]);
 
   const pagedSeries = filteredSeries.slice(page * pageSize, (page + 1) * pageSize);
