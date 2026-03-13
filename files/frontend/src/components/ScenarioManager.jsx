@@ -6,6 +6,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import api from '../utils/api';
 
 // ── Utility helpers ─────────────────────────────────────────────────────────
 
@@ -365,15 +366,14 @@ export const ScenarioManager = () => {
 
   const fetchScenarios = useCallback(async () => {
     try {
-      const res = await fetch('/api/forecast/scenarios', { credentials: 'include' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const res = await api.get('/forecast/scenarios');
+      const data = res.data;
       const list = data.scenarios || data || [];
       // Base scenario first
       list.sort((a, b) => (b.is_base ? 1 : 0) - (a.is_base ? 1 : 0));
       setScenarios(list);
     } catch (e) {
-      setError(e.message);
+      setError(e.response?.data?.detail || e.message);
     } finally {
       setLoading(false);
     }
@@ -386,56 +386,29 @@ export const ScenarioManager = () => {
   const handleSave = async (data) => {
     const { mode, scenario } = modal;
     try {
-      let res;
       if (mode === 'edit') {
-        res = await fetch(`/api/forecast/scenarios/${scenario.scenario_id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify(data),
-        });
+        await api.put(`/forecast/scenarios/${scenario.scenario_id}`, data);
       } else if (mode === 'clone') {
-        res = await fetch(`/api/forecast/scenarios/${scenario.scenario_id}/clone`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify(data),
-        });
+        await api.post(`/forecast/scenarios/${scenario.scenario_id}/clone`, data);
       } else {
-        res = await fetch('/api/forecast/scenarios', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify(data),
-        });
-      }
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `HTTP ${res.status}`);
+        await api.post('/forecast/scenarios', data);
       }
       setModal(null);
       await fetchScenarios();
       showToast(mode === 'edit' ? 'Scenario updated.' : mode === 'clone' ? 'Scenario cloned.' : 'Scenario created.');
     } catch (e) {
-      setError(e.message);
+      setError(e.response?.data?.detail || e.message);
     }
   };
 
   const handleDelete = async (scenario) => {
     try {
-      const res = await fetch(`/api/forecast/scenarios/${scenario.scenario_id}`, {
-        method: 'DELETE',
-        credentials: 'include',
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `HTTP ${res.status}`);
-      }
+      await api.delete(`/forecast/scenarios/${scenario.scenario_id}`);
       setConfirm(null);
       setScenarios(prev => prev.filter(s => s.scenario_id !== scenario.scenario_id));
       showToast(`Scenario "${scenario.name}" deleted.`);
     } catch (e) {
-      setError(e.message);
+      setError(e.response?.data?.detail || e.message);
       setConfirm(null);
     }
   };
@@ -443,17 +416,8 @@ export const ScenarioManager = () => {
   const handleRun = async (scenario) => {
     setRunningId(scenario.scenario_id);
     try {
-      const res = await fetch('/api/pipeline/run-all', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ scenario_id: scenario.scenario_id }),
-      });
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || `HTTP ${res.status}`);
-      }
-      const data = await res.json();
+      const res = await api.post('/pipeline/run-all', { scenario_id: scenario.scenario_id });
+      const data = res.data;
       setConfirm(null);
       showToast(`Pipeline started. Job ID: ${data.job_id}`);
     } catch (e) {

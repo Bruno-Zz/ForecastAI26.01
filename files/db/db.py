@@ -1391,6 +1391,12 @@ def init_schema(config_path=None) -> None:
         VALUES (1, 'Base', 'Default scenario — global configuration', TRUE, 'complete')
         ON CONFLICT (scenario_id) DO NOTHING;
         """,
+        f"""
+        SELECT setval(
+            pg_get_serial_sequence('{schema}.forecast_scenarios', 'scenario_id'),
+            GREATEST((SELECT MAX(scenario_id) FROM {schema}.forecast_scenarios), 1)
+        );
+        """,
         # Drop old unique constraint on time_series_characteristics.unique_id and add composite
         f"""
         DO $$
@@ -1460,6 +1466,13 @@ def init_schema(config_path=None) -> None:
                 INSERT INTO {schema}.forecast_scenarios (scenario_id, name, description, is_base, status)
                 VALUES (1, 'Base', 'Default scenario — global configuration', TRUE, 'complete')
                 ON CONFLICT (scenario_id) DO NOTHING
+            """)
+            # Advance sequence past manually-inserted id=1 so next INSERT gets id=2+
+            cur.execute(f"""
+                SELECT setval(
+                    pg_get_serial_sequence('{schema}.forecast_scenarios', 'scenario_id'),
+                    GREATEST((SELECT MAX(scenario_id) FROM {schema}.forecast_scenarios), 1)
+                )
             """)
         conn.commit()
         logger.info(f"Schema '{schema}' tables created/verified")
