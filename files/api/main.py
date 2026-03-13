@@ -2342,9 +2342,13 @@ def _build_aggregate_demand(uid_set: set | None = None):
             f"{n_bad_type} bad_pf_type, {n_no_date} no_last_date, {n_date_err} date_errors"
         )
 
+        # Only show forecast months that are strictly AFTER the last historical month.
+        # This prevents stale-series forecasts from rendering inside the historical bars.
+        last_hist_date = hist_agg["date"].max() if not hist_agg.empty else pd.Timestamp("1900-01-01")
         forecast = [
             {"date": d, "value": round(v, 2)}
             for d, v in sorted(date_sums.items())
+            if pd.Timestamp(d) > last_hist_date
         ]
 
     logger.info(
