@@ -424,3 +424,162 @@ ON CONFLICT (scenario_id) DO NOTHING;
 INSERT INTO {schema}.segment (name, description, criteria, is_default)
 VALUES ('All', 'All item/site combinations', '{}'::jsonb, TRUE)
 ON CONFLICT (name) DO NOTHING;
+
+-- ─── Causal / Asset-Driven Demand tables ────────────────────────────
+
+-- 1. Asset type master
+CREATE TABLE IF NOT EXISTS {schema}.causal_asset_type (
+    asset_type_id    BIGSERIAL PRIMARY KEY,
+    code             TEXT NOT NULL UNIQUE,
+    name             TEXT,
+    removal_drivers  TEXT[] NOT NULL DEFAULT ARRAY['hours','cycles'],
+    aog_cost_per_day DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    mean_aog_days    DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. BOM lines (per asset type; supports LRU→SRU parent chain)
+CREATE TABLE IF NOT EXISTS {schema}.causal_bom (
+    bom_id           BIGSERIAL PRIMARY KEY,
+    asset_type_id    BIGINT NOT NULL REFERENCES {schema}.causal_asset_type(asset_type_id),
+    item_id          BIGINT NOT NULL,
+    qty_per_asset    DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    removal_driver   TEXT NOT NULL DEFAULT 'hours',
+    mdfh_override    DOUBLE PRECISION,
+    is_lru           BOOLEAN NOT NULL DEFAULT TRUE,
+    repair_yield     DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    parent_bom_id    BIGINT REFERENCES {schema}.causal_bom(bom_id),
+    updated_at       TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (asset_type_id, item_id)
+);
+
+-- 3. Per-asset-instance effectivity (tail/serial level BOM overrides)
+CREATE TABLE IF NOT EXISTS {schema}.causal_effectivity (
+    effectivity_id   BIGSERIAL PRIMARY KEY,
+    asset_id         TEXT NOT NULL,
+    asset_type_id    BIGINT NOT NULL REFERENCES {schema}.causal_asset_type(asset_type_id),
+    item_id          BIGINT NOT NULL,
+    effective        BOOLEAN NOT NULL DEFAULT TRUE,
+    qty_override     DOUBLE PRECISION,
+    effective_from   DATE,
+    effective_to     DATE,
+    sb_reference     TEXT,
+    updated_at       TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (asset_id, item_id)
+);
+
+-- 4. Fleet plan (per asset instance × site × period)
+CREATE TABLE IF NOT EXISTS {schema}.causal_fleet_plan (
+    fleet_plan_id      BIGSERIAL PRIMARY KEY,
+    scenario_id        BIGINT NOT NULL DEFAULT 0,
+    asset_id           TEXT NOT NULL,
+    asset_type_id      BIGINT NOT NULL REFERENCES {schema}.causal_asset_type(asset_type_id),
+    site_id            BIGINT NOT NULL,
+    period_start       DATE NOT NULL,
+    period_end         DATE NOT NULL,
+    util_hours         DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    util_cycles        DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    util_landings      DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    util_calendar_days DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    is_active          BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at         TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_causal_fleet ON {schema}.causal_fleet_plan
+    (scenario_id, site_id, period_start);
+
+-- 5. Fitted MDFH / MTBUR per part × asset type × removal driver
+CREATE TABLE IF NOT EXISTS {schema}.causal_mdfh (
+    mdfh_id          BIGSERIAL PRIMARY KEY,
+    item_id          BIGINT NOT NULL,
+    asset_type_id    BIGINT NOT NULL REFERENCES {schema}.causal_asset_type(asset_type_id),
+    removal_driver   TEXT NOT NULL DEFAULT 'hours',
+    mdfh_mean        DOUBLE PRECISION NOT NULL,
+    mdfh_stddev      DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    n_observations   INT NOT NULL DEFAULT 0,
+    fit_method       TEXT NOT NULL DEFAULT 'mle',
+    fitted_at        TIMESTAMPTZ DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (item_id, asset_type_id, removal_driver)
+);
+
+-- 6. Scheduled maintenance task card library
+CREATE TABLE IF NOT EXISTS {schema}.causal_task_cards (
+    task_card_id     BIGSERIAL PRIMARY KEY,
+    check_type       TEXT NOT NULL,
+    asset_type_id    BIGINT REFERENCES {schema}.causal_asset_type(asset_type_id),
+    item_id          BIGINT NOT NULL,
+    qty_per_event    DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    is_mandatory     BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 7. Planned maintenance calendar (per asset instance)
+CREATE TABLE IF NOT EXISTS {schema}.causal_maintenance_calendar (
+    event_id         BIGSERIAL PRIMARY KEY,
+    asset_id         TEXT NOT NULL,
+    asset_type_id    BIGINT NOT NULL REFERENCES {schema}.causal_asset_type(asset_type_id),
+    site_id          BIGINT NOT NULL,
+    check_type       TEXT NOT NULL,
+    planned_date     DATE NOT NULL,
+    duration_days    INT NOT NULL DEFAULT 1,
+    scenario_id      BIGINT NOT NULL DEFAULT 0,
+    updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_causal_maint ON {schema}.causal_maintenance_calendar
+    (scenario_id, site_id, planned_date);
+
+-- 8. Causal scenario definitions
+CREATE TABLE IF NOT EXISTS {schema}.causal_scenarios (
+    scenario_id             BIGSERIAL PRIMARY KEY,
+    name                    TEXT NOT NULL,
+    description             TEXT,
+    is_base                 BOOLEAN NOT NULL DEFAULT FALSE,
+    created_by              TEXT,
+    created_at              TIMESTAMPTZ DEFAULT NOW(),
+    fleet_overrides         JSONB NOT NULL DEFAULT '{}',
+    mdfh_overrides          JSONB NOT NULL DEFAULT '{}',
+    linked_meio_scenario_id BIGINT
+);
+
+-- 9. Causal demand output (feeds MEIO; columnar for fast period-range reads)
+CREATE TABLE IF NOT EXISTS {schema}.causal_results (
+    scenario_id        BIGINT NOT NULL,
+    item_id            BIGINT NOT NULL,
+    site_id            BIGINT NOT NULL,
+    period_start       DATE NOT NULL,
+    demand_mean        DOUBLE PRECISION NOT NULL,
+    demand_stddev      DOUBLE PRECISION NOT NULL,
+    scheduled_demand   DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    unscheduled_demand DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    removal_driver     TEXT,
+    run_at             TIMESTAMPTZ DEFAULT NOW()
+) USING columnstore;
+CREATE INDEX IF NOT EXISTS idx_causal_res ON {schema}.causal_results
+    (scenario_id, item_id, site_id, period_start);
+
+-- 10. Multi-site pooling recommendations (P2)
+CREATE TABLE IF NOT EXISTS {schema}.causal_pooling_recommendations (
+    scenario_id          BIGINT NOT NULL,
+    item_id              BIGINT NOT NULL,
+    hub_site_id          BIGINT NOT NULL,
+    n_sites              INT NOT NULL,
+    local_investment     DOUBLE PRECISION NOT NULL,
+    pooled_investment    DOUBLE PRECISION NOT NULL,
+    savings_pct          DOUBLE PRECISION NOT NULL,
+    recommended_strategy TEXT NOT NULL,
+    run_at               TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (scenario_id, item_id)
+);
+
+-- 11. Historical AOG events (P3)
+CREATE TABLE IF NOT EXISTS {schema}.causal_aog_events (
+    event_id        BIGSERIAL PRIMARY KEY,
+    asset_id        TEXT NOT NULL,
+    asset_type_id   BIGINT NOT NULL,
+    item_id         BIGINT NOT NULL,
+    event_date      DATE NOT NULL,
+    duration_days   DOUBLE PRECISION NOT NULL,
+    cost_actual     DOUBLE PRECISION,
+    notes           TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);

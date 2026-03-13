@@ -42,6 +42,7 @@ const UserManagement = lazy(() => import('./components/UserManagement'));
 const AuditLog = lazy(() => import('./components/AuditLog'));
 const ABCClassification = lazy(() => import('./components/ABCClassification'));
 const ScenarioManager = lazy(() => import('./components/ScenarioManager'));
+const CausalForecasting = lazy(() => import('./components/CausalForecasting'));
 
 /** Shared loading fallback shown while a lazy chunk downloads */
 const PageSpinner = () => (
@@ -280,6 +281,7 @@ function App() {
               <Route path="/audit" element={<AuditLog />} />
               <Route path="/users" element={<UserManagement />} />
               <Route path="/scenarios" element={<ScenarioManager />} />
+              <Route path="/causal" element={<CausalForecasting />} />
               <Route path="/login" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>

@@ -196,6 +196,17 @@ const PARAM_TOOLTIPS = {
   'meio.distributions': 'Probability distributions fitted to demand data for safety stock calculation. The best-fitting distribution is selected per series.',
   'meio.fitting_method': 'Parameter estimation method for distribution fitting: MLE (maximum likelihood), quantile matching, or method of moments.',
   'meio.service_levels': 'Target service levels (fill rates, 0–1) for which safety stock quantities are computed.',
+  // ── causal forecasting ──
+  'causal.mdfh.mdfh_mean': 'Mean Demand per Flight Hour (or cycle / landing). Multiply by utilisation to get expected removals per period.',
+  'causal.mdfh.mdfh_stddev': 'Standard deviation of MDFH across the historical sample. Drives demand uncertainty in the MEIO optimizer.',
+  'causal.bom.qty_per_asset': 'Number of this part installed per asset. Used to scale removal demand when a BOM item fails.',
+  'causal.bom.removal_driver': 'Utilisation metric that drives removals for this part: hours, cycles, landings, or calendar days.',
+  'causal.effectivity.effective': 'Whether this part is installed on this specific asset instance. Non-effective parts are excluded from demand generation for that tail.',
+  'causal.fleet_plan.util_hours': 'Planned flight hours for this asset in the planning period. Used as the utilisation scalar when removal_driver is "hours".',
+  'causal.fleet_plan.util_cycles': 'Planned flight cycles for this asset in the planning period. Used when removal_driver is "cycles".',
+  'causal.scenarios.fleet_overrides.utilization_multiplier': 'Scale all utilisation metrics for this scenario by this factor (e.g. 0.8 for a demand-reduction scenario, 1.2 for a surge scenario).',
+  'causal.scenarios.mdfh_overrides': 'Override individual part MDFH values for this scenario. Useful for stress-testing specific components.',
+  'causal.scenarios.linked_meio_scenario_id': 'When set, the causal demand output is automatically fed as input to this MEIO scenario for end-to-end optimisation.',
   // ── parallel ──
   'parallel.backend': 'Parallelism backend: dask (distributed, multi-process), sequential (single-threaded, good for debugging), joblib (thread/process pools).',
   'parallel.batch_size': 'Number of series processed per parallel batch. Larger batches reduce scheduling overhead but increase peak memory per worker.',

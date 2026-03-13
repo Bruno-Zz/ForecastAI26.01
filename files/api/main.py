@@ -4279,6 +4279,18 @@ async def list_forecast_scenarios():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # Check table exists first (may not exist if schema migration hasn't run yet)
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = 'forecast_scenarios'",
+                (schema,)
+            )
+            if cur.fetchone() is None:
+                # Table not yet created — return just the synthetic base scenario
+                return [{"scenario_id": 1, "name": "Base", "description": "Default scenario",
+                         "is_base": True, "status": "complete", "run_at": None,
+                         "error_msg": None, "created_by": None, "created_at": None,
+                         "param_overrides": {}, "demand_overrides": {}}]
             cur.execute(
                 f"""SELECT scenario_id, name, description, is_base, status,
                            run_at, error_msg, created_by, created_at,
@@ -5405,7 +5417,7 @@ async def run_abc_classification(config_id: int):
     """Run a single ABC classification."""
     _require_db()
     from classification.abc import ABCClassifier
-    classifier = ABCClassifier()
+    classifier = ABCClassifier(".")
     try:
         summary = classifier.run_classification(config_id)
         return summary
@@ -5418,7 +5430,7 @@ async def run_all_abc_classifications():
     """Run all active ABC classifications."""
     _require_db()
     from classification.abc import ABCClassifier
-    classifier = ABCClassifier()
+    classifier = ABCClassifier(".")
     summaries = classifier.run_all_active()
     return {"ran": len(summaries), "summaries": summaries}
 
@@ -5507,7 +5519,7 @@ async def check_price_available():
     """Check if price data is available for the 'value' metric."""
     _require_db()
     from classification.abc import ABCClassifier
-    classifier = ABCClassifier()
+    classifier = ABCClassifier(".")
     return classifier.check_price_available()
 
 
@@ -6474,6 +6486,1231 @@ async def delete_all_adjustments(unique_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(exc))
     finally:
         conn.close()
+
+
+# ===========================================================================
+# CAUSAL FORECASTING endpoints  (Phase 1 + 2 + 3)
+# ===========================================================================
+
+from fastapi import UploadFile, File
+
+
+# ── Asset types ──────────────────────────────────────────────────────────
+
+@app.get("/api/causal/asset-types")
+async def get_causal_asset_types():
+    """List all causal asset types."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT asset_type_id, code, name, removal_drivers,
+                       aog_cost_per_day, mean_aog_days, updated_at
+                FROM {schema}.causal_asset_type
+                ORDER BY code
+            """)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        result = []
+        for row in rows:
+            r = dict(zip(cols, row))
+            if r.get("updated_at"):
+                r["updated_at"] = r["updated_at"].isoformat()
+            result.append(r)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/causal/asset-types")
+async def upsert_causal_asset_type(request: Request):
+    """Create or update a causal asset type."""
+    _require_db()
+    body = await request.json()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                INSERT INTO {schema}.causal_asset_type
+                    (code, name, removal_drivers, aog_cost_per_day, mean_aog_days)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (code) DO UPDATE SET
+                    name             = EXCLUDED.name,
+                    removal_drivers  = EXCLUDED.removal_drivers,
+                    aog_cost_per_day = EXCLUDED.aog_cost_per_day,
+                    mean_aog_days    = EXCLUDED.mean_aog_days,
+                    updated_at       = NOW()
+                RETURNING asset_type_id, code, name
+            """, (
+                body["code"], body.get("name"),
+                body.get("removal_drivers", ["hours", "cycles"]),
+                float(body.get("aog_cost_per_day", 0.0)),
+                float(body.get("mean_aog_days", 1.0)),
+            ))
+            row = cur.fetchone()
+        conn.commit()
+        return {"asset_type_id": row[0], "code": row[1], "name": row[2]}
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+# ── BOM management ───────────────────────────────────────────────────────
+
+@app.get("/api/causal/bom")
+async def get_causal_bom(asset_type_id: Optional[int] = Query(None)):
+    """List BOM lines, optionally filtered by asset_type_id."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        where = f"WHERE b.asset_type_id = {asset_type_id}" if asset_type_id else ""
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT b.bom_id, b.asset_type_id, b.item_id, b.qty_per_asset,
+                       b.removal_driver, b.mdfh_override, b.is_lru,
+                       b.repair_yield, b.parent_bom_id,
+                       i.name AS item_name,
+                       COALESCE(b.mdfh_override, m.mdfh_mean, 0.0) AS mdfh_mean,
+                       COALESCE(m.mdfh_stddev, 0.0) AS mdfh_stddev
+                FROM {schema}.causal_bom b
+                LEFT JOIN {schema}.item i ON i.id = b.item_id
+                LEFT JOIN {schema}.causal_mdfh m ON m.item_id = b.item_id
+                    AND m.asset_type_id = b.asset_type_id
+                    AND m.removal_driver = b.removal_driver
+                {where}
+                ORDER BY b.asset_type_id, b.item_id
+            """)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/causal/bom")
+async def upsert_causal_bom(request: Request):
+    """Upsert a BOM line."""
+    _require_db()
+    body = await request.json()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                INSERT INTO {schema}.causal_bom
+                    (asset_type_id, item_id, qty_per_asset, removal_driver,
+                     mdfh_override, is_lru, repair_yield, parent_bom_id)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (asset_type_id, item_id) DO UPDATE SET
+                    qty_per_asset  = EXCLUDED.qty_per_asset,
+                    removal_driver = EXCLUDED.removal_driver,
+                    mdfh_override  = EXCLUDED.mdfh_override,
+                    is_lru         = EXCLUDED.is_lru,
+                    repair_yield   = EXCLUDED.repair_yield,
+                    parent_bom_id  = EXCLUDED.parent_bom_id,
+                    updated_at     = NOW()
+                RETURNING bom_id
+            """, (
+                body["asset_type_id"], body["item_id"],
+                float(body.get("qty_per_asset", 1.0)), body.get("removal_driver", "hours"),
+                body.get("mdfh_override"), body.get("is_lru", True),
+                float(body.get("repair_yield", 1.0)), body.get("parent_bom_id"),
+            ))
+            bom_id = cur.fetchone()[0]
+        conn.commit()
+        return {"bom_id": bom_id}
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/causal/bom/{bom_id}")
+async def delete_causal_bom(bom_id: int):
+    """Delete a BOM line."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {schema}.causal_bom WHERE bom_id = %s", (bom_id,))
+            deleted = cur.rowcount
+        conn.commit()
+        if deleted == 0:
+            raise HTTPException(status_code=404, detail="BOM line not found")
+        return {"status": "ok", "deleted": bom_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/causal/bom/explosion")
+async def get_bom_explosion(asset_type_id: int = Query(...),
+                              scenario_id: int = Query(0)):
+    """BOM explosion preview: total fleet demand rate per part per period."""
+    _require_db()
+    try:
+        from causal.bom import load_bom, load_effectivity, build_effective_bom
+        from causal.fleet import load_fleet_plan
+        from causal.demand_generator import generate_demand
+
+        bom_df   = load_bom(asset_type_ids=[asset_type_id])
+        fleet_df = load_fleet_plan(scenario_id=scenario_id)
+        eff_df   = load_effectivity()
+        eff_bom  = build_effective_bom(fleet_df, bom_df, eff_df)
+
+        if fleet_df.empty or eff_bom.empty:
+            return []
+
+        import pandas as pd
+        sched = pd.DataFrame(columns=["item_id", "site_id", "period_start", "scheduled_demand"])
+        demand_df = generate_demand(eff_bom, fleet_df, sched, scenario_id)
+
+        conn = get_conn()
+        schema = get_schema()
+        try:
+            item_names = pd.read_sql(f"SELECT id AS item_id, name FROM {schema}.item", conn)
+        finally:
+            conn.close()
+
+        if not demand_df.empty:
+            demand_df = demand_df.merge(item_names, on="item_id", how="left")
+            agg = demand_df.groupby(["item_id", "name", "removal_driver"]).agg(
+                demand_rate_per_period=("demand_mean", "mean"),
+                demand_stddev=("demand_stddev", "mean"),
+            ).reset_index()
+            return agg.to_dict(orient="records")
+        return []
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Effectivity ──────────────────────────────────────────────────────────
+
+@app.get("/api/causal/effectivity")
+async def get_causal_effectivity(asset_id: Optional[str] = Query(None),
+                                   asset_type_id: Optional[int] = Query(None)):
+    """List effectivity overrides."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        clauses, params = [], []
+        if asset_id:
+            clauses.append("asset_id = %s")
+            params.append(asset_id)
+        if asset_type_id:
+            clauses.append("asset_type_id = %s")
+            params.append(asset_type_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT effectivity_id, asset_id, asset_type_id, item_id,
+                       effective, qty_override, effective_from, effective_to, sb_reference
+                FROM {schema}.causal_effectivity {where}
+                ORDER BY asset_id, item_id
+            """, params or None)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/causal/effectivity")
+async def upsert_causal_effectivity(request: Request):
+    """Upsert per-tail effectivity override."""
+    _require_db()
+    body = await request.json()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                INSERT INTO {schema}.causal_effectivity
+                    (asset_id, asset_type_id, item_id, effective, qty_override,
+                     effective_from, effective_to, sb_reference)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (asset_id, item_id) DO UPDATE SET
+                    effective      = EXCLUDED.effective,
+                    qty_override   = EXCLUDED.qty_override,
+                    effective_from = EXCLUDED.effective_from,
+                    effective_to   = EXCLUDED.effective_to,
+                    sb_reference   = EXCLUDED.sb_reference,
+                    updated_at     = NOW()
+                RETURNING effectivity_id
+            """, (
+                body["asset_id"], body["asset_type_id"], body["item_id"],
+                body.get("effective", True), body.get("qty_override"),
+                body.get("effective_from"), body.get("effective_to"),
+                body.get("sb_reference"),
+            ))
+            eid = cur.fetchone()[0]
+        conn.commit()
+        return {"effectivity_id": eid}
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+# ── Fleet plan ───────────────────────────────────────────────────────────
+
+@app.get("/api/causal/fleet-plan")
+async def get_causal_fleet_plan(
+    scenario_id: int = Query(0),
+    site_id: Optional[int] = Query(None),
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+    page: int = Query(1),
+    page_size: int = Query(200),
+):
+    """List fleet plan entries with optional filters."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        clauses = ["scenario_id = %s"]
+        params: list = [scenario_id]
+        if site_id:
+            clauses.append("site_id = %s")
+            params.append(site_id)
+        if from_date:
+            clauses.append("period_start >= %s")
+            params.append(from_date)
+        if to_date:
+            clauses.append("period_end <= %s")
+            params.append(to_date)
+        where = " AND ".join(clauses)
+        offset = (page - 1) * page_size
+        params.extend([page_size, offset])
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT fleet_plan_id, scenario_id, asset_id, asset_type_id,
+                       site_id, period_start, period_end, util_hours, util_cycles,
+                       util_landings, util_calendar_days, is_active
+                FROM {schema}.causal_fleet_plan
+                WHERE {where}
+                ORDER BY period_start, asset_id
+                LIMIT %s OFFSET %s
+            """, params)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        result = []
+        for row in rows:
+            r = dict(zip(cols, row))
+            for k in ("period_start", "period_end"):
+                if r.get(k) and hasattr(r[k], "isoformat"):
+                    r[k] = r[k].isoformat()
+            result.append(r)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/causal/fleet-plan")
+async def upsert_fleet_plan_rows(request: Request):
+    """Upsert fleet plan rows (single row or list)."""
+    _require_db()
+    body = await request.json()
+    rows = body if isinstance(body, list) else [body]
+    conn = get_conn()
+    schema = get_schema()
+    inserted = 0
+    try:
+        with conn.cursor() as cur:
+            for row in rows:
+                cur.execute(f"""
+                    INSERT INTO {schema}.causal_fleet_plan
+                        (scenario_id, asset_id, asset_type_id, site_id,
+                         period_start, period_end, util_hours, util_cycles,
+                         util_landings, util_calendar_days, is_active)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT DO NOTHING
+                """, (
+                    int(row.get("scenario_id", 0)), row["asset_id"],
+                    int(row["asset_type_id"]), int(row["site_id"]),
+                    row["period_start"], row["period_end"],
+                    float(row.get("util_hours", 0.0)),
+                    float(row.get("util_cycles", 0.0)),
+                    float(row.get("util_landings", 0.0)),
+                    float(row.get("util_calendar_days", 0.0)),
+                    bool(row.get("is_active", True)),
+                ))
+                inserted += 1
+        conn.commit()
+        return {"rows_inserted": inserted}
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+# ── MDFH ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/causal/mdfh")
+async def get_causal_mdfh(item_id: Optional[int] = Query(None),
+                           asset_type_id: Optional[int] = Query(None)):
+    """List fitted MDFH values."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        clauses, params = [], []
+        if item_id:
+            clauses.append("item_id = %s")
+            params.append(item_id)
+        if asset_type_id:
+            clauses.append("asset_type_id = %s")
+            params.append(asset_type_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT mdfh_id, item_id, asset_type_id, removal_driver,
+                       mdfh_mean, mdfh_stddev, n_observations, fit_method,
+                       fitted_at, updated_at
+                FROM {schema}.causal_mdfh {where}
+                ORDER BY item_id, asset_type_id
+            """, params or None)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        result = []
+        for row in rows:
+            r = dict(zip(cols, row))
+            for k in ("fitted_at", "updated_at"):
+                if r.get(k) and hasattr(r[k], "isoformat"):
+                    r[k] = r[k].isoformat()
+            result.append(r)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/causal/mdfh/fit")
+async def fit_mdfh_endpoint(request: Request):
+    """Trigger MLE MDFH fitting from demand_actuals. Returns job_id."""
+    from api.auth import get_current_user as auth_get_current_user
+
+    user = auth_get_current_user(request)
+    if not _user_can_run_process(user):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    _require_db()
+
+    job_id = str(uuid.uuid4())
+
+    def _run():
+        try:
+            from causal.mdfh_fitter import fit_from_demand_actuals
+            n = fit_from_demand_actuals()
+            pipeline_jobs[job_id]["status"] = "completed"
+            pipeline_jobs[job_id]["result"] = {"rows_written": n}
+        except Exception as exc:
+            pipeline_jobs[job_id]["status"] = "failed"
+            pipeline_jobs[job_id]["error"] = str(exc)
+
+    pipeline_jobs[job_id] = {"status": "running", "started_at": datetime.utcnow().isoformat()}
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.post("/api/causal/mdfh/fit-bayesian")
+async def fit_mdfh_bayesian_endpoint(request: Request):
+    """
+    Bayesian (Gamma-Poisson conjugate) MDFH update.
+    Loads OEM priors from causal_mdfh where fit_method='oem',
+    loads removal observations from demand_actuals,
+    writes posterior back to causal_mdfh (fit_method='bayesian').
+    Returns job_id.
+    """
+    from api.auth import get_current_user as auth_get_current_user
+
+    user = auth_get_current_user(request)
+    if not _user_can_run_process(user):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    _require_db()
+
+    body = await request.json()
+    item_ids      = body.get("item_ids")
+    asset_type_ids = body.get("asset_type_ids")
+
+    job_id = str(uuid.uuid4())
+
+    def _run():
+        try:
+            from causal.mdfh_fitter import fit_mdfh_bayesian, save_mdfh
+            import pandas as pd
+            conn  = get_conn()
+            schema = get_schema()
+            # Load OEM priors
+            clauses, params = ["fit_method = 'oem'"], []
+            if item_ids:
+                ph = ",".join(["%s"] * len(item_ids))
+                clauses.append(f"item_id IN ({ph})")
+                params.extend(item_ids)
+            if asset_type_ids:
+                ph = ",".join(["%s"] * len(asset_type_ids))
+                clauses.append(f"asset_type_id IN ({ph})")
+                params.extend(asset_type_ids)
+            where = " AND ".join(clauses)
+            prior_df = pd.read_sql(
+                f"SELECT item_id, asset_type_id, removal_driver, mdfh_mean, mdfh_stddev "
+                f"FROM {schema}.causal_mdfh WHERE {where}",
+                conn, params=params or None
+            )
+            # Build removals proxy from demand_actuals
+            removals_df = pd.read_sql(
+                f"SELECT item_id, site_id AS asset_type_id, "
+                f"'hours' AS removal_driver, qty AS removal_qty, 1.0 AS exposure_units "
+                f"FROM {schema}.demand_actuals WHERE qty > 0",
+                conn
+            )
+            conn.close()
+
+            if prior_df.empty or removals_df.empty:
+                pipeline_jobs[job_id]["status"] = "completed"
+                pipeline_jobs[job_id]["result"] = {"rows_written": 0, "note": "no data"}
+                return
+
+            posterior_df = fit_mdfh_bayesian(removals_df, prior_df)
+            n = save_mdfh(posterior_df)
+            pipeline_jobs[job_id]["status"] = "completed"
+            pipeline_jobs[job_id]["result"] = {"rows_written": n}
+        except Exception as exc:
+            pipeline_jobs[job_id]["status"] = "failed"
+            pipeline_jobs[job_id]["error"] = str(exc)
+
+    pipeline_jobs[job_id] = {"status": "running", "started_at": datetime.utcnow().isoformat()}
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "running"}
+
+
+# ── Maintenance calendar ──────────────────────────────────────────────────
+
+@app.get("/api/causal/maintenance-calendar")
+async def get_maintenance_calendar(
+    scenario_id: int = Query(0),
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+):
+    """List planned maintenance calendar events."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        clauses = ["scenario_id = %s"]
+        params: list = [scenario_id]
+        if from_date:
+            clauses.append("planned_date >= %s")
+            params.append(from_date)
+        if to_date:
+            clauses.append("planned_date <= %s")
+            params.append(to_date)
+        where = " AND ".join(clauses)
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT event_id, asset_id, asset_type_id, site_id, check_type,
+                       planned_date, duration_days, scenario_id
+                FROM {schema}.causal_maintenance_calendar
+                WHERE {where}
+                ORDER BY planned_date
+            """, params)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        result = []
+        for row in rows:
+            r = dict(zip(cols, row))
+            if r.get("planned_date") and hasattr(r["planned_date"], "isoformat"):
+                r["planned_date"] = r["planned_date"].isoformat()
+            result.append(r)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/causal/maintenance-calendar")
+async def upsert_maintenance_calendar(request: Request):
+    """Upsert maintenance calendar events."""
+    _require_db()
+    body = await request.json()
+    rows = body if isinstance(body, list) else [body]
+    conn = get_conn()
+    schema = get_schema()
+    inserted = 0
+    try:
+        with conn.cursor() as cur:
+            for row in rows:
+                cur.execute(f"""
+                    INSERT INTO {schema}.causal_maintenance_calendar
+                        (asset_id, asset_type_id, site_id, check_type,
+                         planned_date, duration_days, scenario_id)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT DO NOTHING
+                """, (
+                    row["asset_id"], int(row["asset_type_id"]), int(row["site_id"]),
+                    row["check_type"], row["planned_date"],
+                    int(row.get("duration_days", 1)),
+                    int(row.get("scenario_id", 0)),
+                ))
+                inserted += 1
+        conn.commit()
+        return {"rows_inserted": inserted}
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/causal/task-cards")
+async def get_task_cards(asset_type_id: Optional[int] = Query(None)):
+    """List task card library entries."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        where = f"WHERE asset_type_id = {asset_type_id}" if asset_type_id else ""
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT task_card_id, check_type, asset_type_id, item_id,
+                       qty_per_event, is_mandatory
+                FROM {schema}.causal_task_cards {where}
+                ORDER BY check_type
+            """)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/causal/task-cards")
+async def upsert_task_card(request: Request):
+    """Upsert a task card."""
+    _require_db()
+    body = await request.json()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                INSERT INTO {schema}.causal_task_cards
+                    (check_type, asset_type_id, item_id, qty_per_event, is_mandatory)
+                VALUES (%s,%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING
+                RETURNING task_card_id
+            """, (
+                body["check_type"], body.get("asset_type_id"),
+                int(body["item_id"]), float(body.get("qty_per_event", 1.0)),
+                bool(body.get("is_mandatory", True)),
+            ))
+            row = cur.fetchone()
+        conn.commit()
+        return {"task_card_id": row[0] if row else None}
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+# ── Scenarios ────────────────────────────────────────────────────────────
+
+class CausalScenarioIn(BaseModel):
+    name: str
+    description: Optional[str] = None
+    is_base: bool = False
+    fleet_overrides: Optional[Dict[str, Any]] = None
+    mdfh_overrides: Optional[Dict[str, Any]] = None
+    linked_meio_scenario_id: Optional[int] = None
+
+
+class CausalRunRequest(BaseModel):
+    scenario_ids: List[int]
+    feed_meio: bool = False
+    horizon_periods: int = 24
+
+
+@app.get("/api/causal/scenarios")
+async def get_causal_scenarios():
+    """List all causal scenarios."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT scenario_id, name, description, is_base, created_by,
+                       created_at, fleet_overrides, mdfh_overrides,
+                       linked_meio_scenario_id
+                FROM {schema}.causal_scenarios
+                ORDER BY scenario_id
+            """)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        result = []
+        for row in rows:
+            r = dict(zip(cols, row))
+            if r.get("created_at") and hasattr(r["created_at"], "isoformat"):
+                r["created_at"] = r["created_at"].isoformat()
+            result.append(r)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/causal/scenarios", status_code=201)
+async def create_causal_scenario(body: CausalScenarioIn, request: Request):
+    """Create a new causal scenario."""
+    from api.auth import get_current_user as auth_get_current_user
+    user = auth_get_current_user(request)
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                INSERT INTO {schema}.causal_scenarios
+                    (name, description, is_base, created_by,
+                     fleet_overrides, mdfh_overrides, linked_meio_scenario_id)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                RETURNING scenario_id
+            """, (
+                body.name, body.description, body.is_base,
+                user.get("email", "ui"),
+                json.dumps(body.fleet_overrides or {}),
+                json.dumps(body.mdfh_overrides or {}),
+                body.linked_meio_scenario_id,
+            ))
+            sid = cur.fetchone()[0]
+        conn.commit()
+        return {"scenario_id": sid, "name": body.name}
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.put("/api/causal/scenarios/{scenario_id}")
+async def update_causal_scenario(scenario_id: int, body: CausalScenarioIn, request: Request):
+    """Update a causal scenario."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                UPDATE {schema}.causal_scenarios SET
+                    name                    = %s,
+                    description             = %s,
+                    is_base                 = %s,
+                    fleet_overrides         = %s,
+                    mdfh_overrides          = %s,
+                    linked_meio_scenario_id = %s
+                WHERE scenario_id = %s
+                RETURNING scenario_id
+            """, (
+                body.name, body.description, body.is_base,
+                json.dumps(body.fleet_overrides or {}),
+                json.dumps(body.mdfh_overrides or {}),
+                body.linked_meio_scenario_id, scenario_id,
+            ))
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Scenario not found")
+        conn.commit()
+        return {"scenario_id": scenario_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/causal/scenarios/{scenario_id}")
+async def delete_causal_scenario(scenario_id: int):
+    """Delete a causal scenario."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {schema}.causal_scenarios WHERE scenario_id = %s",
+                        (scenario_id,))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Scenario not found")
+        conn.commit()
+        return {"status": "ok", "deleted": scenario_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/causal/scenarios/run")
+async def run_causal_scenarios_endpoint(body: CausalRunRequest, request: Request):
+    """Run selected causal scenarios. Returns job_id."""
+    from api.auth import get_current_user as auth_get_current_user
+    user = auth_get_current_user(request)
+    if not _user_can_run_process(user):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    _require_db()
+
+    job_id = str(uuid.uuid4())
+
+    def _run():
+        try:
+            from causal.scenario_runner import run_causal_scenarios
+            result = run_causal_scenarios(
+                body.scenario_ids,
+                horizon_periods=body.horizon_periods,
+                feed_meio=body.feed_meio,
+            )
+            pipeline_jobs[job_id]["status"] = "completed"
+            pipeline_jobs[job_id]["result"] = result
+        except Exception as exc:
+            pipeline_jobs[job_id]["status"] = "failed"
+            pipeline_jobs[job_id]["error"] = str(exc)
+
+    pipeline_jobs[job_id] = {"status": "running", "started_at": datetime.utcnow().isoformat()}
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "running"}
+
+
+# ── Results ──────────────────────────────────────────────────────────────
+
+@app.get("/api/causal/results")
+async def get_causal_results(
+    scenario_id: int = Query(...),
+    item_id: Optional[int] = Query(None),
+    site_id: Optional[int] = Query(None),
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+    page: int = Query(1),
+    page_size: int = Query(500),
+):
+    """Query causal demand results with filters."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        clauses = ["scenario_id = %s"]
+        params: list = [scenario_id]
+        if item_id:
+            clauses.append("item_id = %s")
+            params.append(item_id)
+        if site_id:
+            clauses.append("site_id = %s")
+            params.append(site_id)
+        if from_date:
+            clauses.append("period_start >= %s")
+            params.append(from_date)
+        if to_date:
+            clauses.append("period_start <= %s")
+            params.append(to_date)
+        where = " AND ".join(clauses)
+        offset = (page - 1) * page_size
+        params.extend([page_size, offset])
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT scenario_id, item_id, site_id, period_start,
+                       demand_mean, demand_stddev, scheduled_demand,
+                       unscheduled_demand, removal_driver
+                FROM {schema}.causal_results
+                WHERE {where}
+                ORDER BY period_start, item_id, site_id
+                LIMIT %s OFFSET %s
+            """, params)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        result = []
+        for row in rows:
+            r = dict(zip(cols, row))
+            if r.get("period_start") and hasattr(r["period_start"], "isoformat"):
+                r["period_start"] = r["period_start"].isoformat()
+            result.append(r)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/causal/results/summary")
+async def get_causal_results_summary(scenario_ids: str = Query(...)):
+    """Aggregate causal results summary per (scenario, item, site)."""
+    _require_db()
+    try:
+        ids = [int(x) for x in scenario_ids.split(",")]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="scenario_ids must be comma-separated ints")
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        ph = ",".join(["%s"] * len(ids))
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT scenario_id, item_id, site_id,
+                       SUM(demand_mean) AS total_demand,
+                       MAX(demand_mean) AS peak_demand,
+                       removal_driver
+                FROM {schema}.causal_results
+                WHERE scenario_id IN ({ph})
+                GROUP BY scenario_id, item_id, site_id, removal_driver
+                ORDER BY total_demand DESC
+                LIMIT 1000
+            """, ids)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/causal/results/compare")
+async def compare_causal_results(scenario_ids: str = Query(...)):
+    """Side-by-side demand comparison across scenarios."""
+    _require_db()
+    try:
+        ids = [int(x) for x in scenario_ids.split(",")]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="scenario_ids must be comma-separated ints")
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        ph = ",".join(["%s"] * len(ids))
+        import pandas as pd
+        df = pd.read_sql(f"""
+            SELECT scenario_id, item_id, site_id, SUM(demand_mean) AS total_demand
+            FROM {schema}.causal_results
+            WHERE scenario_id IN ({ph})
+            GROUP BY scenario_id, item_id, site_id
+        """, conn, params=ids)
+    finally:
+        conn.close()
+
+    if df.empty:
+        return []
+
+    pivot = df.pivot_table(
+        index=["item_id", "site_id"],
+        columns="scenario_id",
+        values="total_demand",
+        aggfunc="sum",
+    ).reset_index()
+    pivot.columns = [str(c) for c in pivot.columns]
+    return pivot.fillna(0.0).to_dict(orient="records")
+
+
+# ── Phase 2: MC uncertainty endpoint ─────────────────────────────────────
+
+@app.post("/api/causal/uncertainty")
+async def compute_causal_uncertainty_endpoint(request: Request):
+    """
+    Run Monte-Carlo uncertainty propagation via the Rust MEIO optimizer.
+    Body: {params: [{item_id, site_id, scenario_id, util_mean, util_stddev,
+                      mdfh_mean, mdfh_stddev, scheduled_demand}],
+           n_samples: 1000}
+    Returns: [{item_id, site_id, scenario_id, demand_mean, demand_stddev,
+               demand_cv, distribution_json}]
+    """
+    try:
+        import meio_optimizer
+        body = await request.json()
+        params = body.get("params", [])
+        n_samples = int(body.get("n_samples", 1000))
+        result_json = meio_optimizer.compute_causal_uncertainty(
+            json.dumps(params), n_samples
+        )
+        return json.loads(result_json)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Phase 2: Pooling ──────────────────────────────────────────────────────
+
+@app.post("/api/causal/pooling/run")
+async def run_pooling_analysis_endpoint(request: Request):
+    """Run multi-site pooling analysis for selected scenarios. Returns job_id."""
+    from api.auth import get_current_user as auth_get_current_user
+    user = auth_get_current_user(request)
+    if not _user_can_run_process(user):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    _require_db()
+
+    body = await request.json()
+    scenario_ids = body.get("scenario_ids", [])
+    target_fill_rate = float(body.get("target_fill_rate", 0.95))
+    local_lt_days = float(body.get("local_lt_days", 7.0))
+    hub_lt_days = float(body.get("hub_to_spoke_lt_days", 2.0))
+
+    job_id = str(uuid.uuid4())
+
+    def _run():
+        try:
+            from causal.pooling import run_pooling_analysis, save_pooling_recommendations
+            recs = run_pooling_analysis(
+                scenario_ids, target_fill_rate, local_lt_days, hub_lt_days
+            )
+            n = save_pooling_recommendations(recs)
+            pipeline_jobs[job_id]["status"] = "completed"
+            pipeline_jobs[job_id]["result"] = {"recommendations_saved": n}
+        except Exception as exc:
+            pipeline_jobs[job_id]["status"] = "failed"
+            pipeline_jobs[job_id]["error"] = str(exc)
+
+    pipeline_jobs[job_id] = {"status": "running", "started_at": datetime.utcnow().isoformat()}
+    threading.Thread(target=_run, daemon=True).start()
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/api/causal/pooling/recommendations")
+async def get_pooling_recommendations(
+    scenario_id: int = Query(...),
+    item_id: Optional[int] = Query(None),
+    strategy: Optional[str] = Query(None),
+    limit: int = Query(500),
+):
+    """Get pooling recommendations for a scenario."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        clauses = ["scenario_id = %s"]
+        params: list = [scenario_id]
+        if item_id:
+            clauses.append("item_id = %s")
+            params.append(item_id)
+        if strategy:
+            clauses.append("recommended_strategy = %s")
+            params.append(strategy)
+        where = " AND ".join(clauses)
+        params.append(limit)
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT scenario_id, item_id, hub_site_id, n_sites,
+                       local_investment, pooled_investment, savings_pct,
+                       recommended_strategy, run_at
+                FROM {schema}.causal_pooling_recommendations
+                WHERE {where}
+                ORDER BY savings_pct DESC
+                LIMIT %s
+            """, params)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        result = []
+        for row in rows:
+            r = dict(zip(cols, row))
+            if r.get("run_at") and hasattr(r["run_at"], "isoformat"):
+                r["run_at"] = r["run_at"].isoformat()
+            result.append(r)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+# ── Phase 3: AOG events ───────────────────────────────────────────────────
+
+@app.get("/api/causal/aog-events")
+async def get_aog_events(
+    asset_type_id: Optional[int] = Query(None),
+    item_id: Optional[int] = Query(None),
+    limit: int = Query(200),
+):
+    """List historical AOG events."""
+    _require_db()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        clauses, params = [], []
+        if asset_type_id:
+            clauses.append("asset_type_id = %s")
+            params.append(asset_type_id)
+        if item_id:
+            clauses.append("item_id = %s")
+            params.append(item_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT event_id, asset_id, asset_type_id, item_id,
+                       event_date, duration_days, cost_actual, notes, created_at
+                FROM {schema}.causal_aog_events {where}
+                ORDER BY event_date DESC
+                LIMIT %s
+            """, params)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        result = []
+        for row in rows:
+            r = dict(zip(cols, row))
+            for k in ("event_date", "created_at"):
+                if r.get(k) and hasattr(r[k], "isoformat"):
+                    r[k] = r[k].isoformat()
+            result.append(r)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/causal/aog-events", status_code=201)
+async def create_aog_event(request: Request):
+    """Record a new AOG event."""
+    _require_db()
+    body = await request.json()
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                INSERT INTO {schema}.causal_aog_events
+                    (asset_id, asset_type_id, item_id, event_date,
+                     duration_days, cost_actual, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                RETURNING event_id
+            """, (
+                body["asset_id"], int(body["asset_type_id"]), int(body["item_id"]),
+                body["event_date"], float(body["duration_days"]),
+                body.get("cost_actual"), body.get("notes", ""),
+            ))
+            eid = cur.fetchone()[0]
+        conn.commit()
+        return {"event_id": eid}
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/causal/aog-events/calibrate")
+async def calibrate_aog_endpoint(request: Request):
+    """Recalibrate aog_cost_per_day and mean_aog_days from historical events."""
+    from api.auth import get_current_user as auth_get_current_user
+    user = auth_get_current_user(request)
+    if not _user_can_run_process(user):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    _require_db()
+    try:
+        from causal.aog import calibrate_from_aog_events
+        results = calibrate_from_aog_events()
+        return {"asset_types_updated": len(results), "results": results}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/causal/aog/criticality")
+async def get_aog_criticality(asset_type_id: Optional[int] = Query(None)):
+    """Preview AOG criticality multipliers per item."""
+    _require_db()
+    try:
+        from causal.aog import compute_aog_criticality
+        df = compute_aog_criticality(
+            asset_type_ids=[asset_type_id] if asset_type_id else None
+        )
+        if df.empty:
+            return []
+        df = df.sort_values("aog_criticality_multiplier", ascending=False)
+        return df.to_dict(orient="records")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Phase 3: CSV import / export ──────────────────────────────────────────
+
+@app.post("/api/causal/fleet-plan/import")
+async def import_fleet_plan(
+    file: UploadFile = File(...),
+    scenario_id: int = Query(0),
+    request: Request = None,
+):
+    """Import fleet plan from CSV file."""
+    _require_db()
+    csv_bytes = await file.read()
+    from causal.importer import import_fleet_plan_csv
+    result = import_fleet_plan_csv(csv_bytes, scenario_id)
+    return result
+
+
+@app.post("/api/causal/bom/import")
+async def import_bom(file: UploadFile = File(...), request: Request = None):
+    """Import BOM lines from CSV file."""
+    _require_db()
+    csv_bytes = await file.read()
+    from causal.importer import import_bom_csv
+    return import_bom_csv(csv_bytes)
+
+
+@app.post("/api/causal/mdfh/import")
+async def import_mdfh(file: UploadFile = File(...), request: Request = None):
+    """Import OEM MDFH reliability data from CSV file."""
+    _require_db()
+    csv_bytes = await file.read()
+    from causal.importer import import_mdfh_csv
+    return import_mdfh_csv(csv_bytes)
+
+
+@app.post("/api/causal/aog-events/import")
+async def import_aog_events(file: UploadFile = File(...), request: Request = None):
+    """Import historical AOG events from CSV file."""
+    _require_db()
+    csv_bytes = await file.read()
+    from causal.importer import import_aog_events_csv
+    return import_aog_events_csv(csv_bytes)
+
+
+@app.get("/api/causal/templates/{name}")
+async def download_csv_template(name: str):
+    """Download an empty CSV template. name: fleet_plan | bom | mdfh | aog_events"""
+    from causal.importer import generate_csv_template
+    try:
+        csv_bytes = generate_csv_template(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return StreamingResponse(
+        iter([csv_bytes]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{name}_template.csv"'},
+    )
 
 
 if __name__ == "__main__":

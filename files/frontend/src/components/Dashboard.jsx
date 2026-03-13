@@ -685,11 +685,32 @@ export const Dashboard = () => {
         annotations.push({ x: boundary, y: 1, xref: 'x', yref: 'paper', text: 'Forecast \u2192', showarrow: false, xanchor: 'left', yanchor: 'bottom', xshift: 6, font: { size: 10, color: '#2563eb' } });
       }
     }
+    // Compute a sensible default x-axis range: last 36 hist months → end of forecast
+    let xRange = undefined;
+    if (hist.length > 0) {
+      const histEnd = new Date(hist[hist.length - 1].date);
+      const rangeStart = new Date(histEnd);
+      rangeStart.setMonth(rangeStart.getMonth() - 35); // 36 months of history
+      const rangeEnd = fc.length > 0
+        ? new Date(fc[fc.length - 1].date)
+        : histEnd;
+      // Only apply range if forecast data spans unreasonably far (> 30 months from hist end)
+      const fcSpanMonths = fc.length > 0
+        ? (new Date(fc[fc.length - 1].date) - new Date(fc[0].date)) / (1000 * 60 * 60 * 24 * 30)
+        : 0;
+      if (fcSpanMonths > 30 || fc.some(d => new Date(d.date) < new Date(hist[0].date))) {
+        // Narrow the forecast to only 24 months past hist end
+        const capEnd = new Date(histEnd);
+        capEnd.setMonth(capEnd.getMonth() + 24);
+        xRange = [rangeStart.toISOString().slice(0, 10), capEnd.toISOString().slice(0, 10)];
+      }
+    }
     return {
       data: traces,
       layout: {
         ...plotlyBase, height: 320, margin: { t: 20, r: 20, b: 45, l: 70 },
-        xaxis: { ...plotlyBase.xaxis, type: 'date', tickformat: '%b %Y', tickangle: -30 },
+        xaxis: { ...plotlyBase.xaxis, type: 'date', tickformat: '%b %Y', tickangle: -30,
+                 ...(xRange ? { range: xRange } : {}) },
         yaxis: { ...plotlyBase.yaxis, title: { text: 'Total Demand', standoff: 10 }, rangemode: 'tozero' },
         legend: { orientation: 'h', y: -0.18, font: { size: 10 } },
         barmode: 'overlay', shapes, annotations, hovermode: 'x unified',
