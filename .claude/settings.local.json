@@ -101,7 +101,26 @@
       "Bash(npx --no-install vite build)",
       "Bash(Copy-Item -Path \"C:\\\\allDev\\\\ForecastAI2026.01\\\\.claude\\\\.claude\\\\worktrees\\\\beautiful-mcnulty\\\\files\\\\utils\\\\orchestrator.py\" -Destination \"C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\utils\\\\orchestrator.py\" -Force)",
       "Bash(test:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(maturin develop:*)",
+      "Bash(source ../venv/Scripts/activate)",
+      "Bash(/c/allDev/ForecastAI2026.01/files/venv/Scripts/python.exe -c \":*)",
+      "Bash(files/venv/Scripts/python.exe -c \":*)",
+      "Bash(head -10 git stash show stash@{1} --name-only)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(where npm:*)",
+      "mcp__Kapture_Browser_Automation__list_tabs",
+      "mcp__Kapture_Browser_Automation__new_tab",
+      "Bash(node --input-type=module --eval \"import\\(''''./src/components/ScenarioManager.jsx''''\\)\")",
+      "Bash(git -C \"C:/allDev/ForecastAI2026.01/.claude/worktrees/agent-a2563935\" status --short)",
+      "Bash(git -C \"C:/allDev/ForecastAI2026.01/.claude/worktrees/agent-a9c7477c\" status --short)",
+      "Bash(git -C \"C:/allDev/ForecastAI2026.01/.claude/worktrees/agent-ab7a841e\" status --short)",
+      "Bash(git -C \"C:/allDev/ForecastAI2026.01/.claude/worktrees/agent-a3ce8913\" status --short)",
+      "Bash(diff -rq --exclude=*.pyc --exclude=.git --exclude=__pycache__ C:/allDev/ForecastAI2026.01/.claude/worktrees/agent-a3ce8913/files C:/allDev/ForecastAI2026.01/files)",
+      "Bash(__NEW_LINE_d7ac5210787ce51a__ cmp:*)",
+      "Bash(Remove-Item \"C:\\\\allDev\\\\ForecastAI2026.01\\\\create_causal_tables.py\" -Force)",
+      "Bash(head -10 grep -n \"ANALYZE\\\\|analyze.*demand\" C:/allDev/ForecastAI2026.01/files/orchestrator.py)",
+      "Bash(\"venv/Scripts/python.exe\" -c \":*)"
     ]
   }
 }
