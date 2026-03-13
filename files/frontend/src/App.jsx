@@ -43,6 +43,7 @@ const AuditLog = lazy(() => import('./components/AuditLog'));
 const ABCClassification = lazy(() => import('./components/ABCClassification'));
 const ScenarioManager = lazy(() => import('./components/ScenarioManager'));
 const CausalForecasting = lazy(() => import('./components/CausalForecasting'));
+const MeioScenarios = lazy(() => import('./components/MeioScenarios'));
 
 /** Shared loading fallback shown while a lazy chunk downloads */
 const PageSpinner = () => (
@@ -50,6 +51,44 @@ const PageSpinner = () => (
     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
   </div>
 );
+
+/** Collapsible nav group for the sidebar */
+function NavGroup({ label, icon, storageKey, open: sidebarOpen, defaultOpen = true, children }) {
+  const [expanded, setExpanded] = useState(() => {
+    const stored = localStorage.getItem(storageKey);
+    return stored === null ? defaultOpen : stored === 'true';
+  });
+  const toggle = () => setExpanded(prev => {
+    const next = !prev;
+    localStorage.setItem(storageKey, String(next));
+    return next;
+  });
+  return (
+    <div className="mb-0.5">
+      {sidebarOpen ? (
+        <button
+          onClick={toggle}
+          className="flex items-center justify-between w-full px-3 py-1.5 rounded text-[11px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+        >
+          <span className="flex items-center gap-1.5">
+            <span className="text-sm">{icon}</span>
+            {label}
+          </span>
+          <svg className={`w-3 h-3 transition-transform ${expanded ? '' : '-rotate-90'}`} fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z" clipRule="evenodd" />
+          </svg>
+        </button>
+      ) : (
+        <div className="border-t border-gray-100 dark:border-gray-700 my-1" title={label} />
+      )}
+      {(!sidebarOpen || expanded) && (
+        <div className={`space-y-0.5 ${sidebarOpen ? 'pl-1' : ''}`}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
   const location = useLocation();
@@ -115,25 +154,40 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
         </button>
       </div>
 
-      {/* Nav links */}
-      <nav id="sidebar-nav" className="flex-1 p-2 space-y-1 overflow-hidden">
-        {navLink('/', '🏠', 'Dashboard', false, 'nav-dashboard')}
-        {lastSeries
-          ? navLink(`/series/${encodeURIComponent(lastSeries)}`, '📈', lastSeriesLabel || lastSeries, false, 'nav-series')
-          : navLink('/', '📈', 'Time Series', true, 'nav-series')
-        }
-        {navLink('/segments', '🗂️', 'Segments', false, 'nav-segments')}
-        {navLink('/abc', '🏷️', 'Classifications', false, 'nav-abc')}
-        {navLink('/scenarios', '🔀', 'Scenarios', false, 'nav-scenarios')}
-        {navLink('/processes', '⚙️', 'Process Runner', false, 'nav-pipeline')}
-        {navLink('/logs', '📋', 'Process Log', false, 'nav-logs')}
-        {navLink('/settings', '🔧', 'Settings', false, 'nav-settings')}
-        {navLink('/audit', '📝', 'Audit Log', false, 'nav-audit')}
-        {isAdmin && navLink('/users', '👥', 'Users', false, 'nav-users')}
+      {/* Grouped Nav */}
+      <nav id="sidebar-nav" className="flex-1 p-2 overflow-y-auto overflow-x-hidden">
+
+        {/* ── Action ── */}
+        <NavGroup label="Action" icon="🎯" storageKey="nav_group_action" open={open} defaultOpen={true}>
+          {navLink('/', '🏠', 'Dashboard', false, 'nav-dashboard')}
+          {lastSeries
+            ? navLink(`/series/${encodeURIComponent(lastSeries)}`, '📈', lastSeriesLabel || lastSeries, false, 'nav-series')
+            : navLink('/', '📈', 'Time Series', true, 'nav-series')
+          }
+          {navLink('/meio', '📦', 'MEIO Scenarios', false, 'nav-meio')}
+          {navLink('/causal', '⚡', 'Causal', false, 'nav-causal')}
+        </NavGroup>
+
+        {/* ── Configuration ── */}
+        <NavGroup label="Configuration" icon="⚙️" storageKey="nav_group_config" open={open} defaultOpen={true}>
+          {navLink('/segments', '🗂️', 'Segments', false, 'nav-segments')}
+          {navLink('/abc', '🏷️', 'Classifications', false, 'nav-abc')}
+          {navLink('/scenarios', '🔀', 'Scenarios', false, 'nav-scenarios')}
+          {navLink('/settings', '🔧', 'Business Settings', false, 'nav-settings')}
+        </NavGroup>
+
+        {/* ── Admin ── */}
+        <NavGroup label="Admin" icon="🛡️" storageKey="nav_group_admin" open={open} defaultOpen={true}>
+          {navLink('/processes', '▶️', 'Process Runner', false, 'nav-pipeline')}
+          {navLink('/logs', '📋', 'Process Log', false, 'nav-logs')}
+          {navLink('/audit', '📝', 'Audit Log', false, 'nav-audit')}
+          {isAdmin && navLink('/users', '👥', 'Users', false, 'nav-users')}
+        </NavGroup>
+
       </nav>
 
       {/* Tour triggers */}
-      <div className="px-2 pb-1 space-y-0.5">
+      <div className="px-2 pb-1 space-y-0.5 border-t border-gray-100 dark:border-gray-700 pt-1">
         <button
           id="tour-trigger"
           onClick={onStartTour}
@@ -282,6 +336,7 @@ function App() {
               <Route path="/users" element={<UserManagement />} />
               <Route path="/scenarios" element={<ScenarioManager />} />
               <Route path="/causal" element={<CausalForecasting />} />
+              <Route path="/meio" element={<MeioScenarios />} />
               <Route path="/login" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>

@@ -2263,6 +2263,24 @@ def _build_aggregate_demand(uid_set: set | None = None):
                 f"sample val={str(sample_val)[:120]}"
             )
 
+        # Detect the native data frequency from median inter-observation spacing.
+        # This ensures weekly forecast steps land at the right dates (not month offsets).
+        date_diffs = ts_df["date"].sort_values().diff().dt.days.dropna()
+        median_days = float(date_diffs.median()) if not date_diffs.empty else 30
+        if median_days <= 8:
+            _freq_label = "weekly"
+            def _fc_offset(ld, i): return ld + pd.Timedelta(weeks=i + 1)
+        elif median_days <= 35:
+            _freq_label = "monthly"
+            def _fc_offset(ld, i): return ld + pd.DateOffset(months=i + 1)
+        elif median_days <= 100:
+            _freq_label = "quarterly"
+            def _fc_offset(ld, i): return ld + pd.DateOffset(months=(i + 1) * 3)
+        else:
+            _freq_label = "annual"
+            def _fc_offset(ld, i): return ld + pd.DateOffset(years=i + 1)
+        logger.info(f"aggregate-demand: detected frequency={_freq_label} (median_days={median_days:.1f})")
+
         # Count at each filtering step
         n_no_bm, n_no_fc, n_bad_type, n_no_date, n_date_err, n_ok = 0, 0, 0, 0, 0, 0
 
@@ -2270,9 +2288,18 @@ def _build_aggregate_demand(uid_set: set | None = None):
         for uid in included_uids:
             bm = best_map.get(uid) or recommended_map.get(uid)
             if bm is None:
-                n_no_bm += 1
-                continue
+                # Fallback: use any available method for this uid
+                any_key = next((k for k in fc_lookup if k[0] == uid), None)
+                if any_key:
+                    bm = any_key[1]
+                else:
+                    n_no_bm += 1
+                    continue
             pf = fc_lookup.get((uid, bm))
+            if pf is None:
+                # Fallback: try any method for this uid
+                any_key = next((k for k in fc_lookup if k[0] == uid), None)
+                pf = fc_lookup.get(any_key) if any_key else None
             if pf is None:
                 n_no_fc += 1
                 continue
@@ -2293,7 +2320,9 @@ def _build_aggregate_demand(uid_set: set | None = None):
             uid_ok = False
             for i, val in enumerate(pf):
                 try:
-                    fc_date = (last_date + pd.DateOffset(months=i + 1)).strftime("%Y-%m-%d")
+                    fc_ts = _fc_offset(last_date, i)
+                    # Aggregate forecast steps into calendar-month buckets
+                    fc_date = fc_ts.to_period("M").to_timestamp().strftime("%Y-%m-%d")
                     date_sums[fc_date] = date_sums.get(fc_date, 0) + float(val)
                     uid_ok = True
                 except Exception as e:
