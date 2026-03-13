@@ -266,9 +266,21 @@ def init_schema(config_path=None) -> None:
         item_name       TEXT,
         site_name       TEXT,
         unique_id       TEXT
-    ) USING columnstore;
+    );
     CREATE INDEX IF NOT EXISTS idx_demand_unique_id
         ON {schema}.demand_actuals (unique_id);
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.routines
+            WHERE routine_schema = 'mooncake' AND routine_name = 'create_table'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = '{schema}' AND table_name = 'mooncake_demand_actuals'
+        ) THEN
+            EXECUTE 'CALL mooncake.create_table(''mooncake_demand_actuals'', ''demand_actuals'')';
+        END IF;
+    END $$;
 
     -- Outlier corrections stored separately (heap — supports UPDATE)
     CREATE TABLE IF NOT EXISTS {schema}.demand_corrections (
@@ -338,9 +350,21 @@ def init_schema(config_path=None) -> None:
         hyperparameters   JSONB,
         training_time     DOUBLE PRECISION,
         scenario_id       BIGINT NOT NULL DEFAULT 1
-    ) USING columnstore;
+    );
     CREATE INDEX IF NOT EXISTS idx_forecasts_uid_method
         ON {schema}.forecast_results (unique_id, method);
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.routines
+            WHERE routine_schema = 'mooncake' AND routine_name = 'create_table'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = '{schema}' AND table_name = 'mooncake_forecast_results'
+        ) THEN
+            EXECUTE 'CALL mooncake.create_table(''mooncake_forecast_results'', ''forecast_results'')';
+        END IF;
+    END $$;
 
     -- ─── Backtest metrics ────────────────────────────────────────────
 
@@ -367,9 +391,21 @@ def init_schema(config_path=None) -> None:
         aicc              DOUBLE PRECISION,
         metric_source     TEXT DEFAULT 'rolling_window',
         scenario_id       BIGINT NOT NULL DEFAULT 1
-    ) USING columnstore;
+    );
     CREATE INDEX IF NOT EXISTS idx_metrics_uid
         ON {schema}.backtest_metrics (unique_id);
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.routines
+            WHERE routine_schema = 'mooncake' AND routine_name = 'create_table'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = '{schema}' AND table_name = 'mooncake_backtest_metrics'
+        ) THEN
+            EXECUTE 'CALL mooncake.create_table(''mooncake_backtest_metrics'', ''backtest_metrics'')';
+        END IF;
+    END $$;
 
     -- ─── Forecasts by origin (per-step backtest detail) ──────────────
 
@@ -381,11 +417,23 @@ def init_schema(config_path=None) -> None:
         point_forecast    DOUBLE PRECISION,
         actual_value      DOUBLE PRECISION,
         scenario_id       BIGINT NOT NULL DEFAULT 1
-    ) USING columnstore;
+    );
     CREATE INDEX IF NOT EXISTS idx_fbo_uid
         ON {schema}.forecasts_by_origin (unique_id, method);
     CREATE INDEX IF NOT EXISTS idx_fbo_uid_origin
         ON {schema}.forecasts_by_origin (unique_id, forecast_origin);
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.routines
+            WHERE routine_schema = 'mooncake' AND routine_name = 'create_table'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = '{schema}' AND table_name = 'mooncake_forecasts_by_origin'
+        ) THEN
+            EXECUTE 'CALL mooncake.create_table(''mooncake_forecasts_by_origin'', ''forecasts_by_origin'')';
+        END IF;
+    END $$;
 
     -- ─── Series hashes (incremental processing) ──────────────────────
 
@@ -431,9 +479,21 @@ def init_schema(config_path=None) -> None:
         ks_pvalue                DOUBLE PRECISION,
         service_level_quantiles  JSONB,
         scenario_id              BIGINT NOT NULL DEFAULT 1
-    ) USING columnstore;
+    );
     CREATE INDEX IF NOT EXISTS idx_dist_uid
         ON {schema}.fitted_distributions (unique_id, method);
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.routines
+            WHERE routine_schema = 'mooncake' AND routine_name = 'create_table'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = '{schema}' AND table_name = 'mooncake_fitted_distributions'
+        ) THEN
+            EXECUTE 'CALL mooncake.create_table(''mooncake_fitted_distributions'', ''fitted_distributions'')';
+        END IF;
+    END $$;
 
     -- ─── Forecast adjustments (overrides / deltas entered via the UI) ─
 
@@ -772,9 +832,21 @@ def init_schema(config_path=None) -> None:
         unscheduled_demand DOUBLE PRECISION NOT NULL DEFAULT 0.0,
         removal_driver     TEXT,
         run_at             TIMESTAMPTZ DEFAULT NOW()
-    ) USING columnstore;
+    );
     CREATE INDEX IF NOT EXISTS idx_causal_res ON {schema}.causal_results
         (scenario_id, item_id, site_id, period_start);
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.routines
+            WHERE routine_schema = 'mooncake' AND routine_name = 'create_table'
+        ) AND NOT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = '{schema}' AND table_name = 'mooncake_causal_results'
+        ) THEN
+            EXECUTE 'CALL mooncake.create_table(''mooncake_causal_results'', ''causal_results'')';
+        END IF;
+    END $$;
 
     -- 10. Multi-site pooling recommendations (Phase 2)
     CREATE TABLE IF NOT EXISTS {schema}.causal_pooling_recommendations (
