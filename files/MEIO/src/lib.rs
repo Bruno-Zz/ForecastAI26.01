@@ -61,7 +61,8 @@ mod optimizer;
 mod sku;
 mod target;
 
-use crate::config::{GroupTarget, MeioConfig};
+use crate::config::{AssetPoolResult, AssetTarget, GroupTarget, MeioConfig};
+use crate::math::{erlang_b, min_pool_size_loss};
 use crate::optimizer::Optimizer;
 use crate::sku::skus_from_json;
 
@@ -216,6 +217,48 @@ fn fill_rate_for_buffer(
     Ok(fill_rate_for_rop(&dist, &params))
 }
 
+// ── pool_size_for_availability ────────────────────────────────────────────
+
+/// Compute the minimum pool size for each asset target to achieve the
+/// requested `target_availability` using the Erlang-B (loss) formula.
+///
+/// `asset_targets_json` — JSON array of `AssetTarget` objects.
+///
+/// Returns a JSON array of `AssetPoolResult` objects:
+/// `[{"asset_id": "...", "recommended_pool_size": N,
+///    "achieved_availability": 0.97, "investment": 12500.0}, ...]`
+///
+/// This call is **synchronous and fast** (microseconds per asset).
+/// Call it directly from the API without spawning a background job.
+#[pyfunction]
+#[pyo3(signature = (asset_targets_json))]
+fn pool_size_for_availability(asset_targets_json: &str) -> PyResult<String> {
+    let targets: Vec<AssetTarget> = serde_json::from_str(asset_targets_json)
+        .map_err(|e| PyValueError::new_err(format!("Failed to parse asset_targets_json: {e}")))?;
+
+    let results: Vec<AssetPoolResult> = targets
+        .iter()
+        .map(|t| {
+            // Offered load = failure_rate_per_unit × fleet_size × repair_tat_mean
+            // When fleet_size is unknown we use 1 unit as the base (caller scales by fleet).
+            let fleet = t.fleet_size.unwrap_or(1.0).max(1.0);
+            let rho = t.failure_rate_per_unit * fleet * t.repair_tat_mean;
+            let p_shortage_target = 1.0 - t.target_availability;
+            let pool_size = min_pool_size_loss(rho, p_shortage_target);
+            let achieved_availability = 1.0 - erlang_b(pool_size, rho);
+            AssetPoolResult {
+                asset_id: t.asset_id.clone(),
+                recommended_pool_size: pool_size,
+                achieved_availability,
+                investment: pool_size as f64 * t.unit_cost,
+            }
+        })
+        .collect();
+
+    serde_json::to_string(&results)
+        .map_err(|e| PyValueError::new_err(format!("Failed to serialize results: {e}")))
+}
+
 // ── Module definition ─────────────────────────────────────────────────────
 
 /// Python module definition.
@@ -224,6 +267,7 @@ fn meio_optimizer(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_optimization, m)?)?;
     m.add_function(wrap_pyfunction!(run_optimization_batch, m)?)?;
     m.add_function(wrap_pyfunction!(fill_rate_for_buffer, m)?)?;
+    m.add_function(wrap_pyfunction!(pool_size_for_availability, m)?)?;
 
     // Expose version constant
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

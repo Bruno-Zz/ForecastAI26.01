@@ -267,6 +267,8 @@ export const Dashboard = () => {
   const [sparklineData, setSparklineData] = useState({});
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState(null);
+  const [scenarios, setScenarios] = useState([]);
+  const [activeScenarioId, setActiveScenarioId] = useState(1);
 
   const [accuracyPrecisionData, setAccuracyPrecisionData] = useState(null);
   const [selectedAccuracyMethod, setSelectedAccuracyMethod] = useState('');
@@ -432,13 +434,18 @@ export const Dashboard = () => {
 
   const pageSize = 50;
 
+  // Load scenarios
+  useEffect(() => {
+    api.get('/forecast/scenarios').then(r => setScenarios(r.data)).catch(() => {});
+  }, []);
+
   // ── Data loading ──
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => { loadData(); }, [activeScenarioId]);
   const loadData = async () => {
     setLoading(true); setError(null);
     try {
       const [seriesRes, analyticsRes, abcRes] = await Promise.allSettled([
-        api.get('/series', { params: { limit: 50000 } }),
+        api.get('/series', { params: { limit: 50000, scenario_id: activeScenarioId } }),
         api.get('/analytics'),
         api.get('/abc/configurations'),
       ]);
@@ -787,7 +794,28 @@ export const Dashboard = () => {
 
   return (
     <div className="p-4 sm:p-6">
-      <h1 className="text-2xl sm:text-3xl font-bold mb-6 text-gray-900 dark:text-white">Forecasting Dashboard</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+        <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white">Forecasting Dashboard</h1>
+        {scenarios.length > 1 && (
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Scenario:</label>
+            <select
+              value={activeScenarioId}
+              onChange={e => setActiveScenarioId(Number(e.target.value))}
+              className="px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
+            >
+              {scenarios.map(s => (
+                <option key={s.scenario_id} value={s.scenario_id}>
+                  {s.name}{s.is_base ? ' (Base)' : ''}
+                </option>
+              ))}
+            </select>
+            {activeScenarioId !== 1 && (
+              <span className="px-2 py-0.5 text-xs rounded-full bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 font-medium">What-If</span>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Summary Cards */}
       {analytics && (

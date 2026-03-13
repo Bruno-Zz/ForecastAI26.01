@@ -86,7 +86,8 @@ CREATE TABLE IF NOT EXISTS {schema}.detected_outliers (
     correction_method TEXT,
     z_score           DOUBLE PRECISION,
     lower_bound       DOUBLE PRECISION,
-    upper_bound       DOUBLE PRECISION
+    upper_bound       DOUBLE PRECISION,
+    scenario_id       BIGINT NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_outliers_unique_id ON {schema}.detected_outliers (unique_id);
 
@@ -94,7 +95,7 @@ CREATE INDEX IF NOT EXISTS idx_outliers_unique_id ON {schema}.detected_outliers 
 
 CREATE TABLE IF NOT EXISTS {schema}.time_series_characteristics (
     id                           SERIAL PRIMARY KEY,
-    unique_id                    TEXT NOT NULL UNIQUE,
+    unique_id                    TEXT NOT NULL,
     n_observations               INTEGER,
     date_range_start             TEXT,
     date_range_end               TEXT,
@@ -117,9 +118,12 @@ CREATE TABLE IF NOT EXISTS {schema}.time_series_characteristics (
     sufficient_for_ml            BOOLEAN,
     sufficient_for_deep_learning BOOLEAN,
     recommended_methods          JSONB DEFAULT '[]',
-    abc_class                    TEXT
+    abc_class                    TEXT,
+    scenario_id                  BIGINT NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_chars_unique_id ON {schema}.time_series_characteristics (unique_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tsc_uid_scen
+    ON {schema}.time_series_characteristics (unique_id, scenario_id);
 
 -- ─── Forecast results ─────────────────────────────────────────────────
 
@@ -129,7 +133,8 @@ CREATE TABLE IF NOT EXISTS {schema}.forecast_results (
     point_forecast    JSONB,
     quantiles         JSONB,
     hyperparameters   JSONB,
-    training_time     DOUBLE PRECISION
+    training_time     DOUBLE PRECISION,
+    scenario_id       BIGINT NOT NULL DEFAULT 1
 ) USING columnstore;
 CREATE INDEX IF NOT EXISTS idx_forecasts_uid_method ON {schema}.forecast_results (unique_id, method);
 
@@ -156,7 +161,8 @@ CREATE TABLE IF NOT EXISTS {schema}.backtest_metrics (
     aic               DOUBLE PRECISION,
     bic               DOUBLE PRECISION,
     aicc              DOUBLE PRECISION,
-    metric_source     TEXT DEFAULT 'rolling_window'
+    metric_source     TEXT DEFAULT 'rolling_window',
+    scenario_id       BIGINT NOT NULL DEFAULT 1
 ) USING columnstore;
 CREATE INDEX IF NOT EXISTS idx_metrics_uid ON {schema}.backtest_metrics (unique_id);
 
@@ -168,7 +174,8 @@ CREATE TABLE IF NOT EXISTS {schema}.forecasts_by_origin (
     forecast_origin   DATE,
     horizon_step      INTEGER,
     point_forecast    DOUBLE PRECISION,
-    actual_value      DOUBLE PRECISION
+    actual_value      DOUBLE PRECISION,
+    scenario_id       BIGINT NOT NULL DEFAULT 1
 ) USING columnstore;
 CREATE INDEX IF NOT EXISTS idx_fbo_uid ON {schema}.forecasts_by_origin (unique_id, method);
 
@@ -176,14 +183,17 @@ CREATE INDEX IF NOT EXISTS idx_fbo_uid ON {schema}.forecasts_by_origin (unique_i
 
 CREATE TABLE IF NOT EXISTS {schema}.best_method_per_series (
     id                SERIAL PRIMARY KEY,
-    unique_id         TEXT NOT NULL UNIQUE,
+    unique_id         TEXT NOT NULL,
     best_method       TEXT,
     best_score        DOUBLE PRECISION,
     runner_up_method  TEXT,
     runner_up_score   DOUBLE PRECISION,
-    all_rankings      JSONB
+    all_rankings      JSONB,
+    scenario_id       BIGINT NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_bestmethod_uid ON {schema}.best_method_per_series (unique_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bmp_uid_scen
+    ON {schema}.best_method_per_series (unique_id, scenario_id);
 
 -- ─── Fitted distributions (MEIO) ─────────────────────────────────────
 
@@ -197,7 +207,8 @@ CREATE TABLE IF NOT EXISTS {schema}.fitted_distributions (
     params                   JSONB,
     ks_statistic             DOUBLE PRECISION,
     ks_pvalue                DOUBLE PRECISION,
-    service_level_quantiles  JSONB
+    service_level_quantiles  JSONB,
+    scenario_id              BIGINT NOT NULL DEFAULT 1
 ) USING columnstore;
 CREATE INDEX IF NOT EXISTS idx_dist_uid ON {schema}.fitted_distributions (unique_id, method);
 
@@ -385,6 +396,29 @@ CREATE TABLE IF NOT EXISTS {schema}.audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON {schema}.audit_log (entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON {schema}.audit_log (created_at DESC);
+
+-- ─── Forecast scenarios ──────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS {schema}.forecast_scenarios (
+    scenario_id      BIGSERIAL PRIMARY KEY,
+    name             TEXT NOT NULL,
+    description      TEXT,
+    is_base          BOOLEAN NOT NULL DEFAULT FALSE,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    run_at           TIMESTAMPTZ,
+    error_msg        TEXT,
+    created_by       TEXT,
+    created_at       TIMESTAMPTZ DEFAULT NOW(),
+    param_overrides  JSONB NOT NULL DEFAULT '{}',
+    demand_overrides JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_fscen_status
+    ON {schema}.forecast_scenarios (status);
+
+-- Seed base forecast scenario (id=1)
+INSERT INTO {schema}.forecast_scenarios (scenario_id, name, description, is_base, status)
+VALUES (1, 'Base', 'Default scenario — global configuration', TRUE, 'complete')
+ON CONFLICT (scenario_id) DO NOTHING;
 
 -- Seed default "All" segment
 INSERT INTO {schema}.segment (name, description, criteria, is_default)

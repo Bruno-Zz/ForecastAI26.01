@@ -435,8 +435,9 @@ class ForecastOrchestrator:
     Orchestrates the full forecasting pipeline from ETL through distribution fitting.
     """
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: str = None, scenario_id: int = 1):
         """Initialize orchestrator with configuration."""
+        self.scenario_id = scenario_id
         try:
             if config_path:
                 with open(config_path, 'r') as f:
@@ -444,8 +445,13 @@ class ForecastOrchestrator:
             else:
                 raise FileNotFoundError
         except (FileNotFoundError, OSError):
-            from db.db import load_config_from_db
-            self.config = load_config_from_db()
+            try:
+                from db.db import load_config_for_scenario, get_schema
+                schema = get_schema()
+                self.config = load_config_for_scenario(schema, scenario_id)
+            except Exception:
+                from db.db import load_config_from_db
+                self.config = load_config_from_db()
         # Keep config_path so it can be passed to Dask worker functions (picklable)
         self.config_path = config_path
 
@@ -753,14 +759,16 @@ class ForecastOrchestrator:
                 schema = get_schema(config_path)
                 outlier_table = f"{schema}.detected_outliers"
 
-                # Map outlier_df columns to DB columns
-                db_cols = ['unique_id', 'date', 'original_value', 'corrected_value',
+                # Map outlier_df columns to DB columns (scenario_id first)
+                db_cols = ['scenario_id', 'unique_id', 'date', 'original_value', 'corrected_value',
                            'detection_method', 'correction_method', 'z_score',
                            'lower_bound', 'upper_bound']
                 # Build rows from the DataFrame (handle missing columns gracefully)
+                _scenario_id = self.scenario_id
                 rows = []
                 for _, row in outliers_df.iterrows():
                     rows.append((
+                        _scenario_id,
                         str(row.get('unique_id', '')),
                         str(row.get('date', '')),
                         float(row['original_value']) if pd.notna(row.get('original_value')) else None,
@@ -836,9 +844,10 @@ class ForecastOrchestrator:
         self.logger.info("=" * 80)
 
         groups = self._get_param_groups(df['unique_id'].unique(), 'characterization')
+        _scenario_id = self.scenario_id
         if len(groups) == 1 and groups[0][0] is None:
             characteristics_df = self.characterizer.analyze_all(
-                df, id_col='unique_id', date_col='date', value_col='y', save=True
+                df, id_col='unique_id', date_col='date', value_col='y', save=False
             )
         else:
             all_chars = []
@@ -850,17 +859,22 @@ class ForecastOrchestrator:
                 )
                 all_chars.append(chars)
             characteristics_df = pd.concat(all_chars, ignore_index=True)
-            # Save combined results once
-            try:
-                from db.db import bulk_insert, get_schema, jsonb_serialize
-                schema = get_schema(str(self.config_path))
-                cols = list(characteristics_df.columns)
-                rows = [tuple(jsonb_serialize(v) for v in row)
-                        for row in characteristics_df.itertuples(index=False, name=None)]
-                bulk_insert(None, f"{schema}.time_series_characteristics", cols, rows, truncate=True)
-            except Exception as exc:
-                self.logger.error(f"Could not save grouped characteristics: {exc}")
-                raise
+        # Save combined results with scenario_id
+        try:
+            from db.db import bulk_insert, get_schema, jsonb_serialize
+            schema = get_schema(str(self.config_path))
+            # Add scenario_id column to the characteristics dataframe for storage
+            chars_with_scenario = characteristics_df.copy()
+            chars_with_scenario.insert(0, 'scenario_id', _scenario_id)
+            cols = list(chars_with_scenario.columns)
+            rows = [tuple(jsonb_serialize(v) for v in row)
+                    for row in chars_with_scenario.itertuples(index=False, name=None)]
+            bulk_insert(None, f"{schema}.time_series_characteristics", cols, rows,
+                        truncate=(_scenario_id == 1),
+                        delete_where=None if _scenario_id == 1 else f"scenario_id = {_scenario_id}")
+        except Exception as exc:
+            self.logger.error(f"Could not save characteristics: {exc}")
+            raise
 
         # Log summary
         self.logger.info(f"Characterized {len(characteristics_df)} series")
@@ -1177,21 +1191,26 @@ class ForecastOrchestrator:
         try:
             from db.db import bulk_insert, get_schema, jsonb_serialize
             schema = get_schema(str(self.config_path))
+            _scenario_id = self.scenario_id
+
+            # Add scenario_id to forecasts
+            forecasts_with_scenario = forecasts_df.copy()
+            forecasts_with_scenario.insert(0, 'scenario_id', _scenario_id)
 
             # Targeted delete for subset runs (don't wipe all other series)
-            _delete_clause = None
+            _delete_clause = f"scenario_id = {_scenario_id}"
             if series_subset and 'unique_id' in forecasts_df.columns:
                 _uids = list(forecasts_df['unique_id'].unique())
                 _quoted = ", ".join(f"'{s}'" for s in _uids)
-                _delete_clause = f"unique_id IN ({_quoted})"
+                _delete_clause = f"scenario_id = {_scenario_id} AND unique_id IN ({_quoted})"
                 self.logger.info(f"Targeted save: replacing forecasts for {len(_uids)} series only")
 
-            cols = list(forecasts_df.columns)
+            cols = list(forecasts_with_scenario.columns)
             rows = [tuple(jsonb_serialize(v) for v in row)
-                    for row in forecasts_df.itertuples(index=False, name=None)]
+                    for row in forecasts_with_scenario.itertuples(index=False, name=None)]
             n = bulk_insert(None, f"{schema}.forecast_results",
                             cols, rows,
-                            truncate=not series_subset,
+                            truncate=False,
                             delete_where=_delete_clause)
             self.logger.info(f"Forecasts saved to {schema}.forecast_results ({n} rows)")
         except Exception as db_err:
@@ -1438,25 +1457,28 @@ class ForecastOrchestrator:
         # Save outputs to PostgreSQL
         from db.db import bulk_insert, get_schema, jsonb_serialize
         schema = get_schema(str(self.config_path))
+        _scenario_id = self.scenario_id
 
         # When backtesting a subset (all_methods mode), do a targeted delete
         # for the specific series instead of truncating the entire table.
         _series_ids = list(characteristics_df['unique_id'].unique())
         _is_subset = all_methods and len(_series_ids) > 0
-        _delete_clause = None
+        _delete_clause = f"scenario_id = {_scenario_id}"
         if _is_subset:
             _quoted = ", ".join(f"'{s}'" for s in _series_ids)
-            _delete_clause = f"unique_id IN ({_quoted})"
+            _delete_clause = f"scenario_id = {_scenario_id} AND unique_id IN ({_quoted})"
             self.logger.info(f"Targeted save: replacing data for {len(_series_ids)} series only")
 
         if not metrics_df.empty:
             try:
-                cols = list(metrics_df.columns)
+                metrics_with_scenario = metrics_df.copy()
+                metrics_with_scenario.insert(0, 'scenario_id', _scenario_id)
+                cols = list(metrics_with_scenario.columns)
                 rows = [tuple(jsonb_serialize(v) for v in row)
-                        for row in metrics_df.itertuples(index=False, name=None)]
+                        for row in metrics_with_scenario.itertuples(index=False, name=None)]
                 n = bulk_insert(None, f"{schema}.backtest_metrics",
                                 cols, rows,
-                                truncate=not _is_subset,
+                                truncate=False,
                                 delete_where=_delete_clause)
                 self.logger.info(f"Backtest metrics saved to {schema}.backtest_metrics ({n} rows)")
             except Exception as db_err:
@@ -1468,12 +1490,14 @@ class ForecastOrchestrator:
 
         if not origin_df.empty:
             try:
-                cols = list(origin_df.columns)
+                origin_with_scenario = origin_df.copy()
+                origin_with_scenario.insert(0, 'scenario_id', _scenario_id)
+                cols = list(origin_with_scenario.columns)
                 rows = [tuple(jsonb_serialize(v) for v in row)
-                        for row in origin_df.itertuples(index=False, name=None)]
+                        for row in origin_with_scenario.itertuples(index=False, name=None)]
                 n = bulk_insert(None, f"{schema}.forecasts_by_origin",
                                 cols, rows,
-                                truncate=not _is_subset,
+                                truncate=False,
                                 delete_where=_delete_clause)
                 self.logger.info(f"Per-origin forecasts saved to {schema}.forecasts_by_origin ({n} rows)")
             except Exception as db_err:
@@ -1516,20 +1540,25 @@ class ForecastOrchestrator:
         try:
             from db.db import bulk_insert, get_schema, jsonb_serialize
             schema = get_schema(str(self.config_path))
+            _scenario_id = self.scenario_id
 
-            _delete_clause = None
+            # Add scenario_id column
+            best_with_scenario = best_methods_df.copy()
+            best_with_scenario.insert(0, 'scenario_id', _scenario_id)
+
+            _delete_clause = f"scenario_id = {_scenario_id}"
             if series_subset and 'unique_id' in best_methods_df.columns:
                 _uids = list(best_methods_df['unique_id'].unique())
                 _quoted = ", ".join(f"'{s}'" for s in _uids)
-                _delete_clause = f"unique_id IN ({_quoted})"
+                _delete_clause = f"scenario_id = {_scenario_id} AND unique_id IN ({_quoted})"
                 self.logger.info(f"Targeted save: replacing best methods for {len(_uids)} series only")
 
-            cols = list(best_methods_df.columns)
+            cols = list(best_with_scenario.columns)
             rows = [tuple(jsonb_serialize(v) for v in row)
-                    for row in best_methods_df.itertuples(index=False, name=None)]
+                    for row in best_with_scenario.itertuples(index=False, name=None)]
             n = bulk_insert(None, f"{schema}.best_method_per_series",
                             cols, rows,
-                            truncate=not series_subset,
+                            truncate=False,
                             delete_where=_delete_clause)
             self.logger.info(f"Best methods saved to {schema}.best_method_per_series ({n} rows)")
         except Exception as db_err:
@@ -1597,11 +1626,19 @@ class ForecastOrchestrator:
         try:
             from db.db import bulk_insert, get_schema, jsonb_serialize
             schema = get_schema(str(self.config_path))
-            cols = list(distributions_df.columns)
+            _scenario_id = self.scenario_id
+
+            # Add scenario_id column
+            dists_with_scenario = distributions_df.copy()
+            dists_with_scenario.insert(0, 'scenario_id', _scenario_id)
+
+            cols = list(dists_with_scenario.columns)
             rows = [tuple(jsonb_serialize(v) for v in row)
-                    for row in distributions_df.itertuples(index=False, name=None)]
+                    for row in dists_with_scenario.itertuples(index=False, name=None)]
             n = bulk_insert(None, f"{schema}.fitted_distributions",
-                            cols, rows, truncate=True)
+                            cols, rows,
+                            truncate=False,
+                            delete_where=f"scenario_id = {_scenario_id}")
             self.logger.info(f"Distributions saved to {schema}.fitted_distributions ({n} rows)")
         except Exception as db_err:
             self.logger.error(f"Could not save distributions to DB: {db_err}")
@@ -1652,18 +1689,30 @@ class ForecastOrchestrator:
             # Step 1: ETL
             if skip_etl:
                 self.logger.info("Skipping ETL, loading demand data from PostgreSQL...")
-                from db.db import get_conn, get_schema
-                _schema = get_schema(str(self.config_path))
-                _table = f"{_schema}.demand_actuals" if _schema != "public" else "demand_actuals"
-                _conn = get_conn(str(self.config_path))
                 try:
-                    df = pd.read_sql(
-                        f"SELECT unique_id, date, COALESCE(corrected_qty, qty) AS y FROM {_table} ORDER BY unique_id, date",
-                        _conn,
+                    from db.db import get_demand_for_scenario, get_conn, get_schema
+                    _schema = get_schema(str(self.config_path))
+                    _conn = get_conn(str(self.config_path))
+                    try:
+                        df = get_demand_for_scenario(_schema, self.scenario_id, _conn)
+                    finally:
+                        _conn.close()
+                except Exception as _dem_err:
+                    self.logger.warning(
+                        f"get_demand_for_scenario failed ({_dem_err}), falling back to direct read"
                     )
-                finally:
-                    _conn.close()
-                self.logger.info(f"Loaded {len(df):,} rows from {_table}")
+                    from db.db import get_conn, get_schema
+                    _schema = get_schema(str(self.config_path))
+                    _table = f"{_schema}.demand_actuals" if _schema != "public" else "demand_actuals"
+                    _conn = get_conn(str(self.config_path))
+                    try:
+                        df = pd.read_sql(
+                            f"SELECT unique_id, date, COALESCE(corrected_qty, qty) AS y FROM {_table} ORDER BY unique_id, date",
+                            _conn,
+                        )
+                    finally:
+                        _conn.close()
+                self.logger.info(f"Loaded {len(df):,} rows for scenario_id={self.scenario_id}")
             else:
                 df = self._run_step(pl, "etl", self.step_etl)
                 output_paths['time_series'] = 'PostgreSQL: demand_actuals'
@@ -1696,11 +1745,19 @@ class ForecastOrchestrator:
             # Step 2: Characterization
             if skip_characterization:
                 self.logger.info("Skipping characterization, loading from PostgreSQL...")
-                from db.db import load_table, get_schema
+                from db.db import get_conn, get_schema
                 _schema = get_schema(str(self.config_path))
                 _table = f"{_schema}.time_series_characteristics" if _schema != "public" else "time_series_characteristics"
-                characteristics_df = load_table(str(self.config_path), _table)
-                self.logger.info(f"Loaded {len(characteristics_df):,} characteristics from {_table}")
+                _conn = get_conn(str(self.config_path))
+                try:
+                    characteristics_df = pd.read_sql(
+                        f"SELECT * FROM {_table} WHERE scenario_id = %s",
+                        _conn,
+                        params=(self.scenario_id,),
+                    )
+                finally:
+                    _conn.close()
+                self.logger.info(f"Loaded {len(characteristics_df):,} characteristics from {_table} (scenario_id={self.scenario_id})")
             else:
                 characteristics_df = self._run_step(pl, "characterization", self.step_characterize, df)
                 output_paths['characteristics'] = 'PostgreSQL: time_series_characteristics'
@@ -1723,10 +1780,17 @@ class ForecastOrchestrator:
                         self._mark_series_forecast(_fc_chars['unique_id'].tolist())
             else:
                 self.logger.info("Skipping forecasting step -- loading from PostgreSQL...")
-                from db.db import load_table, get_schema
+                from db.db import get_conn, get_schema
                 _schema = get_schema(str(self.config_path))
-                forecasts_df = load_table(str(self.config_path),
-                                          f"{_schema}.forecast_results")
+                _conn = get_conn(str(self.config_path))
+                try:
+                    forecasts_df = pd.read_sql(
+                        f"SELECT * FROM {_schema}.forecast_results WHERE scenario_id = %s",
+                        _conn,
+                        params=(self.scenario_id,),
+                    )
+                finally:
+                    _conn.close()
 
             # Step 4: Backtesting
             if not skip_backtest:
@@ -1737,10 +1801,17 @@ class ForecastOrchestrator:
                     output_paths['forecasts_by_origin'] = 'PostgreSQL: forecasts_by_origin'
             else:
                 self.logger.info("Skipping backtesting step -- loading metrics from PostgreSQL...")
-                from db.db import load_table, get_schema
+                from db.db import get_conn, get_schema
                 _schema = get_schema(str(self.config_path))
-                metrics_df = load_table(str(self.config_path),
-                                        f"{_schema}.backtest_metrics")
+                _conn = get_conn(str(self.config_path))
+                try:
+                    metrics_df = pd.read_sql(
+                        f"SELECT * FROM {_schema}.backtest_metrics WHERE scenario_id = %s",
+                        _conn,
+                        params=(self.scenario_id,),
+                    )
+                finally:
+                    _conn.close()
 
             # Composite scoring runs automatically inside step_backtest
             if not metrics_df.empty:

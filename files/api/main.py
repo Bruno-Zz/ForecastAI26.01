@@ -1463,6 +1463,7 @@ async def get_series_list(
     search: Optional[str] = None,
     complexity: Optional[str] = None,
     intermittent: Optional[bool] = None,
+    scenario_id: int = Query(default=1),
 ):
     """
     Get list of time series with filtering and pagination.
@@ -1478,6 +1479,8 @@ async def get_series_list(
         raise HTTPException(status_code=503, detail="Data not loaded")
 
     df = _compute(data_cache["characteristics"]).copy()
+    if "scenario_id" in df.columns:
+        df = df[df["scenario_id"] == scenario_id]
 
     # Apply filters
     if search:
@@ -1632,7 +1635,7 @@ async def get_series_data(unique_id: str):
 
 
 @app.get("/api/forecasts/{unique_id}")
-async def get_forecasts(unique_id: str, methods: Optional[List[str]] = Query(None)):
+async def get_forecasts(unique_id: str, methods: Optional[List[str]] = Query(None), scenario_id: int = Query(default=1)):
     """
     Get all forecasts for a specific time series.
 
@@ -1645,6 +1648,8 @@ async def get_forecasts(unique_id: str, methods: Optional[List[str]] = Query(Non
 
     df = _compute(data_cache["forecasts"])
     forecasts_df = df[df["unique_id"] == unique_id]
+    if "scenario_id" in forecasts_df.columns:
+        forecasts_df = forecasts_df[forecasts_df["scenario_id"] == scenario_id]
 
     if forecasts_df.empty:
         raise HTTPException(status_code=404, detail=f"No forecasts for {unique_id}")
@@ -2400,7 +2405,7 @@ async def check_method_compatibility_endpoint(body: MethodCompatibilityRequest):
 
 
 @app.get("/api/series/{unique_id}/best-method")
-async def get_series_best_method(unique_id: str):
+async def get_series_best_method(unique_id: str, scenario_id: int = Query(default=1)):
     """
     Get best method for a single series.
     Falls back to on-the-fly computation if not in database.
@@ -2409,6 +2414,8 @@ async def get_series_best_method(unique_id: str):
     if data_cache["best_methods"] is not None:
         df = _compute(data_cache["best_methods"])
         row_df = df[df["unique_id"] == unique_id]
+        if "scenario_id" in row_df.columns:
+            row_df = row_df[row_df["scenario_id"] == scenario_id]
         if not row_df.empty:
             row = row_df.iloc[0]
             return {
@@ -2522,7 +2529,7 @@ async def get_series_parameters(unique_id: str):
 
 
 @app.get("/api/series/{unique_id}/outliers")
-async def get_series_outliers(unique_id: str):
+async def get_series_outliers(unique_id: str, scenario_id: int = Query(default=1)):
     """
     Get outlier detection results for a specific series.
 
@@ -2539,6 +2546,8 @@ async def get_series_outliers(unique_id: str):
 
     df = _compute(data_cache["outliers"])
     series_outliers = df[df["unique_id"] == unique_id]
+    if "scenario_id" in series_outliers.columns:
+        series_outliers = series_outliers[series_outliers["scenario_id"] == scenario_id]
 
     if series_outliers.empty:
         return {
@@ -2574,7 +2583,7 @@ async def get_series_outliers(unique_id: str):
 
 
 @app.get("/api/forecasts/{unique_id}/origins")
-async def get_forecast_origins(unique_id: str):
+async def get_forecast_origins(unique_id: str, scenario_id: int = Query(default=1)):
     """
     List all forecast origins for a series.
 
@@ -2587,6 +2596,8 @@ async def get_forecast_origins(unique_id: str):
 
     df = _compute(data_cache["forecasts_by_origin"])
     series_df = df[df["unique_id"] == unique_id]
+    if "scenario_id" in series_df.columns:
+        series_df = series_df[series_df["scenario_id"] == scenario_id]
 
     if series_df.empty:
         raise HTTPException(
@@ -2615,7 +2626,7 @@ async def get_forecast_origins(unique_id: str):
 
 
 @app.get("/api/forecasts/{unique_id}/origins/{origin_date}")
-async def get_forecasts_at_origin(unique_id: str, origin_date: str):
+async def get_forecasts_at_origin(unique_id: str, origin_date: str, scenario_id: int = Query(default=1)):
     """
     Get forecasts at a specific origin date.
 
@@ -2640,6 +2651,8 @@ async def get_forecasts_at_origin(unique_id: str, origin_date: str):
 
     # Filter by unique_id
     series_df = df[df["unique_id"] == unique_id]
+    if "scenario_id" in series_df.columns:
+        series_df = series_df[series_df["scenario_id"] == scenario_id]
     if series_df.empty:
         raise HTTPException(
             status_code=404, detail=f"No forecast origins for {unique_id}"
@@ -3622,7 +3635,7 @@ async def get_method_explanation(unique_id: str):
 
 
 @app.get("/api/series/{unique_id}/distributions")
-async def get_series_distributions(unique_id: str):
+async def get_series_distributions(unique_id: str, scenario_id: int = Query(default=1)):
     """
     Get distribution data for the ridge chart.
     Returns per-horizon density curves from fitted distributions or bootstrap fallback.
@@ -3633,6 +3646,8 @@ async def get_series_distributions(unique_id: str):
 
     fc_df = _compute(data_cache["forecasts"])
     uid_fc = fc_df[fc_df["unique_id"] == unique_id]
+    if "scenario_id" in uid_fc.columns:
+        uid_fc = uid_fc[uid_fc["scenario_id"] == scenario_id]
     if uid_fc.empty:
         raise HTTPException(status_code=404, detail=f"No forecasts for {unique_id}")
 
@@ -3641,6 +3656,8 @@ async def get_series_distributions(unique_id: str):
     if data_cache["best_methods"] is not None:
         best_df = _compute(data_cache["best_methods"])
         best_row = best_df[best_df["unique_id"] == unique_id]
+        if "scenario_id" in best_row.columns:
+            best_row = best_row[best_row["scenario_id"] == scenario_id]
         if not best_row.empty:
             best_method_name = str(best_row.iloc[0]["best_method"])
 
@@ -3677,6 +3694,8 @@ async def get_series_distributions(unique_id: str):
         fitted_rows = dist_df[
             (dist_df["unique_id"] == unique_id) & (dist_df["method"] == method_name)
         ]
+        if "scenario_id" in fitted_rows.columns:
+            fitted_rows = fitted_rows[fitted_rows["scenario_id"] == scenario_id]
         if not fitted_rows.empty:
             has_fitted = True
 
@@ -4229,6 +4248,323 @@ async def run_full_pipeline(request: Request):
     return {"job_id": job_id, "step": "full-pipeline", "status": "pending"}
 
 
+# ─── Forecast Scenarios ──────────────────────────────────────────────────────
+
+class ForecastScenarioCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    param_overrides: Dict[str, Any] = {}
+    demand_overrides: Dict[str, Any] = {}
+
+
+class ForecastScenarioUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    param_overrides: Optional[Dict[str, Any]] = None
+    demand_overrides: Optional[Dict[str, Any]] = None
+
+
+class ForecastScenarioClone(BaseModel):
+    name: str
+    description: Optional[str] = None
+    param_overrides: Dict[str, Any] = {}
+    demand_overrides: Dict[str, Any] = {}
+
+
+@app.get("/api/forecast/scenarios")
+async def list_forecast_scenarios():
+    """List all forecast scenarios with status and override summary."""
+    _require_db()
+    schema = get_schema()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT scenario_id, name, description, is_base, status,
+                           run_at, error_msg, created_by, created_at,
+                           param_overrides, demand_overrides
+                    FROM {schema}.forecast_scenarios
+                    ORDER BY scenario_id"""
+            )
+            rows = cur.fetchall()
+            cols = [d[0] for d in cur.description]
+        result = []
+        for row in rows:
+            d = dict(zip(cols, row))
+            # Serialise timestamps
+            for f in ("run_at", "created_at"):
+                if d.get(f) is not None:
+                    d[f] = d[f].isoformat()
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
+@app.post("/api/forecast/scenarios", status_code=201)
+async def create_forecast_scenario(body: ForecastScenarioCreate, request: Request):
+    """Create a new forecast scenario."""
+    from api.auth import get_current_user as auth_get_current_user
+    user = auth_get_current_user(request)
+    created_by = user.get("sub") if user else "api"
+
+    _require_db()
+    schema = get_schema()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""INSERT INTO {schema}.forecast_scenarios
+                        (name, description, param_overrides, demand_overrides, created_by)
+                    VALUES (%s, %s, %s::jsonb, %s::jsonb, %s)
+                    RETURNING scenario_id, name, description, is_base, status,
+                              run_at, created_by, created_at, param_overrides, demand_overrides""",
+                (
+                    body.name,
+                    body.description,
+                    json.dumps(body.param_overrides),
+                    json.dumps(body.demand_overrides),
+                    created_by,
+                ),
+            )
+            row = cur.fetchone()
+            cols = [d[0] for d in cur.description]
+        conn.commit()
+        d = dict(zip(cols, row))
+        for f in ("run_at", "created_at"):
+            if d.get(f) is not None:
+                d[f] = d[f].isoformat()
+        return d
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/forecast/scenarios/{scenario_id}")
+async def get_forecast_scenario(scenario_id: int):
+    """Get a single forecast scenario by id."""
+    _require_db()
+    schema = get_schema()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT scenario_id, name, description, is_base, status,
+                           run_at, error_msg, created_by, created_at,
+                           param_overrides, demand_overrides
+                    FROM {schema}.forecast_scenarios
+                    WHERE scenario_id = %s""",
+                (scenario_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Scenario {scenario_id} not found")
+            cols = [d[0] for d in cur.description]
+        d = dict(zip(cols, row))
+        for f in ("run_at", "created_at"):
+            if d.get(f) is not None:
+                d[f] = d[f].isoformat()
+        return d
+    finally:
+        conn.close()
+
+
+@app.put("/api/forecast/scenarios/{scenario_id}")
+async def update_forecast_scenario(scenario_id: int, body: ForecastScenarioUpdate):
+    """Update name, description, or overrides of a scenario. Cannot edit base scenario overrides."""
+    _require_db()
+    schema = get_schema()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            # Fetch current state
+            cur.execute(
+                f"SELECT is_base, param_overrides, demand_overrides FROM {schema}.forecast_scenarios WHERE scenario_id = %s",
+                (scenario_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Scenario {scenario_id} not found")
+            is_base, cur_po, cur_do = row
+
+            sets = []
+            params: list = []
+            if body.name is not None:
+                sets.append("name = %s"); params.append(body.name)
+            if body.description is not None:
+                sets.append("description = %s"); params.append(body.description)
+            if body.param_overrides is not None and not is_base:
+                sets.append("param_overrides = %s::jsonb"); params.append(json.dumps(body.param_overrides))
+            if body.demand_overrides is not None and not is_base:
+                sets.append("demand_overrides = %s::jsonb"); params.append(json.dumps(body.demand_overrides))
+
+            if not sets:
+                raise HTTPException(status_code=400, detail="Nothing to update")
+
+            params.append(scenario_id)
+            cur.execute(
+                f"UPDATE {schema}.forecast_scenarios SET {', '.join(sets)} WHERE scenario_id = %s",
+                params,
+            )
+        conn.commit()
+        return {"scenario_id": scenario_id, "updated": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/forecast/scenarios/{scenario_id}", status_code=204)
+async def delete_forecast_scenario(scenario_id: int):
+    """Delete a scenario and all its tagged results. Cannot delete the base scenario."""
+    _require_db()
+    schema = get_schema()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT is_base FROM {schema}.forecast_scenarios WHERE scenario_id = %s",
+                (scenario_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Scenario {scenario_id} not found")
+            if row[0]:
+                raise HTTPException(status_code=400, detail="Cannot delete the base scenario")
+
+            # Delete outputs from all 7 tables
+            _SCENARIO_OUTPUT_TABLES = [
+                "detected_outliers",
+                "time_series_characteristics",
+                "forecast_results",
+                "backtest_metrics",
+                "forecasts_by_origin",
+                "best_method_per_series",
+                "fitted_distributions",
+            ]
+            for tbl in _SCENARIO_OUTPUT_TABLES:
+                cur.execute(
+                    f"DELETE FROM {schema}.{tbl} WHERE scenario_id = %s", (scenario_id,)
+                )
+            cur.execute(
+                f"DELETE FROM {schema}.forecast_scenarios WHERE scenario_id = %s", (scenario_id,)
+            )
+        conn.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.post("/api/forecast/scenarios/{scenario_id}/clone", status_code=201)
+async def clone_forecast_scenario(scenario_id: int, body: ForecastScenarioClone, request: Request):
+    """Clone an existing scenario, merging the request's overrides on top of the source's."""
+    from api.auth import get_current_user as auth_get_current_user
+    user = auth_get_current_user(request)
+    created_by = user.get("sub") if user else "api"
+
+    _require_db()
+    schema = get_schema()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT param_overrides, demand_overrides FROM {schema}.forecast_scenarios WHERE scenario_id = %s",
+                (scenario_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Source scenario {scenario_id} not found")
+            src_po = dict(row[0] or {})
+            src_do = dict(row[1] or {})
+
+        # Merge: source first, then request overrides on top
+        merged_po = {**src_po, **body.param_overrides}
+        merged_do = {**src_do, **body.demand_overrides}
+
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""INSERT INTO {schema}.forecast_scenarios
+                        (name, description, param_overrides, demand_overrides, created_by)
+                    VALUES (%s, %s, %s::jsonb, %s::jsonb, %s)
+                    RETURNING scenario_id, name, description, is_base, status,
+                              run_at, created_by, created_at, param_overrides, demand_overrides""",
+                (
+                    body.name,
+                    body.description,
+                    json.dumps(merged_po),
+                    json.dumps(merged_do),
+                    created_by,
+                ),
+            )
+            new_row = cur.fetchone()
+            cols = [d[0] for d in cur.description]
+        conn.commit()
+        d = dict(zip(cols, new_row))
+        for f in ("run_at", "created_at"):
+            if d.get(f) is not None:
+                d[f] = d[f].isoformat()
+        return d
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        conn.close()
+
+
+@app.get("/api/forecast/scenarios/{scenario_id}/results/summary")
+async def get_scenario_results_summary(scenario_id: int):
+    """Return row counts per output table for this scenario."""
+    _require_db()
+    schema = get_schema()
+    conn = get_conn()
+    _SCENARIO_OUTPUT_TABLES = [
+        "detected_outliers",
+        "time_series_characteristics",
+        "forecast_results",
+        "backtest_metrics",
+        "forecasts_by_origin",
+        "best_method_per_series",
+        "fitted_distributions",
+    ]
+    try:
+        with conn.cursor() as cur:
+            # Verify scenario exists
+            cur.execute(
+                f"SELECT status FROM {schema}.forecast_scenarios WHERE scenario_id = %s",
+                (scenario_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Scenario {scenario_id} not found")
+            status = row[0]
+            counts = {}
+            for tbl in _SCENARIO_OUTPUT_TABLES:
+                try:
+                    cur.execute(
+                        f"SELECT COUNT(*) FROM {schema}.{tbl} WHERE scenario_id = %s",
+                        (scenario_id,),
+                    )
+                    counts[tbl] = cur.fetchone()[0]
+                except Exception:
+                    counts[tbl] = None
+        return {"scenario_id": scenario_id, "status": status, "counts": counts}
+    finally:
+        conn.close()
+
+
+# ─── Pipeline ────────────────────────────────────────────────────────────────
+
 @app.get("/api/pipeline/steps")
 async def get_pipeline_steps():
     """Return the list of available pipeline steps."""
@@ -4237,6 +4573,7 @@ async def get_pipeline_steps():
 
 class RunStepRequest(BaseModel):
     segment_id: Optional[int] = None
+    scenario_id: int = 1
 
 
 @app.post("/api/pipeline/run/{step}")
@@ -4277,12 +4614,16 @@ async def run_pipeline_step(
 
     extra_args = []
     if body.segment_id is not None:
-        extra_args = ["--segment-id", str(body.segment_id)]
+        extra_args += ["--segment-id", str(body.segment_id)]
+    if body.scenario_id != 1:
+        extra_args += ["--scenario-id", str(body.scenario_id)]
 
     job_id = str(uuid.uuid4())[:8]
     step_label = PIPELINE_STEPS[step]["label"]
     if body.segment_id is not None:
         step_label = f"{step_label} (segment {body.segment_id})"
+    if body.scenario_id != 1:
+        step_label = f"{step_label} [scenario {body.scenario_id}]"
 
     with _pipeline_lock:
         _pipeline_jobs[job_id] = {
@@ -4296,6 +4637,7 @@ async def run_pipeline_step(
             "pid": None,
             "exit_code": None,
             "segment_id": body.segment_id,
+            "scenario_id": body.scenario_id,
         }
 
     t = threading.Thread(

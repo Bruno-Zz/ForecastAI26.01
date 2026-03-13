@@ -104,6 +104,26 @@ def _load_demand_from_db(config_path: str, use_corrected: bool = True):
     return df
 
 
+def _load_demand_for_scenario(config_path: str, scenario_id: int, use_corrected: bool = True):
+    """
+    Load demand time series for a specific scenario.
+    For scenario_id=1 (base), falls back to standard _load_demand_from_db.
+    For other scenarios, uses get_demand_for_scenario() which applies demand_overrides.
+    """
+    if scenario_id == 1:
+        return _load_demand_from_db(config_path, use_corrected=use_corrected)
+
+    from db.db import get_conn, get_schema, get_demand_for_scenario
+    schema = get_schema(config_path)
+    conn = get_conn(config_path)
+    try:
+        df = get_demand_for_scenario(schema, scenario_id, conn)
+    finally:
+        conn.close()
+    print(f"  Loaded {len(df):,} rows, {df['unique_id'].nunique():,} series (scenario {scenario_id})")
+    return df
+
+
 def _load_characteristics_from_db(config_path: str):
     """Load time series characteristics from PostgreSQL."""
     import pandas as pd
@@ -137,6 +157,22 @@ def _load_forecasts_from_db(config_path: str):
     table = f"{schema}.forecast_results" if schema != "public" else "forecast_results"
     df = load_table(config_path, table)
     print(f"  Loaded {len(df):,} forecast rows from {table}")
+    return df
+
+
+def _load_characteristics_for_scenario(config_path: str, scenario_id: int):
+    """Load characteristics filtered to a specific scenario_id."""
+    df = _load_characteristics_from_db(config_path)
+    if "scenario_id" in df.columns:
+        df = df[df["scenario_id"] == scenario_id]
+    return df
+
+
+def _load_forecasts_for_scenario(config_path: str, scenario_id: int):
+    """Load forecast results filtered to a specific scenario_id."""
+    df = _load_forecasts_from_db(config_path)
+    if "scenario_id" in df.columns:
+        df = df[df["scenario_id"] == scenario_id]
     return df
 
 
@@ -203,12 +239,12 @@ def _apply_series_and_method_overrides(
 
 def run_single_step(step: str, config_path: str, segment_id: int = None,
                     series_filter: list = None, all_methods: bool = False,
-                    overrides_json: dict = None):
+                    overrides_json: dict = None, scenario_id: int = 1):
     """Run a single pipeline step, loading inputs from PostgreSQL."""
     import uuid as _uuid
     from utils.process_logger import ProcessLogger, ListHandler
 
-    orchestrator = ForecastOrchestrator(config_path)
+    orchestrator = ForecastOrchestrator(config_path, scenario_id=scenario_id)
     pl = ProcessLogger(run_id=str(_uuid.uuid4()))
 
     import pandas as pd
@@ -272,7 +308,7 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
 
     elif step == 'outlier-detection':
         print("Loading demand data from PostgreSQL (original qty)...")
-        df = _load_demand_from_db(config_path, use_corrected=False)
+        df = _load_demand_for_scenario(config_path, scenario_id, use_corrected=False)
         if segment_id is not None:
             seg_ids = _load_segment_series(segment_id, config_path)
             df = df[df['unique_id'].isin(seg_ids)]
@@ -297,7 +333,7 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
 
     elif step == 'characterize':
         print("Loading demand data from PostgreSQL (corrected)...")
-        df = _load_demand_from_db(config_path, use_corrected=True)
+        df = _load_demand_for_scenario(config_path, scenario_id, use_corrected=True)
         if segment_id is not None:
             seg_ids = _load_segment_series(segment_id, config_path)
             df = df[df['unique_id'].isin(seg_ids)]
@@ -321,9 +357,9 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
 
     elif step == 'forecast':
         print("Loading demand data from PostgreSQL (corrected)...")
-        df = _load_demand_from_db(config_path, use_corrected=True)
+        df = _load_demand_for_scenario(config_path, scenario_id, use_corrected=True)
         print("Loading characteristics from PostgreSQL...")
-        chars_df = _load_characteristics_from_db(config_path)
+        chars_df = _load_characteristics_for_scenario(config_path, scenario_id)
         if segment_id is not None:
             seg_ids = _load_segment_series(segment_id, config_path)
             df = df[df['unique_id'].isin(seg_ids)]
@@ -409,9 +445,9 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
 
     elif step == 'backtest':
         print("Loading demand data from PostgreSQL (corrected)...")
-        df = _load_demand_from_db(config_path, use_corrected=True)
+        df = _load_demand_for_scenario(config_path, scenario_id, use_corrected=True)
         print("Loading characteristics from PostgreSQL...")
-        chars_df = _load_characteristics_from_db(config_path)
+        chars_df = _load_characteristics_for_scenario(config_path, scenario_id)
         if segment_id is not None:
             seg_ids = _load_segment_series(segment_id, config_path)
             df = df[df['unique_id'].isin(seg_ids)]
@@ -459,7 +495,7 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
 
     elif step == 'distributions':
         print("Loading forecasts from PostgreSQL...")
-        forecasts_df = _load_forecasts_from_db(config_path)
+        forecasts_df = _load_forecasts_for_scenario(config_path, scenario_id)
         handler = ListHandler()
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
         logging.getLogger().addHandler(handler)
@@ -531,6 +567,12 @@ Examples:
         help='Scope step to only series belonging to this segment (by segment.id)'
     )
 
+    # Scenario
+    parser.add_argument(
+        '--scenario-id', type=int, default=1,
+        help='Scenario id for this pipeline run (default: 1 = base scenario)'
+    )
+
     # Series-level run (from Time Series Viewer)
     parser.add_argument(
         '--series', type=str, default=None,
@@ -589,14 +631,63 @@ Examples:
 
     # Single step mode
     if args.only:
-        logger.info(f"Running single step: {args.only}")
-        run_single_step(
-            args.only, args.config,
-            segment_id=args.segment_id,
-            series_filter=series_filter,
-            all_methods=args.all_methods,
-            overrides_json=overrides_json,
-        )
+        logger.info(f"Running single step: {args.only} (scenario_id={args.scenario_id})")
+        # Mark scenario as running (non-fatal if DB unavailable)
+        if args.scenario_id != 1:
+            try:
+                from db.db import get_conn, get_schema
+                _conn = get_conn()
+                _schema = get_schema()
+                with _conn.cursor() as _cur:
+                    _cur.execute(
+                        f"UPDATE {_schema}.forecast_scenarios SET status='running', run_at=NOW() WHERE scenario_id=%s",
+                        (args.scenario_id,),
+                    )
+                _conn.commit()
+                _conn.close()
+            except Exception as _e:
+                logger.warning(f"Could not update scenario status to running: {_e}")
+        try:
+            run_single_step(
+                args.only, args.config,
+                segment_id=args.segment_id,
+                series_filter=series_filter,
+                all_methods=args.all_methods,
+                overrides_json=overrides_json,
+                scenario_id=args.scenario_id,
+            )
+        except Exception:
+            # Mark scenario as failed
+            if args.scenario_id != 1:
+                try:
+                    from db.db import get_conn, get_schema
+                    _conn = get_conn()
+                    _schema = get_schema()
+                    with _conn.cursor() as _cur:
+                        _cur.execute(
+                            f"UPDATE {_schema}.forecast_scenarios SET status='failed' WHERE scenario_id=%s",
+                            (args.scenario_id,),
+                        )
+                    _conn.commit()
+                    _conn.close()
+                except Exception:
+                    pass
+            raise
+        # Mark scenario step as complete (only when scenario_id!=1; base is always 'complete')
+        if args.scenario_id != 1:
+            try:
+                from db.db import get_conn, get_schema
+                _conn = get_conn()
+                _schema = get_schema()
+                with _conn.cursor() as _cur:
+                    _cur.execute(
+                        f"UPDATE {_schema}.forecast_scenarios SET status='complete' WHERE scenario_id=%s",
+                        (args.scenario_id,),
+                    )
+                _conn.commit()
+                _conn.close()
+            except Exception as _e:
+                logger.warning(f"Could not update scenario status to complete: {_e}")
         return
 
     # Full pipeline

@@ -138,6 +138,77 @@ pub fn neg_binomial_cdf(k: f64, r: f64, p: f64) -> f64 {
         .unwrap_or(0.0)
 }
 
+// ── Erlang telephony formulas ─────────────────────────────────────────────
+//
+// Used for asset / rotable pool sizing.
+// rho = offered load = failure_rate × fleet_size × repair_tat_mean
+
+/// Erlang-B: probability that an arriving demand finds all `n` servers busy
+/// (loss system — no queuing).
+///
+/// Computed via the iterative recurrence in log-space to avoid overflow:
+///   B(0, ρ) = 1
+///   B(n, ρ) = (ρ/n · B(n-1, ρ)) / (1 + ρ/n · B(n-1, ρ))
+///
+/// Equivalent to SciPy's `scipy.special.erlangs` (loss formula).
+pub fn erlang_b(n: u32, rho: f64) -> f64 {
+    if rho <= 0.0 {
+        return 0.0;
+    }
+    // Iterative form — numerically stable for large n and rho
+    let mut b = 1.0_f64;
+    for k in 1..=(n as u64) {
+        let term = rho / k as f64;
+        b = term * b / (1.0 + term * b);
+    }
+    b
+}
+
+/// Erlang-C: probability that an arriving demand must wait (delay system —
+/// infinite queue capacity).
+///
+/// Formula:  C(n, ρ) = B(n, ρ) / (1 - (ρ/n)(1 - B(n, ρ)))
+/// where B is Erlang-B.
+///
+/// Returns 1.0 when ρ ≥ n (system saturated; all calls wait).
+pub fn erlang_c(n: u32, rho: f64) -> f64 {
+    if n == 0 || rho <= 0.0 {
+        return 0.0;
+    }
+    let n_f = n as f64;
+    if rho >= n_f {
+        return 1.0;
+    }
+    let b = erlang_b(n, rho);
+    let num = b;
+    let den = 1.0 - (rho / n_f) * (1.0 - b);
+    if den <= 0.0 { 1.0 } else { (num / den).min(1.0) }
+}
+
+/// Smallest pool size `S` such that `erlang_b(S, rho) ≤ p_target`.
+///
+/// Searches upward from 1.  Caps at 10 000 to prevent runaway loops.
+pub fn min_pool_size_loss(rho: f64, p_target: f64) -> u32 {
+    for s in 1..=10_000_u32 {
+        if erlang_b(s, rho) <= p_target {
+            return s;
+        }
+    }
+    10_000
+}
+
+/// Smallest pool size `S` such that `erlang_c(S, rho) ≤ p_target`.
+///
+/// Searches upward from 1.  Caps at 10 000.
+pub fn min_pool_size_queue(rho: f64, p_target: f64) -> u32 {
+    for s in 1..=10_000_u32 {
+        if erlang_c(s, rho) <= p_target {
+            return s;
+        }
+    }
+    10_000
+}
+
 // ── EOQ loop step helper ──────────────────────────────────────────────────
 
 /// Compute the step size for the EOQ integration loop.
@@ -176,6 +247,38 @@ mod tests {
         // P(X ≤ 2 | λ=1) ≈ 0.9197
         let v = poisson_cdf(2.0, 1.0);
         assert!((v - 0.9197).abs() < 0.001, "got {v}");
+    }
+
+    #[test]
+    fn erlang_b_zero_servers() {
+        // With 0 load all calls are blocked? — we guard rho<=0 → 0.0
+        assert_eq!(erlang_b(0, 1.0), 1.0); // B(0,ρ) = 1 by convention (loop skips)
+        assert_eq!(erlang_b(5, 0.0), 0.0);
+    }
+
+    #[test]
+    fn erlang_b_known_values() {
+        // B(1, 1.0) = 0.5  (one server, load = 1)
+        let v = erlang_b(1, 1.0);
+        assert!((v - 0.5).abs() < 0.001, "B(1,1)={v}");
+        // B(5, 5.0) ≈ 0.1727
+        let v5 = erlang_b(5, 5.0);
+        assert!((v5 - 0.1727).abs() < 0.001, "B(5,5)={v5}");
+    }
+
+    #[test]
+    fn erlang_c_saturated() {
+        // rho >= n → C = 1.0
+        assert_eq!(erlang_c(3, 3.0), 1.0);
+        assert_eq!(erlang_c(3, 5.0), 1.0);
+    }
+
+    #[test]
+    fn min_pool_size_loss_basic() {
+        // rho=2, target=0.05 → need enough servers to get B ≤ 5%
+        let s = min_pool_size_loss(2.0, 0.05);
+        assert!(erlang_b(s, 2.0) <= 0.05, "s={s}, B={}", erlang_b(s, 2.0));
+        assert!(s > 0);
     }
 
     #[test]

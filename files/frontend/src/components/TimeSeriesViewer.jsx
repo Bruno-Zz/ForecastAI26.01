@@ -1149,6 +1149,10 @@ export const TimeSeriesViewer = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // ---- Scenario ----
+  const [scenarios, setScenarios] = useState([]);
+  const [activeScenarioId, setActiveScenarioId] = useState(1);
+
   // ---- Planner adjustments ----
   // key: "YYYY-MM-DD|type" → {id, forecast_date, adjustment_type, value, note}
   const [adjustments, setAdjustments] = useState({});
@@ -1557,22 +1561,28 @@ export const TimeSeriesViewer = () => {
       if (playTimerRef.current) clearInterval(playTimerRef.current);
       if (btPlayTimerRef.current) clearInterval(btPlayTimerRef.current);
     };
-  }, [decodedId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [decodedId, activeScenarioId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load scenarios
+  useEffect(() => {
+    api.get('/forecast/scenarios').then(r => setScenarios(r.data)).catch(() => {});
+  }, []);
 
   const loadData = async () => {
     setLoading(true);
     setError(null);
     try {
+      const scParams = { scenario_id: activeScenarioId };
       const [dataRes, forecastRes, seriesRes, metricsRes, bestRes, originsRes, outlierRes, explainRes, distRes] = await Promise.allSettled([
         api.get(`/series/${encodeURIComponent(decodedId)}/data`),
-        api.get(`/forecasts/${encodeURIComponent(decodedId)}`),
-        api.get(`/series`, { params: { search: decodedId, limit: 1 } }),
+        api.get(`/forecasts/${encodeURIComponent(decodedId)}`, { params: scParams }),
+        api.get(`/series`, { params: { search: decodedId, limit: 1, ...scParams } }),
         api.get(`/metrics/${encodeURIComponent(decodedId)}`),
-        api.get(`/series/${encodeURIComponent(decodedId)}/best-method`),
-        api.get(`/forecasts/${encodeURIComponent(decodedId)}/origins`),
-        api.get(`/series/${encodeURIComponent(decodedId)}/outliers`),
+        api.get(`/series/${encodeURIComponent(decodedId)}/best-method`, { params: scParams }),
+        api.get(`/forecasts/${encodeURIComponent(decodedId)}/origins`, { params: scParams }),
+        api.get(`/series/${encodeURIComponent(decodedId)}/outliers`, { params: scParams }),
         api.get(`/series/${encodeURIComponent(decodedId)}/method-explanation`),
-        api.get(`/series/${encodeURIComponent(decodedId)}/distributions`)
+        api.get(`/series/${encodeURIComponent(decodedId)}/distributions`, { params: scParams })
       ]);
 
       if (dataRes.status === 'fulfilled') {
@@ -1932,10 +1942,10 @@ export const TimeSeriesViewer = () => {
     if (origins.length === 0) return;
     const origin = origins[selectedOriginIdx];
     if (!origin) return;
-    api.get(`/forecasts/${encodeURIComponent(decodedId)}/origins/${origin}`)
+    api.get(`/forecasts/${encodeURIComponent(decodedId)}/origins/${origin}`, { params: { scenario_id: activeScenarioId } })
       .then(res => setOriginForecasts(res.data))
       .catch(() => setOriginForecasts(null));
-  }, [selectedOriginIdx, origins, decodedId]);
+  }, [selectedOriginIdx, origins, decodedId, activeScenarioId]);
 
   const togglePlay = useCallback(() => {
     if (isPlaying) {
@@ -3194,6 +3204,26 @@ export const TimeSeriesViewer = () => {
       {/* Header — hidden in multi-series mode */}
       {!isMultiMode && (
         <div id="tsv-header" className="mb-6">
+          {/* Scenario selector */}
+          {scenarios.length > 1 && (
+            <div className="flex items-center gap-2 mb-3">
+              <label className="text-xs font-medium text-gray-500 dark:text-gray-400">Scenario:</label>
+              <select
+                value={activeScenarioId}
+                onChange={e => setActiveScenarioId(Number(e.target.value))}
+                className="px-2 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-1 focus:ring-blue-500"
+              >
+                {scenarios.map(s => (
+                  <option key={s.scenario_id} value={s.scenario_id}>
+                    {s.name}{s.is_base ? ' (Base)' : ''}
+                  </option>
+                ))}
+              </select>
+              {activeScenarioId !== 1 && (
+                <span className="px-2 py-0.5 text-xs rounded-full bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 font-medium">What-If</span>
+              )}
+            </div>
+          )}
           <h1 className="text-2xl sm:text-3xl font-bold mb-3 dark:text-white">
             {characteristics?.item_name ?? itemNameMap[parseUniqueId(decodedId).item] ?? parseUniqueId(decodedId).item}
             <span className="text-gray-400 dark:text-gray-500 font-normal mx-1">@</span>

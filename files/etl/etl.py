@@ -1137,10 +1137,28 @@ class ETLPipeline:
 
 def main():
     """Run the ETL pipeline from the command line."""
+    import argparse
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
+
+    parser = argparse.ArgumentParser(description="ETL pipeline step")
+    parser.add_argument(
+        "--scenario-id", type=int, default=1,
+        help="Forecast scenario ID (default=1, the base scenario)",
+    )
+    args = parser.parse_args()
+    scenario_id = args.scenario_id
+
+    # For non-base scenarios, ETL is a no-op: demand_actuals is already loaded.
+    if scenario_id != 1:
+        logging.getLogger(__name__).info(
+            "Skipping ETL for non-base scenario (scenario_id=%d)", scenario_id
+        )
+        print(f"ETL skipped for scenario_id={scenario_id}")
+        return
 
     pipeline = ETLPipeline()
     df = pipeline.run()

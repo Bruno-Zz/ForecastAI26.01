@@ -290,7 +290,8 @@ def init_schema(config_path=None) -> None:
         correction_method TEXT,
         z_score           DOUBLE PRECISION,
         lower_bound       DOUBLE PRECISION,
-        upper_bound       DOUBLE PRECISION
+        upper_bound       DOUBLE PRECISION,
+        scenario_id       BIGINT NOT NULL DEFAULT 1
     );
     CREATE INDEX IF NOT EXISTS idx_outliers_unique_id
         ON {schema}.detected_outliers (unique_id);
@@ -299,7 +300,7 @@ def init_schema(config_path=None) -> None:
 
     CREATE TABLE IF NOT EXISTS {schema}.time_series_characteristics (
         id                           SERIAL PRIMARY KEY,
-        unique_id                    TEXT NOT NULL UNIQUE,
+        unique_id                    TEXT NOT NULL,
         n_observations               INTEGER,
         date_range_start             TEXT,
         date_range_end               TEXT,
@@ -321,10 +322,13 @@ def init_schema(config_path=None) -> None:
         complexity_level             TEXT,
         sufficient_for_ml            BOOLEAN,
         sufficient_for_deep_learning BOOLEAN,
-        recommended_methods          JSONB DEFAULT '[]'
+        recommended_methods          JSONB DEFAULT '[]',
+        scenario_id                  BIGINT NOT NULL DEFAULT 1
     );
     CREATE INDEX IF NOT EXISTS idx_chars_unique_id
         ON {schema}.time_series_characteristics (unique_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tsc_uid_scen
+        ON {schema}.time_series_characteristics (unique_id, scenario_id);
 
     -- ─── Forecast results (all methods) ──────────────────────────────
 
@@ -334,7 +338,8 @@ def init_schema(config_path=None) -> None:
         point_forecast    JSONB,
         quantiles         JSONB,
         hyperparameters   JSONB,
-        training_time     DOUBLE PRECISION
+        training_time     DOUBLE PRECISION,
+        scenario_id       BIGINT NOT NULL DEFAULT 1
     ) USING columnstore;
     CREATE INDEX IF NOT EXISTS idx_forecasts_uid_method
         ON {schema}.forecast_results (unique_id, method);
@@ -362,7 +367,8 @@ def init_schema(config_path=None) -> None:
         aic               DOUBLE PRECISION,
         bic               DOUBLE PRECISION,
         aicc              DOUBLE PRECISION,
-        metric_source     TEXT DEFAULT 'rolling_window'
+        metric_source     TEXT DEFAULT 'rolling_window',
+        scenario_id       BIGINT NOT NULL DEFAULT 1
     ) USING columnstore;
     CREATE INDEX IF NOT EXISTS idx_metrics_uid
         ON {schema}.backtest_metrics (unique_id);
@@ -375,7 +381,8 @@ def init_schema(config_path=None) -> None:
         forecast_origin   DATE,
         horizon_step      INTEGER,
         point_forecast    DOUBLE PRECISION,
-        actual_value      DOUBLE PRECISION
+        actual_value      DOUBLE PRECISION,
+        scenario_id       BIGINT NOT NULL DEFAULT 1
     ) USING columnstore;
     CREATE INDEX IF NOT EXISTS idx_fbo_uid
         ON {schema}.forecasts_by_origin (unique_id, method);
@@ -401,15 +408,18 @@ def init_schema(config_path=None) -> None:
 
     CREATE TABLE IF NOT EXISTS {schema}.best_method_per_series (
         id                SERIAL PRIMARY KEY,
-        unique_id         TEXT NOT NULL UNIQUE,
+        unique_id         TEXT NOT NULL,
         best_method       TEXT,
         best_score        DOUBLE PRECISION,
         runner_up_method  TEXT,
         runner_up_score   DOUBLE PRECISION,
-        all_rankings      JSONB
+        all_rankings      JSONB,
+        scenario_id       BIGINT NOT NULL DEFAULT 1
     );
     CREATE INDEX IF NOT EXISTS idx_bestmethod_uid
         ON {schema}.best_method_per_series (unique_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_bmp_uid_scen
+        ON {schema}.best_method_per_series (unique_id, scenario_id);
 
     -- ─── Fitted distributions (MEIO) ─────────────────────────────────
 
@@ -423,7 +433,8 @@ def init_schema(config_path=None) -> None:
         params                   JSONB,
         ks_statistic             DOUBLE PRECISION,
         ks_pvalue                DOUBLE PRECISION,
-        service_level_quantiles  JSONB
+        service_level_quantiles  JSONB,
+        scenario_id              BIGINT NOT NULL DEFAULT 1
     ) USING columnstore;
     CREATE INDEX IF NOT EXISTS idx_dist_uid
         ON {schema}.fitted_distributions (unique_id, method);
@@ -618,6 +629,24 @@ def init_schema(config_path=None) -> None:
         ON {schema}.audit_log (entity_type, entity_id);
     CREATE INDEX IF NOT EXISTS idx_audit_created
         ON {schema}.audit_log (created_at DESC);
+
+    -- ─── Forecast scenarios ──────────────────────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS {schema}.forecast_scenarios (
+        scenario_id      BIGSERIAL PRIMARY KEY,
+        name             TEXT NOT NULL,
+        description      TEXT,
+        is_base          BOOLEAN NOT NULL DEFAULT FALSE,
+        status           TEXT NOT NULL DEFAULT 'pending',
+        run_at           TIMESTAMPTZ,
+        error_msg        TEXT,
+        created_by       TEXT,
+        created_at       TIMESTAMPTZ DEFAULT NOW(),
+        param_overrides  JSONB NOT NULL DEFAULT '{{}}',
+        demand_overrides JSONB NOT NULL DEFAULT '{{}}'
+    );
+    CREATE INDEX IF NOT EXISTS idx_fscen_status
+        ON {schema}.forecast_scenarios (status);
     """
 
     # Separate ALTER statements for adding columns to existing tables
@@ -1009,6 +1038,172 @@ def init_schema(config_path=None) -> None:
             END IF;
         END $$;
         """,
+        # scenario_id — detected_outliers
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'detected_outliers'
+                  AND column_name = 'scenario_id'
+            ) THEN
+                ALTER TABLE {schema}.detected_outliers
+                    ADD COLUMN scenario_id BIGINT NOT NULL DEFAULT 1;
+            END IF;
+        END $$;
+        """,
+        # scenario_id — time_series_characteristics
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'time_series_characteristics'
+                  AND column_name = 'scenario_id'
+            ) THEN
+                ALTER TABLE {schema}.time_series_characteristics
+                    ADD COLUMN scenario_id BIGINT NOT NULL DEFAULT 1;
+            END IF;
+        END $$;
+        """,
+        # scenario_id — forecast_results
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'forecast_results'
+                  AND column_name = 'scenario_id'
+            ) THEN
+                ALTER TABLE {schema}.forecast_results
+                    ADD COLUMN scenario_id BIGINT NOT NULL DEFAULT 1;
+            END IF;
+        END $$;
+        """,
+        # scenario_id — backtest_metrics
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'backtest_metrics'
+                  AND column_name = 'scenario_id'
+            ) THEN
+                ALTER TABLE {schema}.backtest_metrics
+                    ADD COLUMN scenario_id BIGINT NOT NULL DEFAULT 1;
+            END IF;
+        END $$;
+        """,
+        # scenario_id — forecasts_by_origin
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'forecasts_by_origin'
+                  AND column_name = 'scenario_id'
+            ) THEN
+                ALTER TABLE {schema}.forecasts_by_origin
+                    ADD COLUMN scenario_id BIGINT NOT NULL DEFAULT 1;
+            END IF;
+        END $$;
+        """,
+        # scenario_id — best_method_per_series
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'best_method_per_series'
+                  AND column_name = 'scenario_id'
+            ) THEN
+                ALTER TABLE {schema}.best_method_per_series
+                    ADD COLUMN scenario_id BIGINT NOT NULL DEFAULT 1;
+            END IF;
+        END $$;
+        """,
+        # scenario_id — fitted_distributions
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = '{schema}'
+                  AND table_name = 'fitted_distributions'
+                  AND column_name = 'scenario_id'
+            ) THEN
+                ALTER TABLE {schema}.fitted_distributions
+                    ADD COLUMN scenario_id BIGINT NOT NULL DEFAULT 1;
+            END IF;
+        END $$;
+        """,
+        # forecast_scenarios table creation
+        f"""
+        CREATE TABLE IF NOT EXISTS {schema}.forecast_scenarios (
+            scenario_id      BIGSERIAL PRIMARY KEY,
+            name             TEXT NOT NULL,
+            description      TEXT,
+            is_base          BOOLEAN NOT NULL DEFAULT FALSE,
+            status           TEXT NOT NULL DEFAULT 'pending',
+            run_at           TIMESTAMPTZ,
+            error_msg        TEXT,
+            created_by       TEXT,
+            created_at       TIMESTAMPTZ DEFAULT NOW(),
+            param_overrides  JSONB NOT NULL DEFAULT '{{}}',
+            demand_overrides JSONB NOT NULL DEFAULT '{{}}'
+        );
+        """,
+        f"""
+        INSERT INTO {schema}.forecast_scenarios (scenario_id, name, description, is_base, status)
+        VALUES (1, 'Base', 'Default scenario — global configuration', TRUE, 'complete')
+        ON CONFLICT (scenario_id) DO NOTHING;
+        """,
+        # Drop old unique constraint on time_series_characteristics.unique_id and add composite
+        f"""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint c
+                JOIN pg_class t ON t.oid = c.conrelid
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                WHERE c.conname = 'time_series_characteristics_unique_id_key'
+                  AND n.nspname = '{schema}'
+            ) THEN
+                ALTER TABLE {schema}.time_series_characteristics
+                    DROP CONSTRAINT time_series_characteristics_unique_id_key;
+            END IF;
+        END $$;
+        """,
+        f"""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tsc_uid_scen
+            ON {schema}.time_series_characteristics (unique_id, scenario_id);
+        """,
+        # Drop old unique constraint on best_method_per_series.unique_id and add composite
+        f"""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint c
+                JOIN pg_class t ON t.oid = c.conrelid
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                WHERE c.conname = 'best_method_per_series_unique_id_key'
+                  AND n.nspname = '{schema}'
+            ) THEN
+                ALTER TABLE {schema}.best_method_per_series
+                    DROP CONSTRAINT best_method_per_series_unique_id_key;
+            END IF;
+        END $$;
+        """,
+        f"""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_bmp_uid_scen
+            ON {schema}.best_method_per_series (unique_id, scenario_id);
+        """,
     ]
 
     conn = get_conn()
@@ -1032,6 +1227,12 @@ def init_schema(config_path=None) -> None:
                     TRUE, 9999
                 )
                 ON CONFLICT (parameter_type, name) DO NOTHING
+            """)
+            # Seed base forecast scenario
+            cur.execute(f"""
+                INSERT INTO {schema}.forecast_scenarios (scenario_id, name, description, is_base, status)
+                VALUES (1, 'Base', 'Default scenario — global configuration', TRUE, 'complete')
+                ON CONFLICT (scenario_id) DO NOTHING
             """)
         conn.commit()
         logger.info(f"Schema '{schema}' tables created/verified")
@@ -1167,3 +1368,92 @@ def load_table(
         return df
     finally:
         conn.close()
+
+
+def get_demand_for_scenario(schema: str, scenario_id: int, conn) -> "pd.DataFrame":
+    """
+    Read demand_actuals applying a forecast scenario's demand_overrides.
+
+    demand_overrides keys (all optional):
+      demand_multiplier  float  — scale all y values (default 1.0)
+      date_from          str    — ISO date, restrict training window start
+      date_to            str    — ISO date, restrict training window end
+      segment_id         int    — include only series belonging to this segment
+      series_filter      list   — explicit list of unique_ids to include
+    """
+    import pandas as pd
+    import psycopg2.extras as _pge
+
+    cur = conn.cursor(cursor_factory=_pge.RealDictCursor)
+    cur.execute(
+        f"SELECT demand_overrides FROM {schema}.forecast_scenarios WHERE scenario_id = %s",
+        (scenario_id,),
+    )
+    row = cur.fetchone()
+    ov: dict = dict(row["demand_overrides"] or {}) if row else {}
+
+    date_from:     str | None       = ov.get("date_from")
+    date_to:       str | None       = ov.get("date_to")
+    series_filter: list | None      = ov.get("series_filter")
+    seg_id:        int | None       = ov.get("segment_id")
+    multiplier:    float            = float(ov.get("demand_multiplier", 1.0))
+
+    wheres: list[str] = []
+    params: list      = []
+
+    if date_from:
+        wheres.append("date >= %s")
+        params.append(date_from)
+    if date_to:
+        wheres.append("date <= %s")
+        params.append(date_to)
+    if series_filter:
+        wheres.append("unique_id = ANY(%s)")
+        params.append(series_filter)
+    if seg_id:
+        wheres.append(
+            f"unique_id IN (SELECT unique_id FROM {schema}.segment_membership"
+            f" WHERE segment_id = %s)"
+        )
+        params.append(seg_id)
+
+    where_clause = ("WHERE " + " AND ".join(wheres)) if wheres else ""
+    cur.execute(
+        f"SELECT unique_id, date, y FROM {schema}.demand_actuals "
+        f"{where_clause} ORDER BY unique_id, date",
+        params,
+    )
+    df = pd.DataFrame(cur.fetchall(), columns=["unique_id", "date", "y"])
+    if multiplier != 1.0 and not df.empty:
+        df["y"] = (df["y"] * multiplier).round(6)
+    return df
+
+
+def load_config_for_scenario(schema: str, scenario_id: int) -> dict:
+    """
+    Return the effective runtime config for a scenario.
+
+    Starts from the global DB config (load_config_from_db), then deep-merges
+    the scenario's param_overrides on top.  Scalar overrides replace values
+    directly; dict overrides are merged key-by-key.
+
+    param_overrides can contain: horizon, backtest_windows, methods,
+    outlier_method, outlier_sensitivity, distribution_horizon, and any other
+    top-level key from the global config.
+    """
+    cfg = load_config_from_db()
+    with get_conn() as conn:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            f"SELECT param_overrides FROM {schema}.forecast_scenarios"
+            f" WHERE scenario_id = %s",
+            (scenario_id,),
+        )
+        row = cur.fetchone()
+    ov: dict = dict(row["param_overrides"] or {}) if row else {}
+    for k, v in ov.items():
+        if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+            cfg[k] = {**cfg[k], **v}
+        else:
+            cfg[k] = v
+    return cfg

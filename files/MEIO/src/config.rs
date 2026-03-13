@@ -54,6 +54,11 @@ pub struct MeioConfig {
     /// Fill-rate threshold below which the long-jump heuristic is applied.
     #[serde(default = "default_big_jump")]
     pub big_jump_threshold: f64,
+
+    /// Asset pool configurations (for rotable / capital asset sizing).
+    /// Processed independently from the main greedy loop via Erlang-B/C.
+    #[serde(default)]
+    pub asset_targets: Vec<AssetTarget>,
 }
 
 fn default_distribution_threshold() -> i64 { 25 }
@@ -201,6 +206,65 @@ pub struct GroupTarget {
 
 fn default_inf() -> f64 { f64::INFINITY }
 
+// ── Asset pool target ─────────────────────────────────────────────────────
+
+/// Configuration for a rotable / capital asset pool.
+///
+/// Pool sizing uses Erlang-B (loss system) or Erlang-C (delay system) to
+/// determine the minimum pool size that achieves `target_availability`.
+/// The offered load is `failure_rate_per_unit × fleet_size × repair_tat_mean`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetTarget {
+    /// Unique asset identifier (matches `item_id:site_id` or a custom string).
+    pub asset_id: String,
+
+    /// Known fleet size.  `None` means the optimizer determines the minimum
+    /// pool size required to achieve `target_availability`.
+    #[serde(default)]
+    pub fleet_size: Option<f64>,
+
+    /// Expected failure events per unit per period (same units as `leg_lead_time`).
+    #[serde(default)]
+    pub failure_rate_per_unit: f64,
+
+    /// Mean repair turnaround time (same units as `leg_lead_time`).
+    pub repair_tat_mean: f64,
+
+    /// Coefficient of variation of repair TAT.  0 = deterministic TAT.
+    #[serde(default)]
+    pub repair_tat_cv: f64,
+
+    /// Target availability: P(asset available when demanded).  E.g. 0.95.
+    #[serde(default = "default_availability")]
+    pub target_availability: f64,
+
+    /// Unit cost used for investment reporting.
+    #[serde(default)]
+    pub unit_cost: f64,
+
+    /// Criticality multiplier applied to the marginal-value ranking.
+    /// Values > 1 prioritise this asset over cheaper items in the greedy loop.
+    #[serde(default = "default_one")]
+    pub criticality: f64,
+
+    /// Site IDs that share this asset pool (pooled stocking).
+    #[serde(default)]
+    pub pooled_sites: Vec<i64>,
+}
+
+fn default_availability() -> f64 { 0.95 }
+
+/// Result of the asset pool sizing calculation for one asset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetPoolResult {
+    pub asset_id: String,
+    pub recommended_pool_size: u32,
+    /// Achieved availability at `recommended_pool_size` (Erlang-B shortage probability subtracted from 1).
+    pub achieved_availability: f64,
+    /// Investment at `unit_cost × recommended_pool_size`.
+    pub investment: f64,
+}
+
 // ── Serialization helpers ─────────────────────────────────────────────────
 
 impl MeioConfig {
@@ -238,6 +302,7 @@ mod tests {
             line_fill_rate: true,
             precision_jump: 0.0,
             big_jump_threshold: 0.95,
+            asset_targets: vec![],
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: MeioConfig = serde_json::from_str(&json).unwrap();
@@ -256,6 +321,7 @@ mod tests {
             line_fill_rate: true,
             precision_jump: 0.0,
             big_jump_threshold: 0.95,
+            asset_targets: vec![],
         };
         assert!(cfg.effective_workers() >= 1);
     }

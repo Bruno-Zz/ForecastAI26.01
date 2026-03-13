@@ -13,6 +13,34 @@ use crate::distributions::DistributionType;
 /// Composite key for a SKU: (item_id, site_id).
 pub type SkuKey = (i64, i64);
 
+// ── RepairFlow ─────────────────────────────────────────────────────────────
+
+/// Repair / return flow parameters for a SKU.
+///
+/// When populated, the optimizer uses net demand (gross demand minus
+/// the serviceable return stream) and credits WIP units in repair
+/// against the required safety stock.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RepairFlow {
+    /// Fraction of demand units that are returned for repair (0–1).
+    #[serde(default)]
+    pub return_rate: f64,
+    /// Fraction of returned units that pass repair and re-enter
+    /// serviceable inventory.  `1 − repair_yield` = condemnation rate.
+    #[serde(default = "default_one")]
+    pub repair_yield: f64,
+    /// Mean repair turnaround time in the same units as `leg_lead_time`.
+    #[serde(default)]
+    pub repair_tat_mean: f64,
+    /// Coefficient of variation of repair TAT.
+    #[serde(default)]
+    pub repair_tat_cv: f64,
+    /// Units currently in the repair pipeline (WIP). Counted as
+    /// expected serviceable returns and credited against the ROP.
+    #[serde(default)]
+    pub wip_qty: f64,
+}
+
 /// Convenience: format a `SkuKey` as `"item_id:site_id"` for logging / maps.
 pub fn key_to_string(k: &SkuKey) -> String {
     format!("{}:{}", k.0, k.1)
@@ -175,6 +203,23 @@ pub struct SkuRecord {
 
     /// Scenario ID (passed through to output for traceability).
     pub scenario_id: Option<i64>,
+
+    // ── Repair / return flow ──────────────────────────────────────────────
+    /// Optional repair flow parameters.  When `Some`, the optimizer
+    /// adjusts effective demand and credits WIP inventory.
+    #[serde(default)]
+    pub repair_flow: Option<RepairFlow>,
+
+    // ── Asset pool mode ───────────────────────────────────────────────────
+    /// When `true`, this SKU is treated as a rotable / capital asset.
+    /// The optimizer uses Erlang-B pool-shortage probability instead of
+    /// the standard fill-rate formula.
+    #[serde(default)]
+    pub asset_mode: bool,
+    /// Criticality multiplier applied to the marginal-value ranking in
+    /// asset mode.  Values > 1 elevate this asset above cheaper items.
+    #[serde(default = "default_one")]
+    pub criticality: f64,
 }
 
 fn default_neg_one() -> f64 { -1.0 }
@@ -209,6 +254,8 @@ pub struct SkuResult {
     pub current_fill_rate: f64,
     pub marginal_value: f64,
     pub scenario_id: Option<i64>,
+    /// Total inventory investment: `committed_buffer × unit_cost`.
+    pub inventory_value: f64,
 }
 
 impl SkuResult {
@@ -220,6 +267,7 @@ impl SkuResult {
             current_fill_rate: r.current_fill_rate,
             marginal_value: r.marginal_value,
             scenario_id: r.scenario_id,
+            inventory_value: r.committed_buffer * r.unit_cost,
         }
     }
 }
@@ -298,6 +346,9 @@ mod tests {
             dependant_changes: vec![],
             sku_init_set: false,
             scenario_id: Some(1),
+            repair_flow: None,
+            asset_mode: false,
+            criticality: 1.0,
         }
     }
 

@@ -57,6 +57,7 @@ python-multipart>=0.0.6
 # Additional utilities
 pydantic>=2.5.0
 python-dotenv>=1.0.0
+orjson>=3.11.6
 
 # Authentication
 python-jose[cryptography]>=3.3.0

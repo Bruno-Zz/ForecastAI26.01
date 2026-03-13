@@ -484,6 +484,8 @@ export const PipelineRunner = () => {
   const [showLogs, setShowLogs]     = useState({});        // stepId -> bool
   const [showFullLogs, setShowFullLogs] = useState(false);
   const [error, setError]           = useState(null);
+  const [scenarios, setScenarios]   = useState([]);
+  const [activeScenarioId, setActiveScenarioId] = useState(1);
   const eventSources = useRef({});                         // key -> EventSource
   // Refs so the stable polling interval can read the latest state without
   // being recreated on every state change (avoids constant timer resets).
@@ -607,6 +609,13 @@ export const PipelineRunner = () => {
       .catch(e => setError(e.message));
   }, []);
 
+  // Load scenarios
+  useEffect(() => {
+    api.get('/forecast/scenarios')
+      .then(r => setScenarios(r.data))
+      .catch(() => {});
+  }, []);
+
   // ── Restore jobs from server on mount ──────────────────────────────
   // This makes sure that if the user navigates away and comes back,
   // they still see running / completed jobs, and SSE streams reconnect.
@@ -723,7 +732,7 @@ export const PipelineRunner = () => {
   const handleRun = async (stepId) => {
     try {
       setError(null);
-      const r = await api.post(`/pipeline/run/${stepId}`);
+      const r = await api.post(`/pipeline/run/${stepId}`, { scenario_id: activeScenarioId });
       const job = { ...r.data, log_lines: [], started_at: null, ended_at: null };
       setJobs(prev => ({ ...prev, [stepId]: job }));
       setShowLogs(prev => ({ ...prev, [stepId]: true }));
@@ -782,6 +791,29 @@ export const PipelineRunner = () => {
           Run the full pipeline in one click, or trigger individual steps independently.
         </p>
       </div>
+
+      {/* Scenario selector */}
+      {scenarios.length > 1 && (
+        <div className="mb-5 flex items-center gap-3">
+          <label className="text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap">Scenario:</label>
+          <select
+            value={activeScenarioId}
+            onChange={e => setActiveScenarioId(Number(e.target.value))}
+            className="flex-1 max-w-xs px-3 py-1.5 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          >
+            {scenarios.map(s => (
+              <option key={s.scenario_id} value={s.scenario_id}>
+                {s.name}{s.is_base ? ' (Base)' : ''}
+              </option>
+            ))}
+          </select>
+          {activeScenarioId !== 1 && (
+            <span className="px-2 py-0.5 text-xs rounded-full bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 font-medium">
+              What-If
+            </span>
+          )}
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg px-4 py-3 text-sm text-red-700 dark:text-red-300 flex items-start gap-2">

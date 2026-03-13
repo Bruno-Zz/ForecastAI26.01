@@ -13,7 +13,7 @@
 
 use crate::config::MeioConfig;
 use crate::distributions::{fill_rate_for_rop, poisson_fr_to_rop, FillRateParams};
-use crate::math::normal_inv;
+use crate::math::{erlang_b, normal_inv};
 use crate::sku::{DependantChange, SkuKey, SkuRecord, SkuStore};
 use crate::target::TargetDictionary;
 
@@ -361,6 +361,54 @@ pub fn kit_probabilistic_wait_time(
     overall_lt_weighted
 }
 
+// ── Asset mode: Erlang-B pool sizing marginal value ───────────────────────
+
+/// Compute marginal value for an asset-mode SKU using Erlang-B.
+///
+/// The "buffer" in asset mode represents the pool size (number of units owned).
+/// The fill rate analogue is `1 − erlang_b(pool_size, rho)`.
+/// Marginal value = criticality × Δavailability / unit_cost.
+fn compute_asset_marginal_value(key: &SkuKey, sku: &SkuRecord) -> Option<MarginalValueResult> {
+    let current_pool = sku.committed_buffer.floor() as u32;
+    let next_pool    = current_pool + 1;
+
+    // Offered load: λ × μ  (failure rate × repair TAT)
+    // Use total_demand_rate as failure rate; leg_lead_time as repair TAT.
+    let rho = sku.total_demand_rate * sku.leg_lead_time;
+
+    let current_shortage = erlang_b(current_pool, rho);
+    let next_shortage    = erlang_b(next_pool,    rho);
+
+    let current_avail = 1.0 - current_shortage;
+    let next_avail    = 1.0 - next_shortage;
+
+    // Already at or above max fill rate (used as max availability cap)
+    if next_avail <= current_avail || current_avail >= sku.sku_max_fill_rate {
+        return Some(MarginalValueResult {
+            key: *key,
+            new_buffer:    next_pool as f64,
+            new_fill_rate: next_avail,
+            marginal_value: -LARGE_QUANTITY,
+            dependant_changes: vec![],
+            exhausted: true,
+        });
+    }
+
+    let delta_avail = next_avail - current_avail;
+    let investment  = sku.unit_cost.max(1e-9);
+    let criticality = if sku.criticality > 0.0 { sku.criticality } else { 1.0 };
+    let mv = criticality * delta_avail / investment;
+
+    Some(MarginalValueResult {
+        key: *key,
+        new_buffer:    next_pool as f64,
+        new_fill_rate: next_avail,
+        marginal_value: mv,
+        dependant_changes: vec![],
+        exhausted: false,
+    })
+}
+
 // ── Core: compute_marginal_value ──────────────────────────────────────────
 
 /// Compute the marginal value (gain / investment) for increasing one SKU's buffer.
@@ -413,13 +461,33 @@ fn compute_mv_recursive(
     let avg_size = sku.avg_size.max(1.0);
     let dist_threshold = cfg.distribution_threshold;
 
+    // ── Asset mode: use Erlang-B pool-shortage instead of fill-rate formula ──
+    if sku.asset_mode && is_main {
+        return compute_asset_marginal_value(key, sku);
+    }
+
+    // ── Repair flow: compute net demand rate and WIP inventory credit ──────
+    // These are local adjustments only — the SkuRecord is not mutated.
+    let (effective_total_demand_rate, effective_direct_demand_rate, effective_on_hand) =
+        if let Some(ref rf) = sku.repair_flow {
+            // Net serviceable return rate per period
+            let return_supply_rate = sku.total_demand_rate * rf.return_rate * rf.repair_yield;
+            let net_total  = (sku.total_demand_rate  - return_supply_rate).max(0.0);
+            let net_direct = (sku.direct_demand_rate - return_supply_rate.min(sku.direct_demand_rate)).max(0.0);
+            // WIP units already in repair that will eventually return serviceable
+            let wip_credit = rf.wip_qty * rf.repair_yield;
+            (net_total, net_direct, sku.on_hand + wip_credit)
+        } else {
+            (sku.total_demand_rate, sku.direct_demand_rate, sku.on_hand)
+        };
+
     // Effective wait time: use override (from parent's fill-rate change) or current
     let wait_time = override_wait_time.unwrap_or(sku.current_wait_time);
     let (effective_total_lt_fcst, _effective_direct_lt_fcst) =
-        effective_lt_fcst(sku.total_demand_rate, sku.direct_demand_rate, sku.leg_lead_time, wait_time);
+        effective_lt_fcst(effective_total_demand_rate, effective_direct_demand_rate, sku.leg_lead_time, wait_time);
 
     // Cap standard deviations
-    let monthly_rate = 30.0 * (sku.total_demand_rate + sku.direct_demand_rate);
+    let monthly_rate = 30.0 * (effective_total_demand_rate + effective_direct_demand_rate);
     let (dmd_stddev, lt_stddev) = cap_std_dev(
         sku.dmd_stddev,
         monthly_rate,
@@ -438,12 +506,12 @@ fn compute_mv_recursive(
             // any hard maximum ROP quantity constraint.
             let (_tgt_min, tgt_max) = min_max_rop_qty(
                 sku.sku_max_sl_slices,
-                sku.total_demand_rate,
+                effective_total_demand_rate,
                 avg_size,
                 sku.sku_max_sl_qty,
                 sku.sku_min_sl_slices,
                 sku.use_existing_inventory,
-                sku.on_hand,
+                effective_on_hand,
                 sku.sku_min_sl_qty,
                 effective_total_lt_fcst,
             );
@@ -497,9 +565,11 @@ fn compute_mv_recursive(
     let investment = investment.max(1e-9); // guard against division by zero
 
     // ── Marginal group gain ───────────────────────────────────────────────
-    let mut total_gain = targets.marginal_group_gain(
+    // Use effective (net) direct demand rate and apply criticality weight.
+    let criticality = if sku.criticality > 0.0 { sku.criticality } else { 1.0 };
+    let mut total_gain = criticality * targets.marginal_group_gain(
         &sku.j_target_groups,
-        sku.direct_demand_rate,
+        effective_direct_demand_rate,
         new_sku_fill_rate,
         sku.current_fill_rate,
         sku.group_participation,
@@ -686,6 +756,9 @@ mod tests {
             dependant_changes: vec![],
             sku_init_set: false,
             scenario_id: Some(1),
+            repair_flow: None,
+            asset_mode: false,
+            criticality: 1.0,
         }
     }
 

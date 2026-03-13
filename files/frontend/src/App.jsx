@@ -41,6 +41,7 @@ const Segments = lazy(() => import('./components/Segments'));
 const UserManagement = lazy(() => import('./components/UserManagement'));
 const AuditLog = lazy(() => import('./components/AuditLog'));
 const ABCClassification = lazy(() => import('./components/ABCClassification'));
+const ScenarioManager = lazy(() => import('./components/ScenarioManager'));
 
 /** Shared loading fallback shown while a lazy chunk downloads */
 const PageSpinner = () => (
@@ -122,6 +123,7 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
         }
         {navLink('/segments', '🗂️', 'Segments', false, 'nav-segments')}
         {navLink('/abc', '🏷️', 'Classifications', false, 'nav-abc')}
+        {navLink('/scenarios', '🔀', 'Scenarios', false, 'nav-scenarios')}
         {navLink('/processes', '⚙️', 'Process Runner', false, 'nav-pipeline')}
         {navLink('/logs', '📋', 'Process Log', false, 'nav-logs')}
         {navLink('/settings', '🔧', 'Settings', false, 'nav-settings')}
@@ -277,6 +279,7 @@ function App() {
               <Route path="/settings" element={<Settings />} />
               <Route path="/audit" element={<AuditLog />} />
               <Route path="/users" element={<UserManagement />} />
+              <Route path="/scenarios" element={<ScenarioManager />} />
               <Route path="/login" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>
