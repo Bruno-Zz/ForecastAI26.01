@@ -255,7 +255,7 @@ const parseUniqueId = (uid) => {
 
 // ---- Section order — persisted drag-and-drop ----
 const DEFAULT_SECTION_ORDER = [
-  'toggles', 'main_chart', 'forecast_table', 'outlier',
+  'toggles', 'main_chart', 'forecast_table',
   'rationale', 'parameters', 'metrics', 'hyperparameters', 'ridge', 'evolution',
 ];
 
@@ -1203,8 +1203,6 @@ export const TimeSeriesViewer = () => {
   // ---- Date-range zoom ----
   const [zoomStart, setZoomStart] = useState(0);
   const [zoomEnd, setZoomEnd] = useState(99999);   // large sentinel → clamped to last date by slider max
-  const [outlierZoomStart, setOutlierZoomStart] = useState(0);
-  const [outlierZoomEnd, setOutlierZoomEnd] = useState(99999);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -2259,33 +2257,6 @@ export const TimeSeriesViewer = () => {
     if (allDates.length > 0) { setZoomStart(0); setZoomEnd(allDates.length - 1); }
   }, [allDates.length]);
 
-  /* ---------- outlier data ---------- */
-  const { outlierChartData, outlierDates } = useMemo(() => {
-    if (!hasOutlierCorrections || !originalData || !historicalData) return { outlierChartData: [], outlierDates: [] };
-    const data = [], dates = [];
-    const outlierDateSet = new Set();
-    if (outlierInfo?.outliers) outlierInfo.outliers.forEach(o => outlierDateSet.add(o.date?.split('T')[0]));
-    originalData.date.forEach((date, i) => {
-      const dateStr = date?.split('T')[0] || date;
-      dates.push(dateStr);
-      const origVal = originalData.value[i];
-      const corrVal = historicalData.value[i];
-      const isOutlier = outlierDateSet.has(dateStr);
-      // For the stacked bar: push both series per date
-      // "Corrected" base bar (always) + "Adjustment" bar showing the delta for outlier dates
-      const delta = origVal - corrVal; // positive = original was clipped down
-      data.push({ date: dateStr, value: corrVal, series: 'Corrected', isOutlier, origVal, corrVal, delta });
-      if (isOutlier && Math.abs(delta) > 0) {
-        // Show the adjustment as a separate stacked segment
-        data.push({ date: dateStr, value: delta > 0 ? delta : Math.abs(delta), series: delta > 0 ? 'Clipped ↓' : 'Filled ↑', isOutlier: true, origVal, corrVal, delta });
-      }
-    });
-    return { outlierChartData: data, outlierDates: dates };
-  }, [hasOutlierCorrections, originalData, historicalData, outlierInfo]);
-
-  useEffect(() => {
-    if (outlierDates.length > 0) { setOutlierZoomStart(0); setOutlierZoomEnd(outlierDates.length - 1); }
-  }, [outlierDates.length]);
 
   /* ---------- Plotly base layout for dark mode ---------- */
   const plotlyBase = useMemo(() => ({
@@ -2304,34 +2275,6 @@ export const TimeSeriesViewer = () => {
   };
 
   /* ---------- chart data (Plotly) ---------- */
-  const outlierChartSpec = useMemo(() => {
-    if (outlierChartData.length === 0 || outlierDates.length === 0) return null;
-    const minDate = outlierDates[outlierZoomStart] || outlierDates[0];
-    const maxDate = outlierDates[outlierZoomEnd] || outlierDates[outlierDates.length - 1];
-    const filtered = outlierChartData.filter(d => d.date >= minDate && d.date <= maxDate);
-    if (filtered.length === 0) return null;
-    // Group by series type for stacked bar
-    const seriesMap = { 'Corrected': { color: '#2563eb' }, 'Clipped \u2193': { color: '#ef4444' }, 'Filled \u2191': { color: '#f59e0b' } };
-    const traces = Object.entries(seriesMap).map(([name, cfg]) => {
-      const rows = filtered.filter(d => d.series === name);
-      return {
-        type: 'bar', name,
-        x: rows.map(d => d.date), y: rows.map(d => d.value),
-        marker: { color: cfg.color, opacity: rows.map(d => d.isOutlier ? 1.0 : 0.75) },
-        customdata: rows.map(d => [d.corrVal, d.origVal, d.delta]),
-        hovertemplate: '%{x|%Y-%m}<br>Corrected: %{customdata[0]:,.0f}<br>Original: %{customdata[1]:,.0f}<br>\u0394: %{customdata[2]:,.0f}<extra>%{fullData.name}</extra>',
-      };
-    }).filter(t => t.x.length > 0);
-    return {
-      data: traces,
-      layout: {
-        ...plotlyBase, height: 300, barmode: 'stack',
-        xaxis: { ...plotlyBase.xaxis, type: 'date', tickformat: '%Y-%m', tickangle: -30 },
-        yaxis: { ...plotlyBase.yaxis, title: 'Demand' },
-        legend: { orientation: 'h', y: 1.08 },
-      },
-    };
-  }, [outlierChartData, outlierDates, outlierZoomStart, outlierZoomEnd, plotlyBase]);
 
   const mainChartSpec = useMemo(() => {
     if (allData.length === 0 || allDates.length === 0) return null;
@@ -2439,6 +2382,38 @@ export const TimeSeriesViewer = () => {
         hovertemplate: '%{x|%Y-%m-%d}<br>Override: %{y:,.0f}<br>%{customdata[0]}<extra>Override</extra>' });
     }
 
+    // ── Outlier markers (original value before correction, shown as red dots) ──
+    if (hasOutlierCorrections && originalData && historicalData && outlierInfo?.outliers?.length) {
+      const outlierDateSet = new Set(outlierInfo.outliers.map(o => o.date?.split('T')[0]));
+      const outlierRows = [];
+      originalData.date.forEach((date, i) => {
+        const dateStr = date?.split('T')[0] || date;
+        if (outlierDateSet.has(dateStr) && dateStr >= minDate && dateStr <= maxDate) {
+          const origVal = originalData.value[i];
+          const corrVal = historicalData.value[i] ?? origVal;
+          outlierRows.push({ date: dateStr, origVal, corrVal, delta: origVal - corrVal });
+        }
+      });
+      if (outlierRows.length > 0) {
+        // Gray dashed line connecting original values
+        traces.push({
+          type: 'scatter', mode: 'lines', name: 'Original (pre-correction)', legendgroup: 'outliers',
+          x: outlierRows.map(d => d.date), y: outlierRows.map(d => d.origVal),
+          line: { color: isDark ? '#9ca3af' : '#6b7280', width: 1.5, dash: 'dash' },
+          opacity: 0.7, hoverinfo: 'skip', showlegend: true,
+        });
+        // Red filled circle markers at each outlier point (original value)
+        traces.push({
+          type: 'scatter', mode: 'markers', name: 'Outlier (original value)', legendgroup: 'outliers',
+          x: outlierRows.map(d => d.date), y: outlierRows.map(d => d.origVal),
+          marker: { color: '#ef4444', symbol: 'circle', size: 9, line: { color: '#b91c1c', width: 1.5 } },
+          customdata: outlierRows.map(d => [d.corrVal, d.delta]),
+          hovertemplate: '%{x|%Y-%m-%d}<br>Original: %{y:,.0f}<br>Corrected: %{customdata[0]:,.0f}<br>Δ: %{customdata[1]:+,.0f}<extra>Outlier</extra>',
+          showlegend: false,
+        });
+      }
+    }
+
     // ── Backtest overlay (faded forecast lines for all origins) ──
     if (showBacktestOverlay && backtestData?.origins?.length) {
       backtestData.origins.forEach(origin => {
@@ -2471,7 +2446,7 @@ export const TimeSeriesViewer = () => {
         hovermode: 'closest',
       },
     };
-  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, bandVisibleMethods, activeMethodDomain, daysPerPeriod, plotlyBase, isDark, showBacktestOverlay, backtestData]);
+  }, [allData, allDates, zoomStart, zoomEnd, visibleMethods, bandVisibleMethods, activeMethodDomain, daysPerPeriod, plotlyBase, isDark, showBacktestOverlay, backtestData, hasOutlierCorrections, originalData, historicalData, outlierInfo]);
 
   const racingBarsSpec = useMemo(() => {
     const src = originForecasts?.forecasts?.length > 0 ? originForecasts.forecasts : activeForecasts;
@@ -3392,23 +3367,16 @@ export const TimeSeriesViewer = () => {
           </Section>
         ) : null;
 
-        /* outlier — hidden in multi-series mode */
-        sectionNodes['outlier'] = (hasOutlierCorrections && outlierChartSpec && !isMultiMode) ? (
-          <Section key="outlier" title="Demand Before & After Correction" storageKey="tsv_outlier_open" badge={`${nOutliers} outlier${nOutliers !== 1 ? 's' : ''}`} {...dp('outlier')}>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-              Detected via <span className="font-medium">{outlierInfo?.detection_method || 'IQR'}</span>, corrected with <span className="font-medium">{outlierInfo?.correction_method || 'clip'}</span>.
-              Gray dashed = original, blue solid = corrected, red dots = outlier points.
-            </p>
-            <div className="w-full overflow-x-auto"><Plot data={outlierChartSpec.data} layout={outlierChartSpec.layout} config={plotlyConfig} useResizeHandler style={{width:'100%'}} /></div>
-            <ZoomSlider dates={outlierDates} start={outlierZoomStart} end={outlierZoomEnd} onStartChange={setOutlierZoomStart} onEndChange={setOutlierZoomEnd} />
-          </Section>
-        ) : null;
-
         /* main_chart */
         sectionNodes['main_chart'] = (
           <Section key="main_chart" id="tsv-main-chart" title={`Historical Data & Forecasts${horizonLength ? ` (${horizonLength}-${periodLabel} horizon)` : ''}`} storageKey="tsv_main_chart_open" {...dp('main_chart')}>
             <div className="flex items-center gap-3 mb-3 flex-wrap">
-              <p className="text-sm text-gray-500 dark:text-gray-400 flex-1">Shaded bands: 50% (dark) and 90% (light) prediction intervals.</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400 flex-1">
+                Shaded bands: 50% (dark) and 90% (light) prediction intervals.
+                {hasOutlierCorrections && outlierInfo && !isMultiMode && (
+                  <> Bars show corrected demand — <span className="text-red-500 font-medium">red dots</span> mark outlier points (original value before {outlierInfo.correction_method || 'correction'}, detected via {outlierInfo.detection_method || 'IQR'}).</>
+                )}
+              </p>
               {!isMultiMode && (
                 backtestLoading
                   ? <span className="text-xs text-gray-400 px-3 py-1.5 bg-gray-100 dark:bg-gray-700 rounded-lg">Loading backtest…</span>

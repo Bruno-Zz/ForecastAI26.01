@@ -142,7 +142,8 @@
       "Bash(python3.13 -c \"import os, time; print\\(''main.py mtime after edit:'', time.ctime\\(os.path.getmtime\\(''api/main.py''\\)\\)\\)\")",
       "Bash(python3.13 -c \"import time; time.sleep\\(20\\)\" curl -s http://localhost:8002/)",
       "Bash(python3.13:*)",
-      "Bash(venv/Scripts/python.exe -c \":*)"
+      "Bash(venv/Scripts/python.exe -c \":*)",
+      "Bash(npx tsc:*)"
     ]
   }
 }

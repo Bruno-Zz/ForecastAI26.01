@@ -67,7 +67,7 @@ export default function ItemPopover({ name, imageUrl, stats, children, delay = 3
 
   return (
     <>
-      <span ref={triggerRef} onMouseEnter={show} onMouseLeave={hide} style={{ display: 'contents' }}>
+      <span ref={triggerRef} onMouseEnter={show} onMouseLeave={hide} style={{ display: 'inline' }}>
         {children}
       </span>
       {visible && createPortal(
