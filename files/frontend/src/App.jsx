@@ -44,6 +44,7 @@ const ABCClassification = lazy(() => import('./components/ABCClassification'));
 const ScenarioManager = lazy(() => import('./components/ScenarioManager'));
 const CausalForecasting = lazy(() => import('./components/CausalForecasting'));
 const MeioScenarios = lazy(() => import('./components/MeioScenarios'));
+const AdminPanel = lazy(() => import('./components/AdminPanel'));
 
 /** Shared loading fallback shown while a lazy chunk downloads */
 const PageSpinner = () => (
@@ -90,9 +91,11 @@ function NavGroup({ label, icon, storageKey, open: sidebarOpen, defaultOpen = tr
   );
 }
 
+import ProtectedRoute from './components/ProtectedRoute';
+
 function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
   const location = useLocation();
-  const { user, isAdmin, logout } = useAuth();
+  const { user, isAdmin, isSuperAdmin, logout } = useAuth();
   const [lastSeries, setLastSeries] = useState(null);
   const [lastSeriesLabel, setLastSeriesLabel] = useState(null);
 
@@ -182,6 +185,7 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
           {navLink('/logs', '📋', 'Process Log', false, 'nav-logs')}
           {navLink('/audit', '📝', 'Audit Log', false, 'nav-audit')}
           {isAdmin && navLink('/users', '👥', 'Users', false, 'nav-users')}
+          {isSuperAdmin && navLink('/admin', '🏢', 'Account Admin', false, 'nav-admin')}
         </NavGroup>
 
       </nav>
@@ -214,7 +218,11 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
           <div className="px-3 py-1.5">
             <p className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate">{user.display_name}</p>
             <p className="text-xs text-gray-400 dark:text-gray-500 truncate">{user.email}</p>
-            {isAdmin && (
+            {isSuperAdmin ? (
+              <span className="inline-block mt-0.5 px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 rounded">
+                SuperAdmin
+              </span>
+            ) : isAdmin && (
               <span className="inline-block mt-0.5 px-1.5 py-0.5 text-[10px] font-medium bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 rounded">
                 Admin
               </span>
@@ -239,7 +247,7 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
 }
 
 function App() {
-  const { isAuthenticated, loading, isAdmin } = useAuth();
+  const { isAuthenticated, loading, isAdmin, isSuperAdmin } = useAuth();
   const { startTour, startFullTour } = useTour(isAdmin);
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(() => {
@@ -337,6 +345,11 @@ function App() {
               <Route path="/scenarios" element={<ScenarioManager />} />
               <Route path="/causal" element={<CausalForecasting />} />
               <Route path="/meio" element={<MeioScenarios />} />
+              <Route path="/admin" element={
+                <ProtectedRoute requireSuperAdmin>
+                  <AdminPanel />
+                </ProtectedRoute>
+              } />
               <Route path="/login" element={<Navigate to="/" replace />} />
             </Routes>
           </Suspense>

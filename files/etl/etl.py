@@ -56,6 +56,59 @@ class ETLPipeline:
         "median": "median",
     }
 
+    # ------------------------------------------------------------------
+    # Per-account helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_sql_expr(value: str) -> bool:
+        """Return True when *value* looks like a SQL expression rather than a
+        plain column name.  Heuristic: contains a space, parenthesis, pipe, or
+        arithmetic operator — any of which would be invalid in a bare identifier.
+        """
+        return any(c in str(value) for c in (' ', '(', ')', '|', '+', '*', '/'))
+
+    @staticmethod
+    def _apply_date_placeholders(query: str) -> str:
+        """Convert ``{min_date}`` / ``{max_date}`` Python-format placeholders in
+        *query* to psycopg2 ``%(min_date)s`` / ``%(max_date)s`` style so that
+        date binding stays parameterised (no raw string injection).
+        Unknown placeholders are left unchanged.
+        """
+        return query.replace("{min_date}", "%(min_date)s").replace("{max_date}", "%(max_date)s")
+
+    def _run_hook_sql(self, conn, statements: List[str], label: str) -> None:
+        """Execute *statements* on *conn*, auto-committing after each one.
+
+        Parameters
+        ----------
+        conn       psycopg2 connection (must be open; caller owns close).
+        statements List of SQL strings to execute in order.
+        label      Short tag used in log messages (e.g. ``'pre_extract'``).
+        """
+        if not statements:
+            return
+        self.logger.info(f"Running {len(statements)} {label} hook(s)...")
+        with conn.cursor() as cur:
+            for i, stmt in enumerate(statements, 1):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                self.logger.debug("  [%s hook %d] %.120s", label, i, stmt)
+                try:
+                    cur.execute(stmt)
+                    conn.commit()
+                    self.logger.info(
+                        "  [%s hook %d] OK — %d row(s) affected",
+                        label, i, cur.rowcount if cur.rowcount >= 0 else 0,
+                    )
+                except Exception as exc:
+                    conn.rollback()
+                    self.logger.error(
+                        "  [%s hook %d] FAILED: %s\n  SQL: %s", label, i, exc, stmt
+                    )
+                    raise
+
     def __init__(self, config_path=None):
         """
         Initialize the ETL pipeline.
@@ -82,15 +135,45 @@ class ETLPipeline:
             self.source_demand_table = self.source_db_config.get(
                 "demand_table", "dp_plan.calc_dp_actual"
             )
-            # Column mapping — allows the remote table to have different names
+            # Column mapping — allows the remote table to use different / computed names.
+            # Values may be plain column names OR SQL expressions (anything containing a
+            # space, parenthesis, or SQL operator is treated as an expression and used
+            # verbatim in the SELECT; plain names are prefixed with the 'd.' table alias).
             src_cols = self.source_db_config.get("columns", {})
-            self.src_col_item_id = src_cols.get("item_id", "item_id")
-            self.src_col_site_id = src_cols.get("site_id", "site_id")
-            self.src_col_date    = src_cols.get("date", "date")
-            self.src_col_qty     = src_cols.get("qty", "qty")
-            self.src_col_channel = src_cols.get("channel", "channel")
+            self.src_col_item_id  = src_cols.get("item_id",  "item_id")
+            self.src_col_site_id  = src_cols.get("site_id",  "site_id")
+            self.src_col_date     = src_cols.get("date",     "date")
+            self.src_col_qty      = src_cols.get("qty",      "qty")
+            self.src_col_channel  = src_cols.get("channel",  "channel")
+            # Optional SQL expression for the series key (unique_id).
+            # When set, replaces the default item_id||'_'||site_id concatenation.
+            self.src_col_unique_id: Optional[str] = src_cols.get("unique_id", None)
         else:
             self.source_demand_table = None
+            self.src_col_unique_id   = None
+
+        # ── Per-account ETL hooks & query overrides ───────────────────────
+        # custom_extract_query: full SQL template that bypasses _build_source_extract_query().
+        #   Supports {min_date} / {max_date} placeholders which are converted to psycopg2
+        #   %(min_date)s / %(max_date)s style at runtime so date binding stays parameterised.
+        #   Example in data_source config (JSONB):
+        #     "custom_extract_query": "SELECT ... FROM acme.orders WHERE date >= {min_date}"
+        self.custom_extract_query: Optional[str] = (
+            data_src.get("custom_extract_query")
+            or self.source_db_config.get("custom_extract_query")
+            or None
+        )
+        # pre_extract_sql: list of SQL statements executed on the source connection
+        #   *before* the extract query runs.  Use for session setup, materialized-view
+        #   refreshes, or temporary staging tables.  Each statement is auto-committed.
+        #   Example: ["SET search_path TO acme,public",
+        #              "REFRESH MATERIALIZED VIEW acme.mv_demand_snapshot"]
+        self.pre_extract_sql: List[str] = list(data_src.get("pre_extract_sql") or [])
+        # post_load_sql: list of SQL statements executed on the *local* DB connection
+        #   after demand_actuals has been loaded.  Use for derived-column updates,
+        #   quality checks, or reporting-view rebuilds.
+        #   Example: ["UPDATE zcube.demand_actuals SET channel='default' WHERE channel=''"]
+        self.post_load_sql: List[str] = list(data_src.get("post_load_sql") or [])
 
         # ── Local DB schema name ──
         schema = get_schema()
@@ -126,6 +209,14 @@ class ETLPipeline:
         self.logger.info("ETLPipeline initialized")
         self.logger.info(f"  Source : {src_label}")
         self.logger.info(f"  Output : {self.output_table}")
+        if self.custom_extract_query:
+            self.logger.info("  Custom extract query : YES (bypasses built-in SELECT)")
+        if self.src_col_unique_id:
+            self.logger.info(f"  unique_id expr       : {self.src_col_unique_id}")
+        if self.pre_extract_sql:
+            self.logger.info(f"  pre_extract hooks    : {len(self.pre_extract_sql)}")
+        if self.post_load_sql:
+            self.logger.info(f"  post_load hooks      : {len(self.post_load_sql)}")
 
     # ------------------------------------------------------------------
     # Schema initialisation
@@ -168,41 +259,81 @@ class ETLPipeline:
     # ------------------------------------------------------------------
 
     def _build_source_extract_query(self) -> str:
-        """
-        Build the SQL query for the *remote* source table
-        (dp_plan.calc_dp_actual).  No joins — the source table is a flat
-        fact table; we construct unique_id from item_id || '_' || site_id.
+        """Build the SQL SELECT for the remote source table.
+
+        Column-mapping values may be plain column names **or** SQL expressions.
+        A value is treated as an expression when it contains a space, parenthesis,
+        pipe ``||``, or arithmetic operator — it is then used verbatim in the
+        SELECT without the ``d.`` table-alias prefix.  Plain names get ``d.``
+        prepended automatically.
+
+        Per-account customisation points (set via ``data_source`` config):
+
+        ``columns.unique_id``
+            SQL expression that produces the series key. When omitted the
+            default ``CAST(item_id AS TEXT) || '_' || CAST(site_id AS TEXT)``
+            concat is used.
+
+        ``columns.qty``
+            Plain name or expression for the demand quantity column.
+            ``ABS()`` is applied automatically only for plain column references;
+            expressions are used verbatim so the account can embed its own
+            arithmetic (e.g. ``"qty_cases * 12"``).
+
+        Any other column (item_id, site_id, date, channel) also accepts SQL
+        expressions following the same rule.
         """
         tbl = self.source_demand_table
+
+        def _e(col_value: str) -> str:
+            """Prefix *col_value* with 'd.' unless it is already an expression."""
+            return col_value if self._is_sql_expr(col_value) else f"d.{col_value}"
+
         col_item = self.src_col_item_id
         col_site = self.src_col_site_id
         col_date = self.src_col_date
         col_qty  = self.src_col_qty
         col_chan  = self.src_col_channel
 
+        item_expr    = _e(col_item)
+        site_expr    = _e(col_site)
+        date_expr    = _e(col_date)
+        channel_expr = _e(col_chan) if col_chan else "''"
+
+        # Quantity: auto-wrap with ABS() for plain column refs; trust expressions.
+        if self._is_sql_expr(col_qty):
+            qty_expr = _e(col_qty)
+        else:
+            qty_expr = f"ABS({_e(col_qty)})"
+
+        # unique_id: use custom expression or fall back to item||'_'||site concat.
+        if self.src_col_unique_id:
+            unique_id_expr = self.src_col_unique_id   # already a SQL expression
+        else:
+            unique_id_expr = (
+                f"CAST({item_expr} AS TEXT) || '_' || CAST({site_expr} AS TEXT)"
+            )
+
         where_clauses: List[str] = []
         if self.min_date:
-            where_clauses.append(f"d.{col_date} >= %(min_date)s")
+            where_clauses.append(f"({date_expr}) >= %(min_date)s")
         if self.max_date:
-            where_clauses.append(f"d.{col_date} <= %(max_date)s")
+            where_clauses.append(f"({date_expr}) <= %(max_date)s")
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-
-        channel_expr = f"d.{col_chan}" if col_chan else "''"
 
         query = f"""
             SELECT
-                CAST(d.{col_item} AS TEXT) || '_' || CAST(d.{col_site} AS TEXT)
-                    AS unique_id,
-                d.{col_item}  AS item_id,
-                d.{col_site}  AS site_id,
-                {channel_expr} AS channel,
-                d.{col_date}  AS date,
-                ABS(d.{col_qty})   AS y,
-                ''            AS item_name,
-                ''            AS site_name
+                {unique_id_expr}  AS unique_id,
+                {item_expr}       AS item_id,
+                {site_expr}       AS site_id,
+                {channel_expr}    AS channel,
+                {date_expr}       AS date,
+                {qty_expr}        AS y,
+                ''                AS item_name,
+                ''                AS site_name
             FROM {tbl} d
             {where_sql}
-            ORDER BY 1, d.{col_date}
+            ORDER BY 1, {date_expr}
         """
         return query
 
@@ -264,8 +395,13 @@ class ETLPipeline:
         if self.max_date:
             params["max_date"] = self.max_date
 
-        use_remote = self.source_db_config is not None
-        if use_remote:
+        use_remote = bool(self.source_db_config and self.source_db_config.get("host"))
+        if self.custom_extract_query:
+            # Per-account custom SQL: convert {min_date}/{max_date} placeholders
+            # to psycopg2 %(name)s style so parameterised binding is preserved.
+            query = self._apply_date_placeholders(self.custom_extract_query)
+            label = "custom_extract_query"
+        elif use_remote:
             query = self._build_source_extract_query()
             label = f"remote ({self.source_demand_table})"
         else:
@@ -277,6 +413,11 @@ class ETLPipeline:
 
         conn = self._get_source_conn()
         try:
+            # ── Pre-extract hooks (e.g. session setup, mat-view refresh) ──
+            if self.pre_extract_sql:
+                self.logger.info("--- PRE-EXTRACT HOOKS ---")
+                self._run_hook_sql(conn, self.pre_extract_sql, "pre_extract")
+
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute(query, params or None)
                 rows = cur.fetchall()
@@ -1049,6 +1190,11 @@ class ETLPipeline:
         """
         Write the transformed DataFrame to PostgreSQL (zcube.demand_actuals).
 
+        After the bulk load completes any ``post_load_sql`` hooks configured in
+        the account's ``data_source`` parameters are executed on the local DB
+        connection.  This lets per-account logic update derived columns, rebuild
+        reporting views, or run data-quality assertions after every ETL run.
+
         Args:
             df: Transformed DataFrame.
 
@@ -1059,6 +1205,16 @@ class ETLPipeline:
         self.logger.info(
             f"Loaded {rows_inserted:,} rows into {self.output_table}"
         )
+
+        # ── Post-load hooks (e.g. derived-column updates, view rebuilds) ──
+        if self.post_load_sql:
+            self.logger.info("--- POST-LOAD HOOKS ---")
+            conn = get_conn()
+            try:
+                self._run_hook_sql(conn, self.post_load_sql, "post_load")
+            finally:
+                conn.close()
+
         return df
 
     # ------------------------------------------------------------------

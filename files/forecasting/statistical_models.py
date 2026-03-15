@@ -164,9 +164,59 @@ class StatisticalForecaster:
         # Clamp season_length to at least 1 — apply override if present
         season_length = max(1, int(ovr.get('season_length', season_length)))
 
+        # ── MSTL overrides ───────────────────────────────────────────────────────
+        # periods: list of seasonal periods (maps to season_length as list)
+        _mstl_periods_raw = ovr.get('periods', None)
+        if _mstl_periods_raw is not None:
+            if isinstance(_mstl_periods_raw, list):
+                _mstl_season_length = [max(2, int(p)) for p in _mstl_periods_raw if p]
+                if len(_mstl_season_length) == 1:
+                    _mstl_season_length = _mstl_season_length[0]
+            else:
+                _mstl_season_length = max(2, int(_mstl_periods_raw))
+        else:
+            _mstl_season_length = season_length  # falls back to inferred season_length
+
+        # windows: list of STL seasonal window sizes (one per period)
+        _mstl_windows = ovr.get('windows', None)  # e.g. [11, 15]
+
+        # iterate: number of STL iterations
+        _mstl_iterate = ovr.get('iterate', None)  # int, e.g. 3
+
+        # stl_kwargs: flat overrides stl_seasonal_deg / stl_trend map to STL args
+        _mstl_stl_kwargs: dict = {}
+        if 'stl_seasonal_deg' in ovr:
+            _mstl_stl_kwargs['seasonal_deg'] = int(ovr['stl_seasonal_deg'])
+        if 'stl_trend' in ovr and ovr['stl_trend'] is not None:
+            v = int(ovr['stl_trend'])
+            _mstl_stl_kwargs['trend'] = v if v % 2 == 1 else v + 1  # must be odd
+        # Also accept a raw stl_kwargs dict override
+        if 'stl_kwargs' in ovr and isinstance(ovr['stl_kwargs'], dict):
+            _mstl_stl_kwargs.update(ovr['stl_kwargs'])
+        if _mstl_windows is not None:
+            _mstl_stl_kwargs['seasonal'] = _mstl_windows  # passed as seasonal window sizes
+
+        # trend_forecaster override
+        _mstl_tf_name = ovr.get('trend_forecaster', 'AutoARIMA(season_length=1)')
+        _mstl_trend_forecaster: Any = AutoARIMA(season_length=1) if MSTL_AVAILABLE else None
+        if MSTL_AVAILABLE and 'trend_forecaster' in ovr:
+            _tf = str(ovr['trend_forecaster'])
+            if 'AutoETS' in _tf:
+                _mstl_trend_forecaster = AutoETS(season_length=1)
+                _mstl_tf_name = 'AutoETS(season_length=1)'
+            elif 'AutoTheta' in _tf:
+                _mstl_trend_forecaster = AutoTheta(season_length=1)
+                _mstl_tf_name = 'AutoTheta(season_length=1)'
+            elif 'AutoCES' in _tf:
+                _mstl_trend_forecaster = AutoCES(season_length=1)
+                _mstl_tf_name = 'AutoCES(season_length=1)'
+            else:
+                _mstl_trend_forecaster = AutoARIMA(season_length=1)
+                _mstl_tf_name = 'AutoARIMA(season_length=1)'
+
         # For MSTL the trend forecaster must be non-seasonal (season_length=1).
         # Only instantiate when supersmoother is available.
-        mstl_trend = AutoARIMA(season_length=1) if MSTL_AVAILABLE else None
+        mstl_trend = _mstl_trend_forecaster if MSTL_AVAILABLE else None
 
         # Conformal prediction intervals for intermittent-demand models
         n_obs = characteristics.get('n_observations', 0)
@@ -290,12 +340,29 @@ class StatisticalForecaster:
             ),
             **(  # MSTL requires optional 'supersmoother' package
                 {'MSTL': lambda: (
-                    MSTL(season_length=season_length, trend_forecaster=mstl_trend),
-                    {**_base_hyper, **_ovr_flag, 'season_length': season_length,
-                     'trend_forecaster': 'AutoARIMA(season_length=1)',
+                    MSTL(
+                        season_length=_mstl_season_length,
+                        trend_forecaster=mstl_trend,
+                        **({} if not _mstl_stl_kwargs else {'stl_kwargs': _mstl_stl_kwargs}),
+                        **({} if _mstl_iterate is None else {'iterate': _mstl_iterate}),
+                    ),
+                    {**_base_hyper, **_ovr_flag,
+                     'season_length': season_length,
+                     # Expose as editable params
+                     'periods': (
+                         _mstl_season_length if isinstance(_mstl_season_length, list)
+                         else [_mstl_season_length]
+                     ),
+                     'trend_forecaster': _mstl_tf_name,
+                     'iterate': _mstl_iterate if _mstl_iterate is not None else 1,
+                     'stl_seasonal_deg': _mstl_stl_kwargs.get('seasonal_deg', 0),
+                     'stl_trend': _mstl_stl_kwargs.get('trend', None),
                      'description': 'Multiple Seasonal-Trend decomposition using LOESS. '
-                                    'Decomposes into trend + seasonal + remainder, then '
-                                    'forecasts trend with AutoARIMA(season_length=1).',
+                                    'Decomposes into trend + multiple seasonal components + '
+                                    'remainder. Trend is then forecast by the selected model. '
+                                    'periods=[...] sets the seasonal cycle lengths; '
+                                    'stl_seasonal_deg=0 enforces periodic (MA) seasonality; '
+                                    'stl_trend controls smoothing window (odd integer).',
                      'method_family': 'Decomposition'}
                 )}
                 if MSTL_AVAILABLE else {}
@@ -432,11 +499,23 @@ class StatisticalForecaster:
             # MSTL requires at least 2 full seasonal cycles to decompose;
             # with fewer observations the internal np.min on an empty array
             # raises "zero-size array to reduction operation minimum".
-            if method == 'MSTL' and n_obs < 2 * season_length + 1:
-                self.logger.debug(
-                    f"{unique_id}: skipping MSTL — only {n_obs} obs, need >= {2 * season_length + 1}"
-                )
-                continue
+            # When a hyperparameter override sets `periods`, use the *maximum*
+            # of those periods for the minimum-obs guard, not the characteristics
+            # season_length (which may be 1 for a non-seasonal series that the
+            # user is forcing to run MSTL with explicit periods=[52]).
+            if method == 'MSTL':
+                _mstl_ovr = (overrides_map or {}).get(method, {})
+                _ovr_periods = _mstl_ovr.get('periods', None)
+                if _ovr_periods is not None:
+                    _periods_list = _ovr_periods if isinstance(_ovr_periods, list) else [_ovr_periods]
+                    _mstl_guard_sl = max(int(p) for p in _periods_list if p)
+                else:
+                    _mstl_guard_sl = season_length
+                if n_obs < 2 * _mstl_guard_sl + 1:
+                    self.logger.debug(
+                        f"{unique_id}: skipping MSTL — only {n_obs} obs, need >= {2 * _mstl_guard_sl + 1}"
+                    )
+                    continue
 
             # AutoETS, AutoARIMA, AutoTheta, AutoCES need enough data to
             # fit; models raise "tiny datasets" or similar errors when there

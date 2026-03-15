@@ -10,7 +10,7 @@ import { useAuth } from '../contexts/AuthContext';
 import api from '../utils/api';
 
 export default function UserManagement() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, isSuperAdmin } = useAuth();
   const [users, setUsers] = useState([]);
   const [segments, setSegments] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -28,6 +28,13 @@ export default function UserManagement() {
   const [newAllowedSegmentsEdit, setNewAllowedSegmentsEdit] = useState([]);
   const [createError, setCreateError] = useState('');
   const [creating, setCreating] = useState(false);
+
+  // Account assignment state (superAdmin only)
+  const [assignments, setAssignments] = useState({});   // {email: [{id, display_name}]}
+  const [allAccounts, setAllAccounts] = useState([]);
+  const [assigningUser, setAssigningUser] = useState(null);
+  const [assignSelected, setAssignSelected] = useState([]);
+  const [assignSaving, setAssignSaving] = useState(false);
 
   // Edit user modal
   const [editingUser, setEditingUser] = useState(null);
@@ -60,10 +67,25 @@ export default function UserManagement() {
     }
   }, []);
 
-  useEffect(() => { 
-    loadUsers(); 
+  const loadAssignments = useCallback(async () => {
+    if (!isSuperAdmin) return;
+    try {
+      const [assignRes, acctRes] = await Promise.all([
+        api.get('/admin/users/assignments'),
+        api.get('/admin/accounts'),
+      ]);
+      setAssignments(assignRes.data || {});
+      setAllAccounts((acctRes.data?.accounts || []).filter(a => a.is_active));
+    } catch (err) {
+      console.error('Failed to load assignments:', err);
+    }
+  }, [isSuperAdmin]);
+
+  useEffect(() => {
+    loadUsers();
     loadSegments();
-  }, [loadUsers, loadSegments]);
+    loadAssignments();
+  }, [loadUsers, loadSegments, loadAssignments]);
 
   const handleCreate = async (e) => {
     e.preventDefault();
@@ -120,6 +142,27 @@ export default function UserManagement() {
       can_create_override: user.can_create_override || false,
       allowed_segments_edit: user.allowed_segments_edit || [],
     });
+  };
+
+  const openAssignModal = (user) => {
+    setAssigningUser(user);
+    const currentIds = (assignments[user.email] || []).map(a => a.id);
+    setAssignSelected(currentIds);
+  };
+
+  const saveAssignment = async () => {
+    setAssignSaving(true);
+    try {
+      await api.put(`/admin/users/${encodeURIComponent(assigningUser.email)}/accounts`, {
+        account_ids: assignSelected,
+      });
+      setAssigningUser(null);
+      loadAssignments();
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to update account assignments');
+    } finally {
+      setAssignSaving(false);
+    }
   };
 
   const saveEdit = async () => {
@@ -283,6 +326,7 @@ export default function UserManagement() {
                   <th className="px-4 py-3 font-medium">Role</th>
                   <th className="px-4 py-3 font-medium">Status</th>
                   <th className="px-4 py-3 font-medium">Permissions</th>
+                  {isSuperAdmin && <th className="px-4 py-3 font-medium">Accounts</th>}
                   <th className="px-4 py-3 font-medium">Actions</th>
                 </tr>
               </thead>
@@ -331,6 +375,24 @@ export default function UserManagement() {
                         )}
                       </div>
                     </td>
+                    {isSuperAdmin && (
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap gap-1 items-center">
+                          {(assignments[u.email] || []).map(a => (
+                            <span key={a.id} className="inline-block px-1.5 py-0.5 rounded text-xs bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300">
+                              {a.display_name}
+                            </span>
+                          ))}
+                          {(assignments[u.email] || []).length === 0 && (
+                            <span className="text-xs text-gray-400 dark:text-gray-500">—</span>
+                          )}
+                          <button onClick={() => openAssignModal(u)}
+                            className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline ml-1">
+                            Edit
+                          </button>
+                        </div>
+                      </td>
+                    )}
                     <td className="px-4 py-3 space-x-2">
                       <button onClick={() => openEditModal(u)}
                         className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
@@ -475,6 +537,48 @@ export default function UserManagement() {
           </div>
         </div>
       )}
+      {/* Account Assignment Modal (superAdmin only) */}
+      {assigningUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-md">
+            <div className="p-5 border-b dark:border-gray-700">
+              <h2 className="text-lg font-semibold dark:text-white">Account Access</h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400">{assigningUser.email}</p>
+            </div>
+            <div className="p-5 space-y-2 max-h-80 overflow-y-auto">
+              {allAccounts.length === 0 && (
+                <p className="text-sm text-gray-400 dark:text-gray-500">No accounts available.</p>
+              )}
+              {allAccounts.map(acc => (
+                <label key={acc.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={assignSelected.includes(acc.id)}
+                    onChange={e => {
+                      if (e.target.checked) setAssignSelected(prev => [...prev, acc.id]);
+                      else setAssignSelected(prev => prev.filter(id => id !== acc.id));
+                    }}
+                    className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span className="text-sm text-gray-800 dark:text-gray-200">{acc.display_name}</span>
+                  <span className="text-xs text-gray-400 dark:text-gray-500 font-mono">{acc.db_name}</span>
+                </label>
+              ))}
+            </div>
+            <div className="flex justify-end gap-3 p-5 border-t dark:border-gray-700">
+              <button onClick={() => setAssigningUser(null)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">
+                Cancel
+              </button>
+              <button onClick={saveAssignment} disabled={assignSaving}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg disabled:opacity-50">
+                {assignSaving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

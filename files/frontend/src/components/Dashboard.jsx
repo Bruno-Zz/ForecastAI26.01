@@ -11,8 +11,11 @@ import { useNavigate } from 'react-router-dom';
 import Plot from 'react-plotly.js';
 import { useLocale } from '../contexts/LocaleContext';
 import { useTheme } from '../contexts/ThemeContext';
+import { useAuth } from '../contexts/AuthContext';
+import { useUserPrefs } from '../hooks/useUserPrefs';
 import { formatNumber } from '../utils/formatting';
 import api from '../utils/api';
+import ItemPopover from './ItemPopover';
 
 const TABLEAU10 = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ac'];
 const ABC_COLORS = { A: '#22c55e', B: '#eab308', C: '#f97316', D: '#ef4444', X: '#3b82f6', Y: '#a855f7', Z: '#ec4899' };
@@ -28,6 +31,7 @@ const parseSeriesId = (uid) => {
 // ─── Column definitions ───────────────────────────────────────────
 // ABC columns are inserted dynamically after 'complexity_level'.
 const FIXED_COLS = [
+  { id: '_img',             label: '',            type: null,      sortKey: null,               defaultHidden: false },
   { id: '_item',            label: 'Item',        type: 'text',    sortKey: '_item',            defaultHidden: false },
   { id: '_site',            label: 'Site',        type: 'text',    sortKey: '_site',            defaultHidden: false },
   { id: 'n_observations',   label: 'Obs',         type: 'number',  sortKey: 'n_observations',   defaultHidden: false },
@@ -45,7 +49,7 @@ const FIXED_COLS = [
 
 // ─── Default column widths (px) ──────────────────────────────────
 const DEFAULT_COL_WIDTHS = {
-  '_item': 130, '_site': 110, 'n_observations': 64,
+  '_img': 44, '_item': 130, '_site': 110, 'n_observations': 64,
   'complexity_level': 95, 'is_intermittent': 70, 'has_seasonality': 70,
   'has_trend': 60, 'mean': 80, '_sparkline': 120, 'n_outliers': 54,
   'best_method': 140,
@@ -67,13 +71,16 @@ function buildDefaultHidden() {
 
 // ─── Section ──────────────────────────────────────────────────────
 const Section = ({ title, storageKey, defaultOpen = true, children, id }) => {
+  const { user } = useAuth();
+  const userKey = `fai_${user?.id || 'anon'}_${storageKey}`;
   const [open, setOpen] = useState(() => {
-    const stored = localStorage.getItem(storageKey);
+    // Try user-scoped key first, fall back to legacy key
+    const stored = localStorage.getItem(userKey) ?? localStorage.getItem(storageKey);
     return stored === null ? defaultOpen : stored === 'true';
   });
   const toggle = () => setOpen(prev => {
     const next = !prev;
-    localStorage.setItem(storageKey, String(next));
+    localStorage.setItem(userKey, String(next));
     return next;
   });
   return (
@@ -260,6 +267,7 @@ export const Dashboard = () => {
   const { locale, numberDecimals } = useLocale();
   const { isDark } = useTheme();
   const navigate = useNavigate();
+  const { get: getPref, save: savePref, saveMany: saveManyPrefs } = useUserPrefs();
 
   // ── Core data ──
   const [series, setSeries]       = useState([]);
@@ -378,8 +386,8 @@ export const Dashboard = () => {
   }, [setColWidth]);
 
 
-  // Unified column filters
-  const [colFilters, setColFilters] = useState({});
+  // Unified column filters (restored from user prefs)
+  const [colFilters, setColFilters] = useState(() => getPref('dash_colFilters', {}));
   const [page, setPage] = useState(0);
   const setColFilter = useCallback((colId, val) => {
     setColFilters(prev => ({ ...prev, [colId]: val }));
@@ -391,9 +399,9 @@ export const Dashboard = () => {
     setPage(0);
   }, []);
 
-  // Sort
-  const [sortField, setSortField] = useState('_item');
-  const [sortDir, setSortDir]     = useState('asc');
+  // Sort (restored from user prefs)
+  const [sortField, setSortField] = useState(() => getPref('dash_sortField', '_item'));
+  const [sortDir, setSortDir]     = useState(() => getPref('dash_sortDir', 'asc'));
   const handleSort = useCallback((field) => {
     if (!field) return;
     setSortField(prev => {
@@ -433,6 +441,17 @@ export const Dashboard = () => {
   }, [colsMenuOpen]);
 
   const pageSize = 50;
+
+  // ── Persist UI preferences whenever they change ───────────────────────────
+  useEffect(() => { savePref('dash_sortField', sortField); }, [sortField, savePref]);
+  useEffect(() => { savePref('dash_sortDir',   sortDir);   }, [sortDir,   savePref]);
+  // colFilters: debounce slightly to avoid hammering on every keystroke
+  const _colFiltersRef = useRef(colFilters);
+  _colFiltersRef.current = colFilters;
+  useEffect(() => {
+    const t = setTimeout(() => savePref('dash_colFilters', _colFiltersRef.current), 500);
+    return () => clearTimeout(t);
+  }, [colFilters, savePref]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load scenarios
   useEffect(() => {
@@ -740,10 +759,41 @@ export const Dashboard = () => {
   const renderCell = useCallback((col, s) => {
     const td = 'px-3 py-2';
     switch (col.id) {
-      case '_item':
-        return <td key={col.id} className={`${td} font-medium text-blue-600 dark:text-blue-400 whitespace-nowrap`}>
-          {s.item_name ?? parseSeriesId(s.unique_id).item}
-        </td>;
+      case '_img': {
+        const imgName = s.item_name ?? parseSeriesId(s.unique_id).item;
+        return (
+          <td key={col.id} className="px-1 py-1 text-center">
+            {s.item_image_url
+              ? <img
+                  src={s.item_image_url}
+                  alt={imgName}
+                  title={imgName}
+                  className="w-8 h-8 rounded object-cover mx-auto"
+                  onError={e => { e.currentTarget.style.display = 'none'; }}
+                />
+              : <span className="inline-flex items-center justify-center w-8 h-8 rounded bg-gray-100 dark:bg-gray-700 text-gray-400 dark:text-gray-500 text-lg select-none" title={imgName}>🌿</span>
+            }
+          </td>
+        );
+      }
+      case '_item': {
+        const itemDisplayName = s.item_name ?? parseSeriesId(s.unique_id).item;
+        return (
+          <td key={col.id} className={`${td} font-medium text-blue-600 dark:text-blue-400 whitespace-nowrap`}>
+            <ItemPopover
+              name={itemDisplayName}
+              imageUrl={s.item_image_url}
+              stats={{
+                observations: s.n_observations,
+                mean: s.mean,
+                bestMethod: s.best_method,
+              }}
+            >
+              <span>{itemDisplayName}</span>
+            </ItemPopover>
+          </td>
+        );
+      }
       case '_site':
         return <td key={col.id} className={`${td} text-gray-500 dark:text-gray-400 whitespace-nowrap`}>
           {s.site_name ?? parseSeriesId(s.unique_id).site}

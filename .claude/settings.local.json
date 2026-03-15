@@ -120,7 +120,14 @@
       "Bash(__NEW_LINE_d7ac5210787ce51a__ cmp:*)",
       "Bash(Remove-Item \"C:\\\\allDev\\\\ForecastAI2026.01\\\\create_causal_tables.py\" -Force)",
       "Bash(head -10 grep -n \"ANALYZE\\\\|analyze.*demand\" C:/allDev/ForecastAI2026.01/files/orchestrator.py)",
-      "Bash(\"venv/Scripts/python.exe\" -c \":*)"
+      "Bash(\"venv/Scripts/python.exe\" -c \":*)",
+      "Bash(if not:*)",
+      "Bash(\"C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\DDL\\\\schema.sql\":*)",
+      "Bash(pg_isready -h localhost -p 5432)",
+      "Bash(sed -n '1,50p' /c/allDev/ForecastAI2026.01/files/db/db.py)",
+      "Bash(sed -n '250,350p' /c/allDev/ForecastAI2026.01/files/db/db.py)",
+      "Bash(node --input-type=module --eval \"import\\(''''./src/components/ProcessLog.jsx''''\\).then\\(\\(\\)=>console.log\\(''''OK''''\\)\\).catch\\(e=>console.error\\(e.message\\)\\)\")",
+      "Bash(cmd.exe /c \"cd /d C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\frontend && npx vite build 2>&1\")"
     ]
   }
 }

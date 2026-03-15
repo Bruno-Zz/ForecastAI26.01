@@ -1,14 +1,18 @@
 /**
  * Route guard component.
  * Redirects to /login if not authenticated.
- * Optionally requires admin role.
+ * Optionally requires admin or superAdmin role.
  */
 
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
-export default function ProtectedRoute({ children, requireAdmin = false }) {
-  const { isAuthenticated, isAdmin, loading } = useAuth();
+export default function ProtectedRoute({
+  children,
+  requireAdmin = false,
+  requireSuperAdmin = false,
+}) {
+  const { isAuthenticated, isAdmin, isSuperAdmin, loading } = useAuth();
 
   if (loading) {
     return (
@@ -20,6 +24,10 @@ export default function ProtectedRoute({ children, requireAdmin = false }) {
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
+  }
+
+  if (requireSuperAdmin && !isSuperAdmin) {
+    return <Navigate to="/" replace />;
   }
 
   if (requireAdmin && !isAdmin) {

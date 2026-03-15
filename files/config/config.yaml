@@ -8,6 +8,22 @@
 # Alternatively, set the equivalent DB_* environment variables (or populate
 # a .env file) — db.py tries config.yaml first, then falls back to env vars.
 
+# ─── Multi-tenancy: master database ─────────────────────────────────────────
+# The master database stores the account registry (master.accounts),
+# superAdmin users (master.superadmins), and the shared JWT secret.
+# Run files/DDL/master_schema.sql against this database before starting.
+# Then run files/scripts/migrate_to_multitenant.py to register existing accounts.
+master_database:
+  host: localhost
+  port: 5432
+  name: forecastai_master
+  user: postgres
+  password: postgres
+  schema: master
+  sslmode: disable
+
+# ─── Single-tenant / legacy fallback ────────────────────────────────────────
+# Used when no account context is set (pre-migration or during migration).
 database:
   host: localhost
   port: 5432

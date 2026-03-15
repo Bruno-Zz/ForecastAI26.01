@@ -371,9 +371,22 @@ def run_single_step(step: str, config_path: str, segment_id: int = None,
             all_methods=all_methods,
             config_path=config_path,
         )
+        # Diagnostic: warn loudly if the series filter left nothing to forecast
+        if chars_df.empty:
+            print(
+                f"  WARNING: characteristics DataFrame is empty after applying "
+                f"series_filter={series_filter}. "
+                f"Possible causes: unique_id mismatch between time_series_characteristics "
+                f"and the filter list, or the series has not been characterised yet. "
+                f"Run the 'characterize' step first, then retry."
+            )
+        else:
+            print(f"  Forecasting {len(chars_df)} series: {list(chars_df['unique_id'])}")
         # Pass overrides to the orchestrator for per-series hyper-param tuning
         if overrides_json:
-            orchestrator._series_overrides = overrides_json
+            orchestrator.series_overrides = overrides_json
+            print(f"  Hyperparameter overrides loaded for {len(overrides_json)} series: "
+                  f"{list(overrides_json.keys())}")
 
         # --- Forecast step (logged) ---
         handler = ListHandler()

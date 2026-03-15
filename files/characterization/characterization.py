@@ -430,7 +430,38 @@ class TimeSeriesCharacterizer:
         test_periods: List[int] = self.seasonality_cfg['test_periods']
         min_strength: float = self.seasonality_cfg['min_strength']
 
-        n = len(values)
+        # ── Reindex to uniform calendar grid ────────────────────────────
+        # Gaps in the data (e.g. holidays) shift array indices so that
+        # ACF lag 52 no longer equals 52 calendar weeks. Reindex to the
+        # most common inter-observation interval so lags correspond to
+        # real time periods. Gaps become NaN; statsmodels handles them
+        # with missing='conservative' (pairwise non-NaN products).
+        acf_source = values  # fallback: raw array
+        try:
+            ds = pd.DatetimeIndex(dates)
+            diffs = ds.to_series().diff().dropna()
+            if len(diffs) > 0:
+                modal_diff = diffs.mode().iloc[0]
+                # Only reindex if the gap ratio is meaningful
+                # (i.e. there ARE missing slots)
+                uniform_idx = pd.date_range(
+                    start=ds.min(), end=ds.max(), freq=modal_diff
+                )
+                if len(uniform_idx) > len(ds):
+                    s_reindexed = (
+                        pd.Series(values, index=ds)
+                        .reindex(uniform_idx)
+                    )
+                    acf_source = s_reindexed.values.astype(float)
+                    self.logger.debug(
+                        "ACF reindex: %d obs → %d slots (%d NaN gaps)",
+                        len(ds), len(uniform_idx),
+                        int(np.isnan(acf_source).sum()),
+                    )
+        except Exception as e:
+            self.logger.debug("ACF reindex skipped: %s", e)
+
+        n = len(acf_source)
         detected_periods: List[int] = []
         max_strength: float = 0.0
 
@@ -443,7 +474,7 @@ class TimeSeriesCharacterizer:
 
             try:
                 nlags = min(period + 1, n - 1)
-                acf_values = acf(values, nlags=nlags, fft=True, missing='conservative')
+                acf_values = acf(acf_source, nlags=nlags, fft=True, missing='conservative')
                 strength = abs(acf_values[period])
 
                 if strength > min_strength:

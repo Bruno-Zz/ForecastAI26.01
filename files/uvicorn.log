@@ -1,0 +1,293 @@
+INFO:     Started server process [23324]
+INFO:     Waiting for application startup.
+INFO:api.main:Starting API server...
+INFO:db.db:Schema 'zcube' tables created/verified
+INFO:db.db:Schema 'zcube' fully initialised
+INFO:api.main:DB schema initialised
+INFO:api.auth:Users table has 6 row(s) -- skipping admin seed
+WARNING:api.main:Parameter seed failed (non-fatal): cursor already closed
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8002 (Press CTRL+C to quit)
+INFO:api.main:Loaded time_series from DB: 234046 rows
+INFO:api.main:Loaded time_series_original from DB: 234046 rows
+INFO:api.main:Enriched characteristics with item/site names: 2395 entries
+INFO:api.main:Loaded characteristics from DB: 2395 series
+INFO:api.main:Loaded forecasts from DB: 7027 rows
+INFO:api.main:Loaded distributions from DB: 7025 rows
+INFO:api.main:Loaded metrics from DB: 26418 rows
+INFO:api.main:Loaded best_methods from DB: 2392 rows
+INFO:api.main:Loaded forecasts_by_origin from DB: 211344 rows
+INFO:api.main:Loaded outliers from DB: 12860 rows
+INFO:api.main:Loaded config from DB
+INFO:     127.0.0.1:44017 - "GET /api/health HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:28265 - "GET /api/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php HTTP/1.1" 401 Unauthorized
+INFO:api.main:aggregate-demand: fc_df=7027 rows, best_map=2392 entries, recommended_map=2395 entries, included_uids=2395
+INFO:api.main:aggregate-demand: fc_lookup has 7027 entries, sample key=('10173_2238', 'MSTL'), sample type=list, sample val=[23947.516765202476, 20642.909950808622, 18778.666742300557, 20691.894037987695, 19829.74293563046, 19993.368641761506, 
+INFO:api.main:aggregate-demand: detected frequency=weekly (median_days=0.0)
+INFO:api.main:aggregate-demand: pipeline - 2395 total, 2395 ok, 0 no_best_method, 0 no_forecast_match, 0 bad_pf_type, 0 no_last_date, 0 date_errors
+INFO:api.main:aggregate-demand: result - 2395 series, 61 hist months, 12 fc months
+INFO:     127.0.0.1:32565 - "GET /api/analytics/aggregate-demand HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46393 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:24172 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:13754 - "GET /api/series?limit=50000&scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50563 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50564 - "GET /api/abc/configurations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50565 - "GET /api/analytics/accuracy-precision HTTP/1.1" 200 OK
+INFO:     127.0.0.1:10429 - "POST /api/sparklines HTTP/1.1" 200 OK
+INFO:api.main:aggregate-demand: fc_df=7027 rows, best_map=2392 entries, recommended_map=2395 entries, included_uids=2395
+INFO:api.main:aggregate-demand: fc_lookup has 7027 entries, sample key=('10173_2238', 'MSTL'), sample type=list, sample val=[23947.516765202476, 20642.909950808622, 18778.666742300557, 20691.894037987695, 19829.74293563046, 19993.368641761506, 
+INFO:api.main:aggregate-demand: detected frequency=weekly (median_days=0.0)
+INFO:api.main:aggregate-demand: pipeline - 2395 total, 2395 ok, 0 no_best_method, 0 no_forecast_match, 0 bad_pf_type, 0 no_last_date, 0 date_errors
+INFO:api.main:aggregate-demand: result - 2395 series, 61 hist months, 12 fc months
+INFO:     127.0.0.1:19805 - "GET /api/analytics/aggregate-demand HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43309 - "POST /api HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:43311 - "POST /api/route HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:32757 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51612 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51613 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51614 - "GET /api/series?limit=50000&scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51615 - "GET /api/abc/configurations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51616 - "GET /api/analytics/accuracy-precision HTTP/1.1" 200 OK
+INFO:api.main:aggregate-demand: fc_df=7027 rows, best_map=2392 entries, recommended_map=2395 entries, included_uids=2395
+INFO:api.main:aggregate-demand: fc_lookup has 7027 entries, sample key=('10173_2238', 'MSTL'), sample type=list, sample val=[23947.516765202476, 20642.909950808622, 18778.666742300557, 20691.894037987695, 19829.74293563046, 19993.368641761506, 
+INFO:api.main:aggregate-demand: detected frequency=weekly (median_days=0.0)
+INFO:api.main:aggregate-demand: pipeline - 2395 total, 2395 ok, 0 no_best_method, 0 no_forecast_match, 0 bad_pf_type, 0 no_last_date, 0 date_errors
+INFO:api.main:aggregate-demand: result - 2395 series, 61 hist months, 12 fc months
+INFO:     127.0.0.1:4641 - "GET /api/analytics/aggregate-demand HTTP/1.1" 200 OK
+INFO:api.main:aggregate-demand: fc_df=7027 rows, best_map=2392 entries, recommended_map=2395 entries, included_uids=2395
+INFO:api.main:aggregate-demand: fc_lookup has 7027 entries, sample key=('10173_2238', 'MSTL'), sample type=list, sample val=[23947.516765202476, 20642.909950808622, 18778.666742300557, 20691.894037987695, 19829.74293563046, 19993.368641761506, 
+INFO:api.main:aggregate-demand: detected frequency=weekly (median_days=0.0)
+INFO:api.main:aggregate-demand: pipeline - 2395 total, 2395 ok, 0 no_best_method, 0 no_forecast_match, 0 bad_pf_type, 0 no_last_date, 0 date_errors
+INFO:api.main:aggregate-demand: result - 2395 series, 61 hist months, 12 fc months
+INFO:     127.0.0.1:6887 - "GET /api/analytics/aggregate-demand HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56547 - "POST /api/sparklines HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32579 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43699 - "GET /api/series?limit=50000 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:22964 - "GET /api/segments HTTP/1.1" 200 OK
+INFO:     127.0.0.1:22965 - "GET /api/series/NEWPART_TEST_001/data HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:22966 - "GET /api/forecasts/NEWPART_TEST_001?scenario_id=1 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:22967 - "GET /api/series?search=NEWPART_TEST_001&limit=1&scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:22968 - "GET /api/metrics/NEWPART_TEST_001 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:7734 - "GET /api/series/NEWPART_TEST_001/best-method?scenario_id=1 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:46954 - "GET /api/forecasts/NEWPART_TEST_001/origins?scenario_id=1 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:52948 - "GET /api/series/NEWPART_TEST_001/outliers?scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8946 - "GET /api/series/NEWPART_TEST_001/method-explanation HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:8947 - "GET /api/series/NEWPART_TEST_001/distributions?scenario_id=1 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:8948 - "GET /api/adjustments/NEWPART_TEST_001 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39740 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:12063 - "GET /api/series HTTP/1.1" 200 OK
+INFO:     127.0.0.1:12064 - "GET /api/hyperparams/NEWPART_TEST_001 HTTP/1.1" 200 OK
+INFO:utils.parameter_resolver:ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+INFO:     127.0.0.1:4398 - "GET /api/series/NEWPART_TEST_001/parameters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4399 - "GET /api/series/NEWPART_TEST_001/forecast-convergence HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:14982 - "POST /api/series/NEWPART_TEST_001/copy-forecast HTTP/1.1" 200 OK
+INFO:     127.0.0.1:24293 - "GET /api/adjustments/NEWPART_TEST_001 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2688 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:39438 - "GET /api/series?limit=50000 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49734 - "GET /api/segments HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47421 - "GET /api/series/NEWPART_TEST_001/data HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:47422 - "GET /api/forecasts/NEWPART_TEST_001?scenario_id=1 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:47423 - "GET /api/series?search=NEWPART_TEST_001&limit=1&scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47424 - "GET /api/metrics/NEWPART_TEST_001 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:22305 - "GET /api/series/NEWPART_TEST_001/best-method?scenario_id=1 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:37238 - "GET /api/forecasts/NEWPART_TEST_001/origins?scenario_id=1 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:7236 - "GET /api/series/NEWPART_TEST_001/outliers?scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58535 - "GET /api/series/NEWPART_TEST_001/method-explanation HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58536 - "GET /api/series/NEWPART_TEST_001/distributions?scenario_id=1 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58537 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:7533 - "GET /api/adjustments/NEWPART_TEST_001 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:20511 - "GET /api/series HTTP/1.1" 200 OK
+INFO:     127.0.0.1:20512 - "GET /api/hyperparams/NEWPART_TEST_001 HTTP/1.1" 200 OK
+INFO:utils.parameter_resolver:ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+INFO:     127.0.0.1:61945 - "GET /api/series/NEWPART_TEST_001/parameters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61946 - "GET /api/series/NEWPART_TEST_001/forecast-convergence HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:5417 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:4116 - "GET /api/forecast/scenarios HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:53798 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53800 - "GET /api/forecast/scenarios/1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:29125 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:29128 - "GET /api/forecast/scenarios HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:49018 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:12581 - "GET /api/forecast/scenarios HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:37635 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37638 - "GET /api/forecast/scenarios HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:8667 - "GET /api/auth/me HTTP/1.1" 500 Internal Server Error
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\uvicorn\protocols\http\httptools_impl.py", line 409, in run_asgi
+    result = await app(  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        self.scope, self.receive, self.send
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\uvicorn\middleware\proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\fastapi\applications.py", line 1134, in __call__
+    await super().__call__(scope, receive, send)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\applications.py", line 113, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\middleware\errors.py", line 186, in __call__
+    raise exc
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\middleware\errors.py", line 164, in __call__
+    await self.app(scope, receive, _send)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\middleware\base.py", line 191, in __call__
+    with recv_stream, send_stream, collapse_excgroups():
+                                   ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0\Lib\contextlib.py", line 162, in __exit__
+    self.gen.throw(value)
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\_utils.py", line 85, in collapse_excgroups
+    raise exc
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\middleware\base.py", line 193, in __call__
+    response = await self.dispatch_func(request, call_next)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\allDev\ForecastAI2026.01\files\api\auth_middleware.py", line 114, in dispatch
+    return await call_next(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\middleware\base.py", line 168, in call_next
+    raise app_exc from app_exc.__cause__ or app_exc.__context__
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\middleware\base.py", line 144, in coro
+    await self.app(scope, receive_or_disconnect, send_no_error)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\middleware\cors.py", line 85, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\middleware\exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\fastapi\middleware\asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\routing.py", line 716, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\routing.py", line 736, in app
+    await route.handle(scope, receive, send)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\routing.py", line 290, in handle
+    await self.app(scope, receive, send)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\fastapi\routing.py", line 125, in app
+    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\starlette\_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\fastapi\routing.py", line 111, in app
+    response = await f(request)
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\fastapi\routing.py", line 391, in app
+    raw_response = await run_endpoint_function(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "C:\Users\BrunoZindy\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\site-packages\fastapi\routing.py", line 290, in run_endpoint_function
+    return await dependant.call(**values)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\allDev\ForecastAI2026.01\files\api\auth.py", line 453, in get_me
+    user = _db_fetch_user_by_id(jwt_user["id"])
+  File "C:\allDev\ForecastAI2026.01\files\api\auth.py", line 208, in _db_fetch_user_by_id
+    cur.execute(
+    ~~~~~~~~~~~^
+        f"SELECT id, email, display_name, hashed_password, auth_provider, "
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        (user_id,),
+        ^^^^^^^^^^^
+    )
+    ^
+psycopg2.errors.InvalidTextRepresentation: invalid input syntax for type uuid: "t"
+LINE 1: ...edit, created_at, updated_at FROM zcube.users WHERE id = 't'
+                                                                    ^
+
+INFO:     127.0.0.1:8670 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:20036 - "GET /api/forecast/scenarios HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:42658 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65300 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:28363 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:10034 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59371 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59374 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:43489 - "POST /api/forecast/scenarios HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:57008 - "POST /api/forecast/scenarios HTTP/1.1" 201 Created
+INFO:     127.0.0.1:21399 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:18144 - "POST /api/forecast/scenarios/2/clone HTTP/1.1" 201 Created
+INFO:     127.0.0.1:47351 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3681 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8386 - "GET /api/meio/scenarios HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:3950 - "GET /api/auth/me HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65345 - "GET /api/parameters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41080 - "GET /api/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41081 - "GET /api/segments HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32552 - "PUT /api/parameters/4 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59004 - "PUT /api/parameters/4/segments HTTP/1.1" 200 OK
+INFO:     127.0.0.1:8587 - "GET /api/parameters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40917 - "GET /api/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:40918 - "GET /api/segments HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3578 - "GET /api/parameters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:13913 - "GET /api/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:13914 - "GET /api/segments HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62233 - "PUT /api/parameters/9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53239 - "PUT /api/parameters/9/segments HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37124 - "GET /api/parameters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:28205 - "GET /api/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:28206 - "GET /api/segments HTTP/1.1" 200 OK
+INFO:     127.0.0.1:21119 - "GET /docs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:12432 - "GET /api/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:20190 - "GET /api/forecast/scenarios HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:20191 - "GET /api/series?limit=50000&scenario_id=1 HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:23845 - "GET /api/analytics HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:23846 - "GET /api/abc/configurations HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:31899 - "GET /api/analytics/accuracy-precision HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:58043 - "GET /api/analytics/aggregate-demand HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:49994 - "POST /api/auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2264 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2265 - "GET /api/series?limit=50000&scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2266 - "GET /api/analytics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2267 - "GET /api/abc/configurations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:2268 - "GET /api/analytics/accuracy-precision HTTP/1.1" 200 OK
+INFO:api.main:aggregate-demand: fc_df=7027 rows, best_map=2392 entries, recommended_map=2395 entries, included_uids=2395
+INFO:api.main:aggregate-demand: fc_lookup has 7027 entries, sample key=('10173_2238', 'MSTL'), sample type=list, sample val=[23947.516765202476, 20642.909950808622, 18778.666742300557, 20691.894037987695, 19829.74293563046, 19993.368641761506, 
+INFO:api.main:aggregate-demand: detected frequency=weekly (median_days=0.0)
+INFO:api.main:aggregate-demand: pipeline - 2395 total, 2395 ok, 0 no_best_method, 0 no_forecast_match, 0 bad_pf_type, 0 no_last_date, 0 date_errors
+INFO:api.main:aggregate-demand: result - 2395 series, 61 hist months, 12 fc months
+INFO:     127.0.0.1:53358 - "GET /api/analytics/aggregate-demand HTTP/1.1" 200 OK
+INFO:api.main:aggregate-demand: fc_df=7027 rows, best_map=2392 entries, recommended_map=2395 entries, included_uids=2395
+INFO:api.main:aggregate-demand: fc_lookup has 7027 entries, sample key=('10173_2238', 'MSTL'), sample type=list, sample val=[23947.516765202476, 20642.909950808622, 18778.666742300557, 20691.894037987695, 19829.74293563046, 19993.368641761506, 
+INFO:api.main:aggregate-demand: detected frequency=weekly (median_days=0.0)
+INFO:api.main:aggregate-demand: pipeline - 2395 total, 2395 ok, 0 no_best_method, 0 no_forecast_match, 0 bad_pf_type, 0 no_last_date, 0 date_errors
+INFO:api.main:aggregate-demand: result - 2395 series, 61 hist months, 12 fc months
+INFO:     127.0.0.1:1120 - "GET /api/analytics/aggregate-demand HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50561 - "POST /api/sparklines HTTP/1.1" 200 OK
+INFO:     127.0.0.1:13711 - "GET /api/series?limit=50000 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:21931 - "GET /api/segments HTTP/1.1" 200 OK
+INFO:     127.0.0.1:21932 - "GET /api/series/3518_7833/data HTTP/1.1" 200 OK
+INFO:     127.0.0.1:21933 - "GET /api/forecasts/3518_7833?scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:21934 - "GET /api/series?search=3518_7833&limit=1&scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:35562 - "GET /api/series/3518_7833/best-method?scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58610 - "GET /api/metrics/3518_7833 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:33158 - "GET /api/forecasts/3518_7833/origins?scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:20932 - "GET /api/series/3518_7833/outliers?scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:20933 - "GET /api/series/3518_7833/method-explanation HTTP/1.1" 200 OK
+INFO:     127.0.0.1:20934 - "GET /api/series/3518_7833/distributions?scenario_id=1 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55587 - "GET /api/forecast/scenarios HTTP/1.1" 200 OK
+INFO:     127.0.0.1:24531 - "GET /api/adjustments/3518_7833 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:25030 - "GET /api/hyperparams/3518_7833 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:25031 - "GET /api/forecasts/3518_7833/origins/2026-01-04?scenario_id=1 HTTP/1.1" 200 OK
+INFO:utils.parameter_resolver:ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+INFO:     127.0.0.1:7567 - "GET /api/series/3518_7833/parameters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:7568 - "GET /api/series/3518_7833/forecast-convergence HTTP/1.1" 200 OK
+INFO:     127.0.0.1:17411 - "GET /api/series/3518_7833/backtest-forecasts HTTP/1.1" 200 OK
+INFO:     127.0.0.1:42930 - "POST /api/v1/configuration/users/user-roles/role-assignment HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:42931 - "POST /api.cgi?cmd=TestEmail HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:42932 - "GET /api/v1/totp/user-backup-code/../../../../../../../../../../data/runtime/tmp/tt/%7BSESSION%7D HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:12564 - "GET /api/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:43508 - "POST /api.cgi?cmd=TestEmail HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:29889 - "POST /api/v1/configuration/users/user-roles/role-assignment HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:30245 - "POST /api.cgi?cmd=TestEmail HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:30247 - "GET /api/v1/totp/user-backup-code/../../../../../../../../../../data/runtime/tmp/tt/%7BSESSION%7D HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:27710 - "POST /api.cgi?cmd=TestEmail HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:27711 - "GET /api/v1/totp/user-backup-code/../../../../../../../../../../data/runtime/tmp/tt/%7BSESSION%7D HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:45466 - "POST /api/v1/configuration/users/user-roles/role-assignment HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:46480 - "GET /api/.env HTTP/1.1" 401 Unauthorized
+INFO:     127.0.0.1:57136 - "GET /api/auth/me HTTP/1.1" 401 Unauthorized

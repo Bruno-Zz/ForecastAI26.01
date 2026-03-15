@@ -6,8 +6,13 @@
 -- Schema
 CREATE SCHEMA IF NOT EXISTS {schema};
 
--- Mooncake columnar extension
-CREATE EXTENSION IF NOT EXISTS pg_mooncake;
+-- Mooncake columnar extension (optional — skip gracefully if absent)
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS pg_mooncake CASCADE;
+EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'pg_mooncake not available (%): columnar storage disabled.', SQLERRM;
+END $$;
 
 -- ─── Lookup / type tables ───────────────────────────────────────────────
 
@@ -36,7 +41,8 @@ CREATE TABLE IF NOT EXISTS {schema}.item (
     name        TEXT,
     description TEXT,
     attributes  JSONB,
-    type_id     BIGINT
+    type_id     BIGINT,
+    image_url   TEXT
 );
 
 -- Sites
@@ -655,3 +661,147 @@ CREATE TABLE IF NOT EXISTS {schema}.causal_aog_events (
     notes           TEXT,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- ─── MEIO supply chain tables ─────────────────────────────────────────────
+
+-- Route types (BUY / MAKE / TRANSFER planning policies)
+CREATE TABLE IF NOT EXISTS {schema}.route_type (
+    id                      BIGINT PRIMARY KEY,
+    xuid                    TEXT NOT NULL,
+    name                    TEXT NOT NULL,
+    description             TEXT,
+    planning_type           TEXT NOT NULL DEFAULT 'BUY',
+    calc_supply_type_id     BIGINT,
+    calc_dep_demand_type_id BIGINT
+);
+
+-- Item master for supply chain (extended vs demand item)
+CREATE TABLE IF NOT EXISTS {schema}.meio_item (
+    id          BIGINT PRIMARY KEY,
+    xuid        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    description TEXT,
+    attributes  JSONB,
+    type_id     BIGINT,
+    group_id    BIGINT
+);
+
+-- Supply routes (item x site with lead times, costs, sourcing policy)
+CREATE TABLE IF NOT EXISTS {schema}.route (
+    id                           BIGINT PRIMARY KEY,
+    item_id                      BIGINT NOT NULL,
+    site_id                      BIGINT NOT NULL,
+    supplier_id                  BIGINT,
+    type_id                      BIGINT NOT NULL REFERENCES {schema}.route_type(id),
+    tag                          TEXT,
+    source_item_id               BIGINT,
+    source_site_id               BIGINT,
+    bom_alternate                TEXT,
+    min_qty                      DOUBLE PRECISION,
+    mult_qty                     DOUBLE PRECISION,
+    max_qty                      DOUBLE PRECISION,
+    quota                        DOUBLE PRECISION,
+    priority                     SMALLINT,
+    lead_time                    SMALLINT,
+    pick_pack_time               SMALLINT,
+    transit_time                 SMALLINT,
+    inspection_time              SMALLINT,
+    safety_lead_time             SMALLINT,
+    ptf                          SMALLINT,
+    lead_time_calendar_id        BIGINT,
+    pick_pack_time_calendar_id   BIGINT,
+    ship_calendar_id             BIGINT,
+    transit_time_calendar_id     BIGINT,
+    dock_calendar_id             BIGINT,
+    inspection_time_calendar_id  BIGINT,
+    safety_lead_time_calendar_id BIGINT,
+    ptf_calendar_id              BIGINT,
+    yield                        DOUBLE PRECISION,
+    unit_cost                    DOUBLE PRECISION,
+    order_cost                   DOUBLE PRECISION,
+    unit_cost_currency_id        BIGINT,
+    order_cost_currency_id       BIGINT,
+    uom_id                       BIGINT,
+    end_date                     DATE
+);
+CREATE INDEX IF NOT EXISTS idx_route_item_site
+    ON {schema}.route (item_id, site_id);
+
+-- Bill of materials (parent -> child component relationships)
+CREATE TABLE IF NOT EXISTS {schema}.bill_of_material (
+    id              BIGINT PRIMARY KEY,
+    item_id         BIGINT NOT NULL,
+    site_id         BIGINT NOT NULL,
+    child_item_id   BIGINT NOT NULL,
+    child_site_id   BIGINT NOT NULL,
+    tag             TEXT,
+    type_id         BIGINT,
+    alternate       TEXT,
+    item_qty        DOUBLE PRECISION NOT NULL DEFAULT 1,
+    child_qty       DOUBLE PRECISION NOT NULL DEFAULT 1,
+    attach_rate     DOUBLE PRECISION NOT NULL DEFAULT 1,
+    start_date      DATE,
+    end_date        DATE,
+    "offset"        SMALLINT,
+    child_uom_id    BIGINT,
+    fixed_child_qty DOUBLE PRECISION,
+    scrap           DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS idx_bom_item_site
+    ON {schema}.bill_of_material (item_id, site_id);
+CREATE INDEX IF NOT EXISTS idx_bom_child
+    ON {schema}.bill_of_material (child_item_id, child_site_id);
+
+-- Item chains (supersession / substitution chains)
+CREATE TABLE IF NOT EXISTS {schema}.item_chain (
+    id            BIGINT PRIMARY KEY,
+    description   TEXT,
+    item_id       BIGINT NOT NULL,
+    site_id       BIGINT NOT NULL,
+    child_item_id BIGINT NOT NULL,
+    child_site_id BIGINT NOT NULL,
+    policy_id     BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_item_chain_item
+    ON {schema}.item_chain (item_id, site_id);
+
+-- On-hand inventory types (usable / quarantine / etc.)
+CREATE TABLE IF NOT EXISTS {schema}.on_hand_type (
+    id                  BIGINT PRIMARY KEY,
+    xuid                TEXT NOT NULL,
+    name                TEXT NOT NULL,
+    description         TEXT,
+    planning_type       TEXT,
+    allocation_sequence SMALLINT
+);
+
+-- On-hand inventory balances
+CREATE TABLE IF NOT EXISTS {schema}.on_hand (
+    id                    BIGINT PRIMARY KEY,
+    item_id               BIGINT NOT NULL,
+    site_id               BIGINT NOT NULL,
+    type_id               BIGINT REFERENCES {schema}.on_hand_type(id),
+    tag                   TEXT,
+    qty                   DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    unit_cost             DOUBLE PRECISION,
+    unit_cost_currency_id BIGINT,
+    expiry_date           DATE,
+    attributes            JSONB,
+    feature_id            BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_on_hand_item_site
+    ON {schema}.on_hand (item_id, site_id);
+
+-- Item-site cost parameters (order cost, holding rate, cost price)
+CREATE TABLE IF NOT EXISTS {schema}.item_site (
+    item_id      BIGINT NOT NULL,
+    site_id      BIGINT NOT NULL,
+    order_cost   DOUBLE PRECISION,
+    holding_rate DOUBLE PRECISION,
+    cost_price   DOUBLE PRECISION,
+    PRIMARY KEY (item_id, site_id)
+);
+CREATE INDEX IF NOT EXISTS idx_item_site_item
+    ON {schema}.item_site (item_id);
+CREATE INDEX IF NOT EXISTS idx_item_site_site
+    ON {schema}.item_site (site_id);

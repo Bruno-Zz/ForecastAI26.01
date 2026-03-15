@@ -5,15 +5,21 @@
  *   1. Local email / password
  *   2. Microsoft OAuth (Azure AD) via MSAL popup
  *   3. Google OAuth via Google Identity Services
+ *
+ * Multi-tenancy: on email blur the component probes the API to check
+ * whether the email belongs to a superAdmin.  If so, an account dropdown
+ * appears between the password field and the submit button.  Local login
+ * then sends the selected account_id with the credentials.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { PublicClientApplication } from '@azure/msal-browser';
 import { msalConfig, loginRequest } from '../config/msalConfig';
 import { GoogleLogin } from '@react-oauth/google';
+import api from '../utils/api';
 
 let msalInstance = null;
 
@@ -36,21 +42,74 @@ export default function Login() {
   const [msLoading, setMsLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
 
+  // SuperAdmin account selection state
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [accounts, setAccounts] = useState([]);
+  const [selectedAccountId, setSelectedAccountId] = useState('');
+  const [probing, setProbing] = useState(false);
+
+  // ── Probe: check if email is a superAdmin ──────────────────────────────
+  const probeEmail = useCallback(async (emailValue) => {
+    if (!emailValue || !emailValue.includes('@')) return;
+    setProbing(true);
+    try {
+      const res = await api.get(`/auth/probe?email=${encodeURIComponent(emailValue)}`);
+      const data = res.data;
+      if (data.is_superadmin) {
+        setIsSuperAdmin(true);
+        setAccounts(data.accounts || []);
+        if (data.accounts?.length === 1) setSelectedAccountId(data.accounts[0].id);
+      } else if (data.accounts?.length > 1) {
+        // Regular user with access to multiple accounts
+        setIsSuperAdmin(false);
+        setAccounts(data.accounts);
+        setSelectedAccountId('');
+      } else {
+        setIsSuperAdmin(false);
+        setAccounts([]);
+        setSelectedAccountId('');
+      }
+    } catch {
+      // Master DB not configured — silently ignore (single-tenant mode)
+      setIsSuperAdmin(false);
+    } finally {
+      setProbing(false);
+    }
+  }, []);
+
+  const handleEmailBlur = () => {
+    probeEmail(email);
+  };
+
+  // ── Local login ────────────────────────────────────────────────────────
   const handleLocalLogin = async (e) => {
     e.preventDefault();
     if (!email || !password) { setError('Please enter email and password'); return; }
+    if ((isSuperAdmin || accounts.length > 1) && !selectedAccountId) {
+      setError('Please select an account to log into');
+      return;
+    }
     setLoading(true);
     setError('');
     try {
-      await login(email, password);
+      await login(email, password, (isSuperAdmin || accounts.length > 1) ? selectedAccountId : null);
       navigate('/');
     } catch (err) {
-      setError(err.response?.data?.detail || 'Login failed');
+      const detail = err.response?.data?.detail;
+      // Backend may return {status:'select_account'} — handle gracefully
+      if (err.response?.data?.status === 'select_account') {
+        setAccounts(err.response.data.accounts || []);
+        setIsSuperAdmin(true);
+        setError('Please select an account from the list');
+      } else {
+        setError(detail || 'Login failed');
+      }
     } finally {
       setLoading(false);
     }
   };
 
+  // ── Microsoft OAuth ────────────────────────────────────────────────────
   const handleMicrosoftLogin = async () => {
     setMsLoading(true);
     setError('');
@@ -58,11 +117,17 @@ export default function Login() {
       const instance = getMsalInstance();
       await instance.initialize();
       const result = await instance.loginPopup(loginRequest);
-      await loginWithMicrosoft(result.accessToken);
+      await loginWithMicrosoft(result.accessToken, selectedAccountId || undefined);
       navigate('/');
     } catch (err) {
       if (err?.errorCode === 'user_cancelled') {
         setError('');
+      } else if (err.response?.data?.status === 'select_account') {
+        // SuperAdmin: MS auth succeeded but no account selected — show dropdown
+        setAccounts(err.response.data.accounts || []);
+        setIsSuperAdmin(true);
+        setSelectedAccountId('');
+        setError('Please select an account, then click Sign in with Microsoft again');
       } else {
         setError(err.response?.data?.detail || 'Microsoft sign-in failed');
       }
@@ -71,14 +136,22 @@ export default function Login() {
     }
   };
 
+  // ── Google OAuth ───────────────────────────────────────────────────────
   const handleGoogleSuccess = async (credentialResponse) => {
     setGoogleLoading(true);
     setError('');
     try {
-      await loginWithGoogle(credentialResponse.credential);
+      await loginWithGoogle(credentialResponse.credential, selectedAccountId || undefined);
       navigate('/');
     } catch (err) {
-      setError(err.response?.data?.detail || 'Google sign-in failed');
+      if (err.response?.data?.status === 'select_account') {
+        setAccounts(err.response.data.accounts || []);
+        setIsSuperAdmin(true);
+        setSelectedAccountId('');
+        setError('Please select an account, then sign in with Google again');
+      } else {
+        setError(err.response?.data?.detail || 'Google sign-in failed');
+      }
     } finally {
       setGoogleLoading(false);
     }
@@ -167,10 +240,14 @@ export default function Login() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                onBlur={handleEmailBlur}
                 placeholder="admin@forecastai.local"
                 className="w-full px-4 py-2.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-colors"
                 autoComplete="email"
               />
+              {probing && (
+                <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">Checking account…</p>
+              )}
             </div>
             <div>
               <label htmlFor="password" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -186,6 +263,42 @@ export default function Login() {
                 autoComplete="current-password"
               />
             </div>
+
+            {/* Account selector — for superAdmins and multi-account users */}
+            {accounts.length > 0 && (
+              <div>
+                <label
+                  htmlFor="account"
+                  className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className={`inline-block w-2 h-2 rounded-full ${isSuperAdmin ? 'bg-purple-500' : 'bg-blue-500'}`} />
+                    Select account
+                  </span>
+                </label>
+                <select
+                  id="account"
+                  value={selectedAccountId}
+                  onChange={(e) => setSelectedAccountId(e.target.value)}
+                  className={`w-full px-4 py-2.5 border rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white outline-none transition-colors focus:ring-2 ${
+                    isSuperAdmin
+                      ? 'border-purple-300 dark:border-purple-600 focus:ring-purple-500 focus:border-purple-500'
+                      : 'border-blue-300 dark:border-blue-600 focus:ring-blue-500 focus:border-blue-500'
+                  }`}
+                >
+                  <option value="">— choose an account —</option>
+                  {accounts.map((acc) => (
+                    <option key={acc.id} value={acc.id}>
+                      {acc.display_name}
+                    </option>
+                  ))}
+                </select>
+                <p className={`mt-1 text-xs ${isSuperAdmin ? 'text-purple-600 dark:text-purple-400' : 'text-blue-600 dark:text-blue-400'}`}>
+                  {isSuperAdmin ? 'SuperAdmin — you can log into any account' : 'Your account has access to multiple tenants'}
+                </p>
+              </div>
+            )}
+
             <button
               type="submit"
               disabled={loading}

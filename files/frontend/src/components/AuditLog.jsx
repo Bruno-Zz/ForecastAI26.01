@@ -5,23 +5,34 @@ import api from '../utils/api';
 
 /* ─── Constants ─── */
 
-const ENTITY_TYPES = ['parameter', 'segment', 'parameter_segment'];
-const ACTIONS = ['create', 'update', 'delete', 'reorder'];
+const ENTITY_TYPES = ['parameter', 'segment', 'parameter_segment', 'auth'];
+const ACTIONS = ['create', 'update', 'delete', 'reorder', 'login', 'logout'];
 
 const ACTION_BADGE = {
-  create: { bg: 'bg-emerald-100 dark:bg-emerald-900/30', text: 'text-emerald-700 dark:text-emerald-400', icon: '+' },
-  update: { bg: 'bg-blue-100 dark:bg-blue-900/30',    text: 'text-blue-700 dark:text-blue-400',    icon: '~' },
-  delete: { bg: 'bg-red-100 dark:bg-red-900/30',      text: 'text-red-700 dark:text-red-400',      icon: '\u2212' },
-  reorder:{ bg: 'bg-amber-100 dark:bg-amber-900/30',  text: 'text-amber-700 dark:text-amber-400',  icon: '\u2195' },
+  create:  { bg: 'bg-emerald-100 dark:bg-emerald-900/30', text: 'text-emerald-700 dark:text-emerald-400', icon: '+' },
+  update:  { bg: 'bg-blue-100 dark:bg-blue-900/30',       text: 'text-blue-700 dark:text-blue-400',       icon: '~' },
+  delete:  { bg: 'bg-red-100 dark:bg-red-900/30',         text: 'text-red-700 dark:text-red-400',         icon: '−' },
+  reorder: { bg: 'bg-amber-100 dark:bg-amber-900/30',     text: 'text-amber-700 dark:text-amber-400',     icon: '↕' },
+  login:   { bg: 'bg-teal-100 dark:bg-teal-900/30',       text: 'text-teal-700 dark:text-teal-400',       icon: '→' },
+  logout:  { bg: 'bg-gray-100 dark:bg-gray-700',          text: 'text-gray-600 dark:text-gray-400',       icon: '←' },
 };
 
 const ENTITY_BADGE = {
   parameter:         { bg: 'bg-purple-100 dark:bg-purple-900/30', text: 'text-purple-700 dark:text-purple-400' },
   segment:           { bg: 'bg-indigo-100 dark:bg-indigo-900/30', text: 'text-indigo-700 dark:text-indigo-400' },
-  parameter_segment: { bg: 'bg-gray-100 dark:bg-gray-700',       text: 'text-gray-600 dark:text-gray-300' },
+  parameter_segment: { bg: 'bg-gray-100 dark:bg-gray-700',        text: 'text-gray-600 dark:text-gray-300' },
+  auth:              { bg: 'bg-teal-100 dark:bg-teal-900/30',     text: 'text-teal-700 dark:text-teal-400' },
 };
 
 const PAGE_SIZE = 30;
+
+const SORTABLE_COLS = [
+  { key: 'created_at', label: 'Time' },
+  { key: 'action',     label: 'Action' },
+  { key: 'entity_type',label: 'Entity' },
+  { key: 'entity_id',  label: 'ID' },
+  { key: 'changed_by', label: 'By' },
+];
 
 
 /* ─── Small helpers ─── */
@@ -54,17 +65,30 @@ function Spinner({ cls = 'w-4 h-4' }) {
   );
 }
 
+function SortIcon({ active, dir }) {
+  if (!active) return (
+    <svg className="w-3 h-3 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4" />
+    </svg>
+  );
+  return dir === 'asc' ? (
+    <svg className="w-3 h-3 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+    </svg>
+  ) : (
+    <svg className="w-3 h-3 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+    </svg>
+  );
+}
+
 
 /* ─── JSON diff viewer ─── */
 
 function JsonDiff({ oldVal, newVal }) {
   if (!oldVal && !newVal) return null;
-
-  // For create/delete just show the single value
   if (!oldVal) return <JsonBlock label="New" data={newVal} color="emerald" />;
   if (!newVal) return <JsonBlock label="Previous" data={oldVal} color="red" />;
-
-  // For updates show both side by side
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
       <JsonBlock label="Before" data={oldVal} color="red" />
@@ -76,7 +100,6 @@ function JsonDiff({ oldVal, newVal }) {
 function JsonBlock({ label, data, color }) {
   const borderCls = color === 'emerald' ? 'border-emerald-200 dark:border-emerald-800/50' : 'border-red-200 dark:border-red-800/50';
   const labelCls  = color === 'emerald' ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400';
-
   let content;
   if (typeof data === 'string') {
     try { content = JSON.stringify(JSON.parse(data), null, 2); }
@@ -84,7 +107,6 @@ function JsonBlock({ label, data, color }) {
   } else {
     content = JSON.stringify(data, null, 2);
   }
-
   return (
     <div className={`border rounded-lg overflow-hidden ${borderCls}`}>
       <div className={`px-2 py-1 text-[10px] font-semibold uppercase tracking-wider ${labelCls} bg-gray-50 dark:bg-gray-800 border-b ${borderCls}`}>
@@ -102,27 +124,48 @@ function JsonBlock({ label, data, color }) {
 
 const AuditLog = () => {
   const { locale } = useLocale();
-  const [items, setItems] = useState([]);
+  const [items, setItems]     = useState([]);
+  const [total, setTotal]     = useState(0);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [offset, setOffset] = useState(0);
+  const [error, setError]     = useState(null);
+  const [offset, setOffset]   = useState(0);
   const [hasMore, setHasMore] = useState(true);
+  const [expandedId, setExpandedId] = useState(null);
 
   // Filters
-  const [filterEntity, setFilterEntity] = useState('');
-  const [filterAction, setFilterAction] = useState('');
-  const [expandedId, setExpandedId] = useState(null);
+  const [filterEntity,    setFilterEntity]    = useState('');
+  const [filterAction,    setFilterAction]    = useState('');
+  const [filterChangedBy, setFilterChangedBy] = useState('');
+  const [filterDateFrom,  setFilterDateFrom]  = useState('');
+  const [filterDateTo,    setFilterDateTo]    = useState('');
+
+  // Sort
+  const [sortBy,  setSortBy]  = useState('created_at');
+  const [sortDir, setSortDir] = useState('desc');
+
+  const handleSort = (col) => {
+    if (sortBy === col) {
+      setSortDir(d => d === 'desc' ? 'asc' : 'desc');
+    } else {
+      setSortBy(col);
+      setSortDir('desc');
+    }
+  };
 
   const fetchLog = useCallback(async (newOffset = 0, append = false) => {
     setLoading(true);
     setError(null);
     try {
-      const params = { limit: PAGE_SIZE, offset: newOffset };
-      if (filterEntity) params.entity_type = filterEntity;
-      if (filterAction) params.action = filterAction;
+      const params = { limit: PAGE_SIZE, offset: newOffset, sort_by: sortBy, sort_dir: sortDir };
+      if (filterEntity)    params.entity_type = filterEntity;
+      if (filterAction)    params.action      = filterAction;
+      if (filterChangedBy) params.changed_by  = filterChangedBy;
+      if (filterDateFrom)  params.date_from   = filterDateFrom;
+      if (filterDateTo)    params.date_to     = filterDateTo;
 
       const res = await api.get('/audit-log', { params });
       const rows = res.data?.items || [];
+      setTotal(res.data?.total ?? 0);
       setItems(prev => append ? [...prev, ...rows] : rows);
       setOffset(newOffset);
       setHasMore(rows.length === PAGE_SIZE);
@@ -131,28 +174,40 @@ const AuditLog = () => {
     } finally {
       setLoading(false);
     }
-  }, [filterEntity, filterAction]);
+  }, [filterEntity, filterAction, filterChangedBy, filterDateFrom, filterDateTo, sortBy, sortDir]);
 
-  // Re-fetch when filters change
+  // Re-fetch when filters or sort change
   useEffect(() => {
     fetchLog(0);
   }, [fetchLog]);
 
   const loadMore = () => fetchLog(offset + PAGE_SIZE, true);
 
+  const hasFilters = filterEntity || filterAction || filterChangedBy || filterDateFrom || filterDateTo;
+
+  const clearFilters = () => {
+    setFilterEntity('');
+    setFilterAction('');
+    setFilterChangedBy('');
+    setFilterDateFrom('');
+    setFilterDateTo('');
+  };
+
   return (
-    <div className="p-4 sm:p-6 max-w-4xl mx-auto">
+    <div className="p-4 sm:p-6 max-w-5xl mx-auto">
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white">Audit Log</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            Track all changes to parameters and segments.
+            Track all changes to parameters, segments, and authentication events.
+            {total > 0 && <span className="ml-2 font-medium">{total.toLocaleString()} entries</span>}
           </p>
         </div>
         <button
           onClick={() => fetchLog(0)}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+          disabled={loading}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
         >
           <svg className={`w-3.5 h-3.5 ${loading && items.length === 0 ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -162,37 +217,96 @@ const AuditLog = () => {
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3 mb-4">
-        <div className="flex items-center gap-2">
-          <label className="text-xs font-medium text-gray-500 dark:text-gray-400">Entity</label>
-          <select
-            value={filterEntity}
-            onChange={e => setFilterEntity(e.target.value)}
-            className="text-xs px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:ring-1 focus:ring-blue-500"
-          >
-            <option value="">All</option>
-            {ENTITY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
+      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-3 mb-4 space-y-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Entity filter */}
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap">Entity</label>
+            <select
+              value={filterEntity}
+              onChange={e => setFilterEntity(e.target.value)}
+              className="text-xs px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 focus:ring-1 focus:ring-blue-500"
+            >
+              <option value="">All</option>
+              {ENTITY_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+
+          {/* Action filter */}
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap">Action</label>
+            <select
+              value={filterAction}
+              onChange={e => setFilterAction(e.target.value)}
+              className="text-xs px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 focus:ring-1 focus:ring-blue-500"
+            >
+              <option value="">All</option>
+              {ACTIONS.map(a => <option key={a} value={a}>{a}</option>)}
+            </select>
+          </div>
+
+          {/* Changed by filter */}
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap">By</label>
+            <input
+              type="text"
+              value={filterChangedBy}
+              onChange={e => setFilterChangedBy(e.target.value)}
+              placeholder="user or email…"
+              className="text-xs px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:ring-1 focus:ring-blue-500 w-36"
+            />
+          </div>
+
+          {hasFilters && (
+            <button
+              onClick={clearFilters}
+              className="text-[10px] text-blue-600 dark:text-blue-400 hover:underline ml-auto"
+            >
+              Clear filters
+            </button>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          <label className="text-xs font-medium text-gray-500 dark:text-gray-400">Action</label>
-          <select
-            value={filterAction}
-            onChange={e => setFilterAction(e.target.value)}
-            className="text-xs px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 focus:ring-1 focus:ring-blue-500"
-          >
-            <option value="">All</option>
-            {ACTIONS.map(a => <option key={a} value={a}>{a}</option>)}
-          </select>
+
+        {/* Date range row */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap">From</label>
+            <input
+              type="date"
+              value={filterDateFrom}
+              onChange={e => setFilterDateFrom(e.target.value)}
+              className="text-xs px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 focus:ring-1 focus:ring-blue-500"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap">To</label>
+            <input
+              type="date"
+              value={filterDateTo}
+              onChange={e => setFilterDateTo(e.target.value)}
+              className="text-xs px-2 py-1.5 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 focus:ring-1 focus:ring-blue-500"
+            />
+          </div>
         </div>
-        {(filterEntity || filterAction) && (
+      </div>
+
+      {/* Sort bar */}
+      <div className="flex items-center gap-1 mb-3 px-1">
+        <span className="text-[10px] font-medium text-gray-400 dark:text-gray-500 mr-1">Sort:</span>
+        {SORTABLE_COLS.map(col => (
           <button
-            onClick={() => { setFilterEntity(''); setFilterAction(''); }}
-            className="text-[10px] text-blue-600 dark:text-blue-400 hover:underline"
+            key={col.key}
+            onClick={() => handleSort(col.key)}
+            className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-colors ${
+              sortBy === col.key
+                ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-700'
+                : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 border border-transparent'
+            }`}
           >
-            Clear filters
+            {col.label}
+            <SortIcon active={sortBy === col.key} dir={sortDir} />
           </button>
-        )}
+        ))}
       </div>
 
       {/* Error */}
@@ -218,9 +332,11 @@ const AuditLog = () => {
               d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
           </svg>
           <p className="text-gray-500 dark:text-gray-400 text-sm">No audit log entries found.</p>
-          <p className="text-gray-400 dark:text-gray-500 text-xs mt-1">
-            Changes to parameters and segments will appear here automatically.
-          </p>
+          {hasFilters && (
+            <button onClick={clearFilters} className="mt-2 text-xs text-blue-600 dark:text-blue-400 hover:underline">
+              Clear filters
+            </button>
+          )}
         </div>
       )}
 
@@ -229,11 +345,14 @@ const AuditLog = () => {
         <div className="space-y-2">
           {items.map(entry => {
             const isExpanded = expandedId === entry.id;
+            const hasDetail  = entry.old_value || entry.new_value;
             return (
               <div key={entry.id} className="bg-white dark:bg-gray-800 rounded-lg shadow dark:shadow-gray-900/30 overflow-hidden">
                 <button
-                  onClick={() => setExpandedId(isExpanded ? null : entry.id)}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
+                  onClick={() => hasDetail && setExpandedId(isExpanded ? null : entry.id)}
+                  className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors ${
+                    hasDetail ? 'hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer' : 'cursor-default'
+                  }`}
                 >
                   <ActionBadge action={entry.action} />
                   <EntityBadge type={entry.entity_type} />
@@ -243,23 +362,26 @@ const AuditLog = () => {
                     </span>
                   )}
 
-                  {/* Summary: try to extract name from new/old value */}
+                  {/* Summary */}
                   <span className="flex-1 text-sm text-gray-700 dark:text-gray-300 truncate">
                     {extractSummary(entry)}
                   </span>
 
-                  <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums flex-shrink-0 hidden sm:block">
+                  <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums flex-shrink-0 hidden sm:block max-w-[160px] truncate">
                     {entry.changed_by}
                   </span>
                   <span className="text-xs text-gray-400 dark:text-gray-500 tabular-nums flex-shrink-0">
                     {formatDateTime(entry.created_at, locale)}
                   </span>
-                  <svg className={`w-4 h-4 text-gray-400 flex-shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
-                    fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
+                  {hasDetail && (
+                    <svg className={`w-4 h-4 text-gray-400 flex-shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                      fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  )}
                 </button>
-                {isExpanded && (
+
+                {isExpanded && hasDetail && (
                   <div className="px-4 pb-4 border-t border-gray-100 dark:border-gray-700 pt-3">
                     <JsonDiff oldVal={entry.old_value} newVal={entry.new_value} />
                   </div>
@@ -278,6 +400,7 @@ const AuditLog = () => {
               >
                 {loading ? <Spinner cls="w-3 h-3" /> : null}
                 Load more
+                {total > 0 && <span className="text-gray-400">({items.length} / {total})</span>}
               </button>
             </div>
           )}
@@ -290,6 +413,11 @@ const AuditLog = () => {
 
 /** Try to pull a human-readable name from old/new JSON values. */
 function extractSummary(entry) {
+  // Auth events: show the provider
+  if (entry.entity_type === 'auth' && entry.new_value) {
+    const obj = typeof entry.new_value === 'string' ? tryParse(entry.new_value) : entry.new_value;
+    if (obj?.auth_provider) return `via ${obj.auth_provider}`;
+  }
   const val = entry.new_value || entry.old_value;
   if (!val) return '';
   const obj = typeof val === 'string' ? tryParse(val) : val;

@@ -68,6 +68,15 @@ from api.auth_middleware import JWTAuthMiddleware
 
 app.include_router(auth_router)
 
+# ── Admin router (superAdmin account management) ──
+try:
+    from api.admin import router as admin_router, set_account_cache_ref
+    app.include_router(admin_router)
+    _ADMIN_AVAILABLE = True
+except Exception as _admin_err:
+    _ADMIN_AVAILABLE = False
+    logging.warning("admin router not loaded: %s", _admin_err)
+
 # Configure CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
@@ -81,9 +90,57 @@ app.add_middleware(
 )
 
 
+# ── Multi-tenancy: account cache ──────────────────────────────────────────────
+# Maps account_id (UUID str) → DB config dict.
+# Populated from master.accounts at startup; refreshed via POST /api/admin/cache/refresh
+# or automatically after account provisioning.
+_account_cache: dict = {}
+
+
+def _build_account_cache() -> None:
+    """Load all active accounts from master DB into _account_cache."""
+    global _account_cache
+    try:
+        from db.master_db import get_all_accounts, get_master_pg_config
+        master_pg = get_master_pg_config()
+        new_entries: dict = {}
+        for acc in get_all_accounts():
+            cp = acc.get("connection_params") or {}
+            new_entries[acc["id"]] = {
+                "host":     cp.get("host", master_pg["host"]),
+                "port":     cp.get("port", master_pg["port"]),
+                "database": acc["db_name"],
+                "user":     cp.get("user", master_pg["user"]),
+                "password": cp.get("password", master_pg["password"]),
+                "schema":   acc["schema_name"],
+                "sslmode":  cp.get("sslmode", "disable"),
+            }
+        _account_cache.clear()
+        _account_cache.update(new_entries)
+        logging.info("Account cache loaded: %d tenant(s)", len(new_entries))
+    except Exception as exc:
+        logging.warning("Could not load account cache (master DB unavailable): %s", exc)
+
+_build_account_cache()
+
+# Share the mutable dict with admin.py (so provisioning refreshes it in-place)
+if _ADMIN_AVAILABLE:
+    try:
+        set_account_cache_ref(_account_cache)
+    except Exception:
+        pass
+
+
 # JWT auth middleware (added AFTER CORS so preflight passes)
 def _get_jwt_secret():
-    """Read JWT secret from DB auth parameters (or fallback to env var)."""
+    """Read JWT secret from master DB, falling back to account DB or hardcoded default."""
+    try:
+        from db.master_db import get_master_jwt_secret
+        secret = get_master_jwt_secret()
+        if secret and secret not in ("CHANGE-ME", "CHANGE-ME-IN-PRODUCTION"):
+            return secret
+    except Exception:
+        pass
     try:
         from db.db import load_config_from_db
         cfg = load_config_from_db()
@@ -96,6 +153,7 @@ app.add_middleware(
     JWTAuthMiddleware,
     secret_key=_get_jwt_secret(),
     schema=get_schema() if _DB_AVAILABLE else "zcube",
+    account_cache=_account_cache,
 )
 
 # Configure logging
@@ -209,6 +267,7 @@ class TimeSeriesInfo(BaseModel):
     classifications: Optional[Dict[str, str]] = None  # { "config_name": "A", ... }
     item_name: Optional[str] = None
     site_name: Optional[str] = None
+    item_image_url: Optional[str] = None
 
 
 class MethodCompatibilityRequest(BaseModel):
@@ -452,8 +511,9 @@ def load_data():
                 names_df = pd.read_sql(
                     f"""SELECT
                                parts.uid  AS unique_id,
-                               COALESCE(MAX(i_x.name), MAX(i_fk.name)) AS item_name,
-                               COALESCE(MAX(s_x.name), MAX(s_fk.name)) AS site_name
+                               COALESCE(MAX(i_x.name),      MAX(i_fk.name))      AS item_name,
+                               COALESCE(MAX(s_x.name),      MAX(s_fk.name))      AS site_name,
+                               COALESCE(MAX(i_x.image_url), MAX(i_fk.image_url)) AS item_image_url
                         FROM (
                             SELECT DISTINCT
                                    unique_id  AS uid,
@@ -474,7 +534,7 @@ def load_data():
                 )
                 if not names_df.empty:
                     pdf = pdf.merge(
-                        names_df[["unique_id", "item_name", "site_name"]],
+                        names_df[["unique_id", "item_name", "site_name", "item_image_url"]],
                         on="unique_id",
                         how="left",
                     )
@@ -1559,8 +1619,10 @@ async def get_series_list(
         # Extract human-readable names (may be None if demand_actuals join missed)
         raw_item_name = row.get("item_name", None)
         raw_site_name = row.get("site_name", None)
+        raw_image_url = row.get("item_image_url", None)
         item_name_val = str(raw_item_name) if raw_item_name and str(raw_item_name) != "nan" else None
         site_name_val = str(raw_site_name) if raw_site_name and str(raw_site_name) != "nan" else None
+        image_url_val = str(raw_image_url) if raw_image_url and str(raw_image_url) != "nan" else None
 
         series_list.append(
             TimeSeriesInfo(
@@ -1580,10 +1642,53 @@ async def get_series_list(
                 classifications=classifications_map.get(uid),
                 item_name=item_name_val,
                 site_name=site_name_val,
+                item_image_url=image_url_val,
             )
         )
 
     return series_list
+
+
+class ItemImageRequest(BaseModel):
+    image_url: Optional[str] = None
+
+
+@app.patch("/api/items/{item_id}/image")
+async def update_item_image(item_id: int, body: ItemImageRequest, request: Request):
+    """Set or clear the image_url for an item."""
+    _require_admin(request)
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {schema}.item SET image_url = %s WHERE id = %s",
+                (body.image_url, item_id),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Item not found")
+        conn.commit()
+        # Invalidate the characteristics cache so next /api/series reload picks up new URL
+        data_cache["characteristics"] = None
+        return {"item_id": item_id, "image_url": body.image_url}
+    finally:
+        conn.close()
+
+
+@app.get("/api/items")
+async def list_items(request: Request):
+    """List all items with id, name, xuid and image_url."""
+    conn = get_conn()
+    schema = get_schema()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                f"SELECT id, xuid, name, description, image_url FROM {schema}.item ORDER BY name"
+            )
+            rows = cur.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 @app.get("/api/series/{unique_id}/data")
@@ -3008,26 +3113,36 @@ async def get_backtest_forecasts(unique_id: str):
             "origins": [],
         }
 
-    if data_cache["forecasts_by_origin"] is None:
+    # Query the DB directly for this series — avoids stale-cache issues and
+    # is more efficient than scanning the full table in memory.
+    _require_db()
+    _bt_conn = get_conn()
+    try:
+        _bt_schema = get_schema()
+        _bt_pdf = pd.read_sql(
+            f"SELECT unique_id, method, forecast_origin, horizon_step, "
+            f"       point_forecast, actual_value "
+            f"FROM {_bt_schema}.forecasts_by_origin "
+            f"WHERE unique_id = %s "
+            f"ORDER BY forecast_origin, method, horizon_step",
+            _bt_conn,
+            params=(unique_id,),
+        )
+    except Exception:
+        _bt_pdf = pd.DataFrame()
+    finally:
+        _bt_conn.close()
+
+    if _bt_pdf.empty:
         return _empty_bt_response()
 
-    fbo_df = _compute(data_cache["forecasts_by_origin"])
-
-    # ── Determine column names ────────────────────────────────────────────────
-    if "forecast_origin" in fbo_df.columns:
-        origin_col = "forecast_origin"
-    elif "origin" in fbo_df.columns:
-        origin_col = "origin"
-    elif "origin_date" in fbo_df.columns:
-        origin_col = "origin_date"
-    else:
-        return _empty_bt_response()
-
-    actual_col = "actual_value" if "actual_value" in fbo_df.columns else "actual"
+    fbo_df = _bt_pdf
+    origin_col = "forecast_origin"
+    actual_col = "actual_value"
     has_horizon = "horizon_step" in fbo_df.columns
 
-    # ── Filter by unique_id ───────────────────────────────────────────────────
-    series_df = fbo_df[fbo_df["unique_id"] == unique_id].copy()
+    # ── Filter by unique_id (already filtered in SQL, but keep guard) ─────────
+    series_df = fbo_df.copy()
     if series_df.empty:
         return _empty_bt_response()
 
@@ -4147,6 +4262,23 @@ def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = Non
                 )
                 _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()
 
+        # After a successful step, invalidate the output caches that it wrote to
+        # so the next API request re-reads fresh data from DB.
+        _STEP_CACHE_INVALIDATION: dict[str, list[str]] = {
+            "etl":             ["time_series", "time_series_original"],
+            "outlier":         ["time_series", "time_series_original"],
+            "characterize":    ["characteristics"],
+            "forecast":        ["forecasts", "forecasts_by_origin", "metrics",
+                                "best_methods", "distributions", "characteristics"],
+            "evaluate":        ["metrics", "forecasts_by_origin"],
+            "best_method":     ["best_methods"],
+            "distribution":    ["distributions"],
+        }
+        if exit_code == 0:
+            for _k in _STEP_CACHE_INVALIDATION.get(step_arg, []):
+                if _k in data_cache:
+                    data_cache[_k] = None
+
         # After a successful ETL run, run ANALYZE so the planner stats are current
         if exit_code == 0 and step_arg == "etl" and _DB_AVAILABLE:
             try:
@@ -4251,7 +4383,15 @@ def _run_full_pipeline_thread(job_id: str):
         with _pipeline_lock:
             _pipeline_jobs[job_id]["log_lines"].append(f"✓ {step_label} complete")
 
-    # All steps succeeded
+    # All steps succeeded — invalidate output caches so next request re-reads from DB
+    _PIPELINE_OUTPUT_CACHE_KEYS = [
+        "forecasts", "forecasts_by_origin", "metrics", "best_methods",
+        "distributions", "characteristics",
+    ]
+    for _k in _PIPELINE_OUTPUT_CACHE_KEYS:
+        if _k in data_cache:
+            data_cache[_k] = None
+
     with _pipeline_lock:
         _pipeline_jobs[job_id]["log_lines"].append(
             f"\n{'=' * 60}\n✓ Full pipeline complete!\n{'=' * 60}"
@@ -5110,6 +5250,11 @@ def _require_db():
         raise HTTPException(status_code=503, detail="Database not available")
 
 
+_PL_SORTABLE = {
+    "id", "step_name", "status", "started_at", "ended_at",
+    "duration_s", "rows_processed",
+}
+
 @app.get("/api/process-log")
 async def get_process_log(
     limit: int = Query(50, ge=1, le=500),
@@ -5117,62 +5262,88 @@ async def get_process_log(
     step: Optional[str] = None,
     status: Optional[str] = None,
     run_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    sort_by: str = Query("started_at"),
+    sort_dir: str = Query("desc"),
 ):
     """
-    Return process log entries, newest first.
-    Optional filters: step_name, status, run_id.
+    Return process log entries with sorting, filtering and pagination.
+    Includes run_step_count (total steps in same run) and has_log_tail flag.
     """
     _require_db()
+    if sort_by not in _PL_SORTABLE:
+        sort_by = "started_at"
+    sort_dir_sql = "ASC" if sort_dir.lower() == "asc" else "DESC"
+
     conn = get_conn()
     try:
-        where_parts = []
+        where_parts: list[str] = []
         params: list = []
+
         if step:
-            where_parts.append("step_name = %s")
-            params.append(step)
+            where_parts.append("pl.step_name ILIKE %s")
+            params.append(f"%{step}%")
         if status:
-            where_parts.append("status = %s")
+            where_parts.append("pl.status = %s")
             params.append(status)
         if run_id:
-            where_parts.append("run_id = %s")
+            where_parts.append("pl.run_id = %s")
             params.append(run_id)
+        if date_from:
+            where_parts.append("pl.started_at >= %s")
+            params.append(date_from)
+        if date_to:
+            where_parts.append("pl.started_at <= %s")
+            params.append(date_to)
 
         where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
 
+        # run_step_count comes from the full table (not filtered), so standalone vs pipeline
+        # runs are always correctly classified regardless of active filters.
         query = f"""
-            SELECT id, run_id, step_name, status,
-                   started_at, ended_at, duration_s,
-                   rows_processed, error_message
-            FROM zcube.process_log
+            WITH run_counts AS (
+                SELECT run_id, COUNT(*) AS step_count
+                FROM zcube.process_log
+                GROUP BY run_id
+            )
+            SELECT
+                pl.id, pl.run_id, pl.step_name, pl.status,
+                pl.started_at, pl.ended_at, pl.duration_s,
+                pl.rows_processed, pl.error_message,
+                (pl.log_tail IS NOT NULL AND pl.log_tail <> '') AS has_log_tail,
+                COALESCE(rc.step_count, 1)                       AS run_step_count
+            FROM zcube.process_log pl
+            LEFT JOIN run_counts rc ON rc.run_id = pl.run_id
             {where_sql}
-            ORDER BY started_at DESC
+            ORDER BY pl.{sort_by} {sort_dir_sql} NULLS LAST
             LIMIT %s OFFSET %s
         """
-        params += [limit, offset]
+        count_query = f"""
+            SELECT COUNT(*)
+            FROM zcube.process_log pl
+            {where_sql}
+        """
 
         with conn.cursor() as cur:
-            cur.execute(query, params)
+            cur.execute(query, params + [limit, offset])
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
 
         result = []
         for row in rows:
             entry = dict(zip(cols, row))
-            # Serialise timestamps
             for k in ("started_at", "ended_at"):
                 if entry.get(k) is not None:
                     entry[k] = entry[k].isoformat()
-            # Coerce numeric
             if entry.get("duration_s") is not None:
                 entry["duration_s"] = float(entry["duration_s"])
+            if entry.get("run_step_count") is not None:
+                entry["run_step_count"] = int(entry["run_step_count"])
             result.append(entry)
 
-        # Also get total count
         with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT COUNT(*) FROM zcube.process_log {where_sql}",
-                params[:-2] if params else [],
-            )
+            cur.execute(count_query, params)
             total = cur.fetchone()[0]
 
         return {"total": total, "offset": offset, "limit": limit, "items": result}
@@ -5198,7 +5369,8 @@ async def get_process_log_runs():
                 SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)          AS error_count,
                 SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)        AS success_count,
                 SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END)        AS running_count,
-                SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END)    AS interrupted_count
+                SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END)    AS interrupted_count,
+                array_agg(DISTINCT step_name ORDER BY step_name)            AS step_names
             FROM zcube.process_log
             GROUP BY run_id
             ORDER BY MIN(started_at) DESC
@@ -5229,6 +5401,22 @@ async def get_process_log_runs():
                 entry["overall_status"] = "success"
             result.append(entry)
         return result
+    finally:
+        conn.close()
+
+
+@app.get("/api/process-log/step-names")
+async def get_process_log_step_names():
+    """Return sorted list of all distinct step_name values in process_log."""
+    _require_db()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT step_name FROM zcube.process_log "
+                "WHERE step_name IS NOT NULL ORDER BY step_name"
+            )
+            return [row[0] for row in cur.fetchall()]
     finally:
         conn.close()
 
@@ -6128,22 +6316,38 @@ async def get_segment_members(segment_id: int):
 
 @app.get("/api/audit-log")
 async def get_audit_log(
+    request: Request,
     entity_type: Optional[str] = None,
     entity_id: Optional[int] = None,
     action: Optional[str] = None,
+    changed_by: Optional[str] = None,
+    date_from: Optional[str] = None,   # ISO date string e.g. "2026-01-01"
+    date_to: Optional[str] = None,     # ISO date string e.g. "2026-12-31"
+    sort_by: str = "created_at",
+    sort_dir: str = "desc",
     limit: int = 50,
     offset: int = 0,
 ):
     """
-    Query the audit log with optional filters.
+    Query the audit log with optional filters and sort.
 
     Query params:
-    - entity_type: 'parameter', 'segment', or 'parameter_segment'
+    - entity_type: 'parameter', 'segment', 'parameter_segment', 'auth'
     - entity_id: PK of the changed entity
-    - action: 'create', 'update', 'delete', 'reorder'
+    - action: 'create', 'update', 'delete', 'reorder', 'login', 'logout'
+    - changed_by: partial match on the user email / name
+    - date_from / date_to: ISO date strings for created_at range
+    - sort_by: id | entity_type | entity_id | action | changed_by | created_at
+    - sort_dir: asc | desc
     - limit / offset: pagination (default 50 rows)
     """
     _require_db()
+    # Allowlist sort column to prevent SQL injection
+    _SORTABLE = {"id", "entity_type", "entity_id", "action", "changed_by", "created_at"}
+    if sort_by not in _SORTABLE:
+        sort_by = "created_at"
+    sort_dir = "ASC" if sort_dir.lower() == "asc" else "DESC"
+
     conn = get_conn()
     schema = get_schema()
     try:
@@ -6158,25 +6362,44 @@ async def get_audit_log(
         if action:
             clauses.append("action = %s")
             params.append(action)
+        if changed_by:
+            clauses.append("changed_by ILIKE %s")
+            params.append(f"%{changed_by}%")
+        if date_from:
+            clauses.append("created_at >= %s::timestamptz")
+            params.append(date_from)
+        if date_to:
+            clauses.append("created_at < (%s::date + interval '1 day')::timestamptz")
+            params.append(date_to)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        params.extend([limit, offset])
+
         with conn.cursor() as cur:
+            # Total count for this filter set
+            cur.execute(
+                f"SELECT COUNT(*) FROM {schema}.audit_log{where}",
+                params,
+            )
+            total = cur.fetchone()[0]
+
+            # Paginated rows
             cur.execute(
                 f"SELECT id, entity_type, entity_id, action, old_value, new_value, "
                 f"changed_by, created_at "
                 f"FROM {schema}.audit_log{where} "
-                f"ORDER BY created_at DESC LIMIT %s OFFSET %s",
-                params,
+                f"ORDER BY {sort_by} {sort_dir} "
+                f"LIMIT %s OFFSET %s",
+                params + [limit, offset],
             )
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
+
         entries = []
         for r in rows:
             entry = dict(zip(cols, r))
             if entry.get("created_at"):
                 entry["created_at"] = entry["created_at"].isoformat()
             entries.append(entry)
-        return {"items": entries, "limit": limit, "offset": offset}
+        return {"items": entries, "total": total, "limit": limit, "offset": offset}
     except Exception as exc:
         logger.error(f"get_audit_log failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))

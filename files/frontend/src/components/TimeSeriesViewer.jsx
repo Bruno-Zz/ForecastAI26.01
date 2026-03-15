@@ -15,6 +15,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import Plot from 'react-plotly.js';
 import { useLocale } from '../contexts/LocaleContext';
 import { useTheme } from '../contexts/ThemeContext';
+import { useAuth } from '../contexts/AuthContext';
+import { useUserPrefs } from '../hooks/useUserPrefs';
 import { formatNumber, formatDate, formatYearMonth, formatPercent, toISODate, formatDateTime } from '../utils/formatting';
 import api from '../utils/api';
 import DateRangePicker from './DateRangePicker';
@@ -31,6 +33,41 @@ const METHOD_COLORS = {
   Historical: '#374151',
 };
 const getMethodColor = (method) => METHOD_COLORS[method] || '#6b7280';
+
+/* ─── Hyperparameter dropdown options ───────────────────────────────────
+ * Keys are either "param" (applies to any method) or "method:param".
+ * Values are arrays of string options shown in a <select>.
+ * ─────────────────────────────────────────────────────────────────────── */
+const PARAM_DROPDOWNS = {
+  // Universal
+  decomposition_type:             ['additive', 'multiplicative'],
+  trend_forecaster:               [
+    'AutoARIMA(season_length=1)',
+    'AutoETS(season_length=1)',
+    'AutoTheta(season_length=1)',
+    'AutoCES(season_length=1)',
+  ],
+  stl_seasonal_deg:               ['0', '1'],
+  // AutoARIMA method
+  'AutoARIMA:method':             ['CSS-ML', 'CSS', 'ML'],
+  // AutoETS model
+  'AutoETS:model':                ['ZZZ', 'AAN', 'AAA', 'ANA', 'ANM', 'ANN',
+                                   'AAM', 'MAN', 'MAM', 'MMA', 'MMM', 'MMN',
+                                   'MNM', 'MNN', 'ZAN', 'ZAA', 'ZAM', 'ZZA',
+                                   'ZZM', 'ZZN'],
+  // AutoCES model
+  'AutoCES:model':                ['N', 'P', 'F', 'Z'],
+  // AutoTheta model
+  'AutoTheta:model':              ['Theta', 'OptimizedTheta',
+                                   'DynamicTheta', 'DynamicOptimizedTheta'],
+};
+
+/** Return dropdown options for a given method + param key, or null if free-form. */
+function getParamDropdown(method, paramKey) {
+  return PARAM_DROPDOWNS[`${method}:${paramKey}`]
+      ?? PARAM_DROPDOWNS[paramKey]
+      ?? null;
+}
 
 // Convert #rrggbb hex colour to rgba(...) with given alpha (0-1)
 const hexToRgba = (hex, alpha) => {
@@ -197,13 +234,15 @@ const aggForecastSeries = (nativeDates, pointForecast, quantiles, agg) => {
 };
 
 // ---- localStorage helpers ----
-const getRecent = (key) => {
-  try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch { return []; }
+const getRecent = (userId, key) => {
+  const fullKey = `fai_${userId || 'anon'}_${key}`;
+  try { return JSON.parse(localStorage.getItem(fullKey) || '[]'); } catch { return []; }
 };
-const setRecent = (key, value, max = 5) => {
-  const existing = getRecent(key);
+const setRecent = (userId, key, value, max = 5) => {
+  const fullKey = `fai_${userId || 'anon'}_${key}`;
+  const existing = getRecent(userId, key);
   const filtered = existing.filter(v => v !== value);
-  localStorage.setItem(key, JSON.stringify([value, ...filtered].slice(0, max)));
+  localStorage.setItem(fullKey, JSON.stringify([value, ...filtered].slice(0, max)));
 };
 
 // ---- Parse unique_id into item + site (split on FIRST underscore) ----
@@ -215,16 +254,24 @@ const parseUniqueId = (uid) => {
 };
 
 // ---- Section order — persisted drag-and-drop ----
-const SECTION_ORDER_KEY = 'tsv_section_order';
 const DEFAULT_SECTION_ORDER = [
   'toggles', 'main_chart', 'forecast_table', 'outlier',
   'rationale', 'parameters', 'metrics', 'hyperparameters', 'ridge', 'evolution',
 ];
 
 function useSectionOrder() {
+  // User-scoped: each user gets their own section order
+  const { user } = useAuth();
+  const storageKey = `fai_${user?.id || 'anon'}_tsv_section_order`;
+
   const [order, setOrder] = useState(() => {
     try {
-      const stored = JSON.parse(localStorage.getItem(SECTION_ORDER_KEY) || 'null');
+      // Try user-scoped key first, then fall back to legacy key
+      const stored = JSON.parse(
+        localStorage.getItem(storageKey) ||
+        localStorage.getItem('tsv_section_order') ||
+        'null'
+      );
       if (Array.isArray(stored) && stored.length > 0) {
         // Merge: keep stored order, append any new sections not yet in storage
         const merged = [...stored, ...DEFAULT_SECTION_ORDER.filter(s => !stored.includes(s))];
@@ -243,7 +290,7 @@ function useSectionOrder() {
       if (from === -1 || to === -1) return prev;
       next.splice(from, 1);
       next.splice(to, 0, dragId);
-      localStorage.setItem(SECTION_ORDER_KEY, JSON.stringify(next));
+      localStorage.setItem(storageKey, JSON.stringify(next));
       return next;
     });
   };
@@ -256,13 +303,16 @@ const Section = ({
   title, storageKey, defaultOpen = true, children, badge, id,
   dragId, dragOver, onDragStart, onDragOver, onDrop, onDragEnd,
 }) => {
+  // User-scoped collapse state: try user-scoped key first, fall back to legacy
+  const { user } = useAuth();
+  const userKey = `fai_${user?.id || 'anon'}_${storageKey}`;
   const [open, setOpen] = useState(() => {
-    const stored = localStorage.getItem(storageKey);
+    const stored = localStorage.getItem(userKey) ?? localStorage.getItem(storageKey);
     return stored === null ? defaultOpen : stored === 'true';
   });
   const toggle = () => setOpen(prev => {
     const next = !prev;
-    localStorage.setItem(storageKey, String(next));
+    localStorage.setItem(userKey, String(next));
     return next;
   });
 
@@ -1063,13 +1113,16 @@ export const TimeSeriesViewer = () => {
   const navigate = useNavigate();
   const { locale, numberDecimals } = useLocale();
   const { isDark } = useTheme();
+  const { user } = useAuth();
+  const userId = user?.id || null;
+  const { get: getPref, save: savePref, saveMany: saveManyPrefs } = useUserPrefs();
 
   // ---- Item/Site dropdown state (multi-select: arrays) ----
   const [allSeriesList, setAllSeriesList] = useState([]);
   const [selectedItems, setSelectedItems] = useState([]); // array of item strings
   const [selectedSites, setSelectedSites] = useState([]); // array of site strings
-  const [recentItems, setRecentItems] = useState([]);
-  const [recentSites, setRecentSites] = useState([]);
+  const [recentItems, setRecentItems] = useState(() => getRecent(userId, 'recent_items'));
+  const [recentSites, setRecentSites] = useState(() => getRecent(userId, 'recent_sites'));
   // Multi-series aggregated data (when more than 1 series selected)
   const [multiSeriesData, setMultiSeriesData] = useState(null); // null = use single-series mode
   const [multiLoading, setMultiLoading] = useState(false);
@@ -1115,8 +1168,8 @@ export const TimeSeriesViewer = () => {
   const SERIES_TABLE_PAGE_SIZE = 50;
 
   // ---- Metrics table sorting ----
-  const [metricsSortField, setMetricsSortField] = useState('mae');
-  const [metricsSortDir, setMetricsSortDir] = useState('asc');
+  const [metricsSortField, setMetricsSortField] = useState(() => getPref('metricsSortField', 'mae'));
+  const [metricsSortDir, setMetricsSortDir] = useState(() => getPref('metricsSortDir', 'asc'));
 
   // ---- Forecast origin slider ----
   const [origins, setOrigins] = useState([]);
@@ -1143,8 +1196,8 @@ export const TimeSeriesViewer = () => {
   const [showBacktestOverlay, setShowBacktestOverlay] = useState(false);
   const btPlayTimerRef = useRef(null);
 
-  // ---- Method visibility ----
-  const [visibleMethods, setVisibleMethods] = useState({});
+  // ---- Method visibility (persisted per user) ----
+  const [visibleMethods, setVisibleMethods] = useState(() => getPref('visibleMethods', {}));
   const [bandVisibleMethods, setBandVisibleMethods] = useState({});
 
   // ---- Date-range zoom ----
@@ -1184,12 +1237,18 @@ export const TimeSeriesViewer = () => {
   const [draggingId, setDraggingId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
 
-  // ---- Display aggregation granularity ----
-  const [displayAgg, setDisplayAgg] = useState('native');
+  // ---- Display aggregation granularity (persisted per user) ----
+  const [displayAgg, setDisplayAgg] = useState(() => getPref('displayAgg', 'native'));
 
-  // ---- Period date-range filter ----
-  const [periodStart, setPeriodStart] = useState(null); // null = no filter (all)
-  const [periodEnd, setPeriodEnd] = useState(null);     // null = no filter (all)
+  // ---- Period date-range filter (persisted per user) ----
+  const [periodStart, setPeriodStart] = useState(() => {
+    const v = getPref('periodStart', null);
+    return v ? new Date(v) : null;
+  });
+  const [periodEnd, setPeriodEnd] = useState(() => {
+    const v = getPref('periodEnd', null);
+    return v ? new Date(v) : null;
+  });
 
   const handleDragStart = useCallback((id) => setDraggingId(id), []);
   const handleDragOver  = useCallback((id) => setDragOverId(id), []);
@@ -1199,6 +1258,22 @@ export const TimeSeriesViewer = () => {
     setDragOverId(null);
   }, [draggingId, reorderSections]);
   const handleDragEnd   = useCallback(() => { setDraggingId(null); setDragOverId(null); }, []);
+
+  // ── Persist UI preferences whenever they change ───────────────────────────
+  useEffect(() => { savePref('displayAgg', displayAgg); }, [displayAgg, savePref]);
+  useEffect(() => {
+    savePref('periodStart', periodStart ? periodStart.toISOString() : null);
+  }, [periodStart, savePref]);
+  useEffect(() => {
+    savePref('periodEnd', periodEnd ? periodEnd.toISOString() : null);
+  }, [periodEnd, savePref]);
+  useEffect(() => {
+    saveManyPrefs({ metricsSortField, metricsSortDir });
+  }, [metricsSortField, metricsSortDir, saveManyPrefs]);
+  // visibleMethods is keyed by method name; only save once it's been populated
+  useEffect(() => {
+    if (Object.keys(visibleMethods).length > 0) savePref('visibleMethods', visibleMethods);
+  }, [visibleMethods, savePref]);
 
   // ---- Load all series list for dropdowns (once) ----
   useEffect(() => {
@@ -1245,14 +1320,14 @@ export const TimeSeriesViewer = () => {
     setSelectedItems([item]);
     setSelectedSites([site]);
 
-    // Update localStorage recents
-    setRecent('recent_items', item);
-    setRecent('recent_sites', site);
+    // Update user-scoped recents
+    setRecent(userId, 'recent_items', item);
+    setRecent(userId, 'recent_sites', site);
     localStorage.setItem('last_series', decodedId);
 
     // Refresh recent state
-    setRecentItems(getRecent('recent_items'));
-    setRecentSites(getRecent('recent_sites'));
+    setRecentItems(getRecent(userId, 'recent_items'));
+    setRecentSites(getRecent(userId, 'recent_sites'));
   }, [decodedId]);
 
   // ---- Navigate to single series when exactly 1 item + 1 site ----
@@ -3924,6 +3999,26 @@ export const TimeSeriesViewer = () => {
                   const isSavedOverride = k in savedOvr && !(k in localEdits);
                   const borderCls = isEdited ? 'border-amber-400' : isSavedOverride ? 'border-blue-400' : 'border-gray-200 dark:border-gray-600';
 
+                  // ── Dropdown for limited-value params ──
+                  const dropdownOpts = getParamDropdown(method, k);
+                  if (dropdownOpts) {
+                    const strVal = String(effective ?? dropdownOpts[0]);
+                    return (
+                      <select
+                        value={strVal}
+                        onChange={e => setHpEdits(prev => ({
+                          ...prev,
+                          [method]: { ...(prev[method] || {}), [k]: e.target.value }
+                        }))}
+                        className={`w-full text-right font-mono text-xs border rounded px-1 py-0.5 ${borderCls} bg-white dark:bg-gray-900 dark:text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-400 cursor-pointer`}
+                      >
+                        {dropdownOpts.map(opt => (
+                          <option key={opt} value={opt}>{opt}</option>
+                        ))}
+                      </select>
+                    );
+                  }
+
                   if (typeof original === 'boolean') {
                     return (
                       <label className="flex items-center gap-1 justify-end cursor-pointer">
@@ -3940,14 +4035,20 @@ export const TimeSeriesViewer = () => {
                       </label>
                     );
                   }
-                  if (typeof original === 'number') {
-                    const step = Number.isInteger(original) ? 1 : 0.001;
+                  // Params that are null by default but should be edited as integers
+                  // (null means "auto / let the algorithm decide")
+                  const NULLABLE_INTEGER_PARAMS = new Set(['stl_trend']);
+                  const isNullableInt = original === null && NULLABLE_INTEGER_PARAMS.has(k);
+                  if (typeof original === 'number' || isNullableInt) {
+                    const isInt = original === null || Number.isInteger(original);
+                    const step = isInt ? 1 : 0.001;
                     return (
                       <input type="number" step={step}
                         value={effective ?? ''}
+                        placeholder={original === null ? 'auto' : undefined}
                         className={`w-full text-right font-mono text-xs border rounded px-1 py-0.5 ${borderCls} bg-white dark:bg-gray-900 dark:text-gray-200 focus:outline-none focus:ring-1 focus:ring-indigo-400`}
                         onChange={e => {
-                          const val = e.target.value === '' ? null : (Number.isInteger(original) ? parseInt(e.target.value, 10) : parseFloat(e.target.value));
+                          const val = e.target.value === '' ? null : (isInt ? parseInt(e.target.value, 10) : parseFloat(e.target.value));
                           setHpEdits(prev => ({
                             ...prev,
                             [method]: { ...(prev[method] || {}), [k]: val }

@@ -2145,3 +2145,496 @@ MSTL       2191.192226  2549.487782
 2026-03-11 16:31:45,112 - utils.orchestrator - INFO - Running parallel distribution fitting with Dask (7027 rows -> 71 batches of ~100)...
 2026-03-11 16:32:16,706 - db.db - INFO - bulk_insert: 7,025 rows -> zcube.fitted_distributions
 2026-03-11 16:32:16,707 - utils.orchestrator - INFO - Distributions saved to zcube.fitted_distributions (7025 rows)
+2026-03-15 00:48:12,198 - run_pipeline - INFO - Running single step: outlier-detection (scenario_id=1)
+2026-03-15 00:48:12,793 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 00:48:12,794 - utils.orchestrator - INFO - STEP 1b: Outlier Detection & Correction
+2026-03-15 00:48:12,794 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 00:48:12,843 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 1 override series
+2026-03-15 00:48:12,869 - outlier.detection - INFO - OutlierDetector initialized: detection=iqr, correction=clip, enabled=True
+2026-03-15 00:48:12,904 - outlier.detection - INFO - Running outlier detection on 2395 series (method=iqr, correction=clip)
+2026-03-15 00:48:41,924 - outlier.detection - INFO - Outlier detection complete: 12860 outliers detected across 1667 series (of 2395 total)
+2026-03-15 00:48:56,366 - utils.orchestrator - INFO - Corrected data saved to zcube.demand_actuals (234,046 rows updated)
+2026-03-15 00:48:57,719 - db.db - INFO - bulk_insert: 12,860 rows -> zcube.detected_outliers
+2026-03-15 00:48:57,719 - utils.orchestrator - INFO - Outliers saved to zcube.detected_outliers (12,860 outliers)
+2026-03-15 01:23:09,551 - run_pipeline - INFO - Running single step: forecast (scenario_id=1)
+2026-03-15 01:23:10,066 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 01:23:10,066 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-15 01:23:10,066 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 01:23:10,087 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 2 override series
+2026-03-15 01:23:10,087 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-15 01:23:10,101 - utils.orchestrator - INFO - Statistical forecasts for 1 series...
+2026-03-15 01:23:10,459 - utils.orchestrator - INFO -   -> Statistical: 4 forecast rows
+2026-03-15 01:23:10,460 - utils.orchestrator - INFO - ML forecasts for 1 series (min_obs=20)...
+2026-03-15 01:23:10,474 - forecasting.ml_models - INFO - Generating ML forecasts for 1 series (skipped 0 with < 20 observations)
+2026-03-15 01:23:10,475 - utils.orchestrator - INFO -   -> ML: 0 forecast rows
+2026-03-15 01:23:10,475 - utils.orchestrator - INFO - Neural forecasts for 1 series (min_obs=30)...
+2026-03-15 01:23:10,510 - utils.orchestrator - INFO - Foundation model forecasts for 1 series...
+2026-03-15 01:23:10,545 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 1 series only
+2026-03-15 01:23:10,581 - db.db - INFO - bulk_insert: 4 rows -> zcube.forecast_results
+2026-03-15 01:23:10,581 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (4 rows)
+2026-03-15 01:23:15,894 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:23335' processes=8 threads=16, memory=111.76 GiB>
+2026-03-15 01:23:15,895 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-15 01:23:15,895 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 01:23:15,895 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-15 01:23:15,895 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 01:23:15,911 - utils.orchestrator - INFO - Loaded backtesting overrides for 1 series
+2026-03-15 01:23:15,911 - utils.orchestrator - INFO - Running parallel backtesting with Dask (1 series -> 1 batches of ~100)...
+2026-03-15 01:23:18,557 - utils.orchestrator - INFO - Backtest complete: 1/1 series processed
+2026-03-15 01:23:18,560 - utils.orchestrator - INFO - Targeted save: replacing data for 1 series only
+2026-03-15 01:23:18,580 - db.db - INFO - bulk_insert: 16 rows -> zcube.backtest_metrics
+2026-03-15 01:23:18,581 - utils.orchestrator - INFO - Backtest metrics saved to zcube.backtest_metrics (16 rows)
+2026-03-15 01:23:18,594 - utils.orchestrator - INFO - Backtest summary by method:
+                  mae        rmse
+method                           
+AutoARIMA  533.364405  647.460037
+AutoETS    720.142644  820.759110
+AutoTheta  639.586744  732.131661
+MSTL       620.482856  709.791141
+2026-03-15 01:23:18,617 - db.db - INFO - bulk_insert: 128 rows -> zcube.forecasts_by_origin
+2026-03-15 01:23:18,617 - utils.orchestrator - INFO - Per-origin forecasts saved to zcube.forecasts_by_origin (128 rows)
+2026-03-15 01:23:18,617 - utils.orchestrator - INFO - SCORING: Computing composite method rankings from backtest metrics...
+2026-03-15 01:23:18,630 - selection.best_method - INFO - Loaded backtesting weights from DB/config
+2026-03-15 01:23:18,630 - selection.best_method - INFO - MethodSelector initialised with weights: {'mae': 0.4, 'bias': 0.15, 'mase': 0.1, 'rmse': 0.2, 'coverage_90': 0.15}
+2026-03-15 01:23:18,642 - utils.orchestrator - INFO - Targeted save: replacing best methods for 1 series only
+2026-03-15 01:23:18,659 - db.db - INFO - bulk_insert: 1 rows -> zcube.best_method_per_series
+2026-03-15 01:23:18,660 - utils.orchestrator - INFO - Best methods saved to zcube.best_method_per_series (1 rows)
+2026-03-15 01:23:18,660 - utils.orchestrator - INFO - Best method distribution: {'AutoARIMA': 1}
+2026-03-15 01:45:21,498 - run_pipeline - INFO - Running single step: backtest (scenario_id=1)
+2026-03-15 01:45:28,331 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:14285' processes=8 threads=16, memory=111.76 GiB>
+2026-03-15 01:45:28,331 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-15 01:45:28,331 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 01:45:28,332 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-15 01:45:28,332 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 01:45:53,348 - utils.orchestrator - INFO - Loaded backtesting overrides for 1 series
+2026-03-15 01:45:53,381 - utils.orchestrator - INFO - Running parallel backtesting with Dask (2395 series -> 24 batches of ~100)...
+2026-03-15 01:58:10,544 - utils.orchestrator - INFO - Backtest complete: 2392/2395 series processed
+2026-03-15 01:58:12,396 - db.db - INFO - bulk_insert: 26,418 rows -> zcube.backtest_metrics
+2026-03-15 01:58:12,397 - utils.orchestrator - INFO - Backtest metrics saved to zcube.backtest_metrics (26418 rows)
+2026-03-15 01:58:12,415 - utils.orchestrator - INFO - Backtest summary by method:
+                   mae         rmse
+method                             
+AutoARIMA   795.939705   960.257969
+AutoETS    1336.644879  1562.261042
+AutoTheta   942.343853  1112.879437
+MSTL       2191.192226  2549.487782
+2026-03-15 01:58:17,648 - db.db - INFO - bulk_insert: 211,344 rows -> zcube.forecasts_by_origin
+2026-03-15 01:58:17,649 - utils.orchestrator - INFO - Per-origin forecasts saved to zcube.forecasts_by_origin (211344 rows)
+2026-03-15 01:58:17,649 - utils.orchestrator - INFO - SCORING: Computing composite method rankings from backtest metrics...
+2026-03-15 01:58:17,666 - selection.best_method - INFO - Loaded backtesting weights from DB/config
+2026-03-15 01:58:17,666 - selection.best_method - INFO - MethodSelector initialised with weights: {'mae': 0.4, 'bias': 0.15, 'mase': 0.1, 'rmse': 0.2, 'coverage_90': 0.15}
+2026-03-15 01:58:44,105 - db.db - INFO - bulk_insert: 2,392 rows -> zcube.best_method_per_series
+2026-03-15 01:58:44,105 - utils.orchestrator - INFO - Best methods saved to zcube.best_method_per_series (2392 rows)
+2026-03-15 01:58:44,106 - utils.orchestrator - INFO - Best method distribution: {'AutoARIMA': 895, 'AutoETS': 715, 'MSTL': 461, 'AutoTheta': 321}
+2026-03-15 01:59:44,909 - run_pipeline - INFO - Running single step: forecast (scenario_id=1)
+2026-03-15 01:59:45,400 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 01:59:45,401 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-15 01:59:45,401 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 01:59:45,438 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 2 override series
+2026-03-15 01:59:45,438 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-15 01:59:45,452 - utils.orchestrator - INFO - Statistical forecasts for 1 series...
+2026-03-15 01:59:45,823 - utils.orchestrator - INFO -   -> Statistical: 4 forecast rows
+2026-03-15 01:59:45,824 - utils.orchestrator - INFO - ML forecasts for 1 series (min_obs=20)...
+2026-03-15 01:59:45,843 - forecasting.ml_models - INFO - Generating ML forecasts for 1 series (skipped 0 with < 20 observations)
+2026-03-15 01:59:45,844 - utils.orchestrator - INFO -   -> ML: 0 forecast rows
+2026-03-15 01:59:45,844 - utils.orchestrator - INFO - Neural forecasts for 1 series (min_obs=30)...
+2026-03-15 01:59:45,858 - utils.orchestrator - INFO - Foundation model forecasts for 1 series...
+2026-03-15 01:59:45,888 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 1 series only
+2026-03-15 01:59:45,923 - db.db - INFO - bulk_insert: 4 rows -> zcube.forecast_results
+2026-03-15 01:59:45,924 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (4 rows)
+2026-03-15 01:59:51,301 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:18502' processes=8 threads=16, memory=111.76 GiB>
+2026-03-15 01:59:51,301 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-15 01:59:51,301 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 01:59:51,302 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-15 01:59:51,302 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 01:59:51,318 - utils.orchestrator - INFO - Loaded backtesting overrides for 1 series
+2026-03-15 01:59:51,318 - utils.orchestrator - INFO - Running parallel backtesting with Dask (1 series -> 1 batches of ~100)...
+2026-03-15 01:59:53,989 - utils.orchestrator - INFO - Backtest complete: 1/1 series processed
+2026-03-15 01:59:53,992 - utils.orchestrator - INFO - Targeted save: replacing data for 1 series only
+2026-03-15 01:59:54,031 - db.db - INFO - bulk_insert: 16 rows -> zcube.backtest_metrics
+2026-03-15 01:59:54,031 - utils.orchestrator - INFO - Backtest metrics saved to zcube.backtest_metrics (16 rows)
+2026-03-15 01:59:54,035 - utils.orchestrator - INFO - Backtest summary by method:
+                  mae        rmse
+method                           
+AutoARIMA  533.364405  647.460037
+AutoETS    720.142644  820.759110
+AutoTheta  639.586744  732.131661
+MSTL       620.482856  709.791141
+2026-03-15 01:59:54,073 - db.db - INFO - bulk_insert: 128 rows -> zcube.forecasts_by_origin
+2026-03-15 01:59:54,073 - utils.orchestrator - INFO - Per-origin forecasts saved to zcube.forecasts_by_origin (128 rows)
+2026-03-15 01:59:54,074 - utils.orchestrator - INFO - SCORING: Computing composite method rankings from backtest metrics...
+2026-03-15 01:59:54,089 - selection.best_method - INFO - Loaded backtesting weights from DB/config
+2026-03-15 01:59:54,089 - selection.best_method - INFO - MethodSelector initialised with weights: {'mae': 0.4, 'bias': 0.15, 'mase': 0.1, 'rmse': 0.2, 'coverage_90': 0.15}
+2026-03-15 01:59:54,105 - utils.orchestrator - INFO - Targeted save: replacing best methods for 1 series only
+2026-03-15 01:59:54,121 - db.db - INFO - bulk_insert: 1 rows -> zcube.best_method_per_series
+2026-03-15 01:59:54,121 - utils.orchestrator - INFO - Best methods saved to zcube.best_method_per_series (1 rows)
+2026-03-15 01:59:54,122 - utils.orchestrator - INFO - Best method distribution: {'AutoARIMA': 1}
+2026-03-15 02:01:08,258 - run_pipeline - INFO - Running single step: forecast (scenario_id=1)
+2026-03-15 02:01:08,700 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:01:08,700 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-15 02:01:08,700 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:01:08,731 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 2 override series
+2026-03-15 02:01:08,731 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-15 02:01:08,755 - utils.orchestrator - INFO - Statistical forecasts for 1 series...
+2026-03-15 02:01:09,113 - utils.orchestrator - INFO -   -> Statistical: 4 forecast rows
+2026-03-15 02:01:09,113 - utils.orchestrator - INFO - ML forecasts for 1 series (min_obs=20)...
+2026-03-15 02:01:09,129 - forecasting.ml_models - INFO - Generating ML forecasts for 1 series (skipped 0 with < 20 observations)
+2026-03-15 02:01:09,130 - utils.orchestrator - INFO -   -> ML: 0 forecast rows
+2026-03-15 02:01:09,130 - utils.orchestrator - INFO - Neural forecasts for 1 series (min_obs=30)...
+2026-03-15 02:01:09,158 - utils.orchestrator - INFO - Foundation model forecasts for 1 series...
+2026-03-15 02:01:09,190 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 1 series only
+2026-03-15 02:01:09,215 - db.db - INFO - bulk_insert: 4 rows -> zcube.forecast_results
+2026-03-15 02:01:09,215 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (4 rows)
+2026-03-15 02:01:14,601 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:35206' processes=8 threads=16, memory=111.76 GiB>
+2026-03-15 02:01:14,601 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-15 02:01:14,601 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:01:14,601 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-15 02:01:14,601 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:01:14,617 - utils.orchestrator - INFO - Loaded backtesting overrides for 1 series
+2026-03-15 02:01:14,617 - utils.orchestrator - INFO - Running parallel backtesting with Dask (1 series -> 1 batches of ~100)...
+2026-03-15 02:01:17,113 - utils.orchestrator - INFO - Backtest complete: 1/1 series processed
+2026-03-15 02:01:17,115 - utils.orchestrator - INFO - Targeted save: replacing data for 1 series only
+2026-03-15 02:01:17,143 - db.db - INFO - bulk_insert: 16 rows -> zcube.backtest_metrics
+2026-03-15 02:01:17,143 - utils.orchestrator - INFO - Backtest metrics saved to zcube.backtest_metrics (16 rows)
+2026-03-15 02:01:17,148 - utils.orchestrator - INFO - Backtest summary by method:
+                  mae        rmse
+method                           
+AutoARIMA  533.364405  647.460037
+AutoETS    720.142644  820.759110
+AutoTheta  639.586744  732.131661
+MSTL       620.482856  709.791141
+2026-03-15 02:01:17,177 - db.db - INFO - bulk_insert: 128 rows -> zcube.forecasts_by_origin
+2026-03-15 02:01:17,177 - utils.orchestrator - INFO - Per-origin forecasts saved to zcube.forecasts_by_origin (128 rows)
+2026-03-15 02:01:17,177 - utils.orchestrator - INFO - SCORING: Computing composite method rankings from backtest metrics...
+2026-03-15 02:01:17,191 - selection.best_method - INFO - Loaded backtesting weights from DB/config
+2026-03-15 02:01:17,191 - selection.best_method - INFO - MethodSelector initialised with weights: {'mae': 0.4, 'bias': 0.15, 'mase': 0.1, 'rmse': 0.2, 'coverage_90': 0.15}
+2026-03-15 02:01:17,203 - utils.orchestrator - INFO - Targeted save: replacing best methods for 1 series only
+2026-03-15 02:01:17,235 - db.db - INFO - bulk_insert: 1 rows -> zcube.best_method_per_series
+2026-03-15 02:01:17,235 - utils.orchestrator - INFO - Best methods saved to zcube.best_method_per_series (1 rows)
+2026-03-15 02:01:17,236 - utils.orchestrator - INFO - Best method distribution: {'AutoARIMA': 1}
+2026-03-15 02:01:57,892 - run_pipeline - INFO - Running single step: forecast (scenario_id=1)
+2026-03-15 02:01:58,313 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:01:58,314 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-15 02:01:58,314 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:01:58,345 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 2 override series
+2026-03-15 02:01:58,345 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-15 02:01:58,360 - utils.orchestrator - INFO - Statistical forecasts for 1 series...
+2026-03-15 02:01:58,692 - utils.orchestrator - INFO -   -> Statistical: 4 forecast rows
+2026-03-15 02:01:58,692 - utils.orchestrator - INFO - ML forecasts for 1 series (min_obs=20)...
+2026-03-15 02:01:58,728 - forecasting.ml_models - INFO - Generating ML forecasts for 1 series (skipped 0 with < 20 observations)
+2026-03-15 02:01:58,729 - utils.orchestrator - INFO -   -> ML: 0 forecast rows
+2026-03-15 02:01:58,730 - utils.orchestrator - INFO - Neural forecasts for 1 series (min_obs=30)...
+2026-03-15 02:01:58,743 - utils.orchestrator - INFO - Foundation model forecasts for 1 series...
+2026-03-15 02:01:58,758 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 1 series only
+2026-03-15 02:01:58,784 - db.db - INFO - bulk_insert: 4 rows -> zcube.forecast_results
+2026-03-15 02:01:58,784 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (4 rows)
+2026-03-15 02:02:03,579 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:50569' processes=8 threads=16, memory=111.76 GiB>
+2026-03-15 02:02:03,579 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-15 02:02:03,580 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:02:03,580 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-15 02:02:03,580 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:02:03,596 - utils.orchestrator - INFO - Loaded backtesting overrides for 1 series
+2026-03-15 02:02:03,597 - utils.orchestrator - INFO - Running parallel backtesting with Dask (1 series -> 1 batches of ~100)...
+2026-03-15 02:02:06,158 - utils.orchestrator - INFO - Backtest complete: 1/1 series processed
+2026-03-15 02:02:06,161 - utils.orchestrator - INFO - Targeted save: replacing data for 1 series only
+2026-03-15 02:02:06,195 - db.db - INFO - bulk_insert: 16 rows -> zcube.backtest_metrics
+2026-03-15 02:02:06,195 - utils.orchestrator - INFO - Backtest metrics saved to zcube.backtest_metrics (16 rows)
+2026-03-15 02:02:06,201 - utils.orchestrator - INFO - Backtest summary by method:
+                  mae        rmse
+method                           
+AutoARIMA  533.364405  647.460037
+AutoETS    720.142644  820.759110
+AutoTheta  639.586744  732.131661
+MSTL       620.482856  709.791141
+2026-03-15 02:02:06,220 - db.db - INFO - bulk_insert: 128 rows -> zcube.forecasts_by_origin
+2026-03-15 02:02:06,220 - utils.orchestrator - INFO - Per-origin forecasts saved to zcube.forecasts_by_origin (128 rows)
+2026-03-15 02:02:06,220 - utils.orchestrator - INFO - SCORING: Computing composite method rankings from backtest metrics...
+2026-03-15 02:02:06,252 - selection.best_method - INFO - Loaded backtesting weights from DB/config
+2026-03-15 02:02:06,252 - selection.best_method - INFO - MethodSelector initialised with weights: {'mae': 0.4, 'bias': 0.15, 'mase': 0.1, 'rmse': 0.2, 'coverage_90': 0.15}
+2026-03-15 02:02:06,265 - utils.orchestrator - INFO - Targeted save: replacing best methods for 1 series only
+2026-03-15 02:02:06,301 - db.db - INFO - bulk_insert: 1 rows -> zcube.best_method_per_series
+2026-03-15 02:02:06,302 - utils.orchestrator - INFO - Best methods saved to zcube.best_method_per_series (1 rows)
+2026-03-15 02:02:06,302 - utils.orchestrator - INFO - Best method distribution: {'AutoARIMA': 1}
+2026-03-15 02:14:09,657 - run_pipeline - INFO - Running single step: forecast (scenario_id=1)
+2026-03-15 02:14:10,127 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:14:10,127 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-15 02:14:10,127 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:14:10,171 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 2 override series
+2026-03-15 02:14:10,171 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-15 02:14:10,209 - utils.orchestrator - INFO - Statistical forecasts for 1 series...
+2026-03-15 02:14:10,686 - utils.orchestrator - INFO -   -> Statistical: 4 forecast rows
+2026-03-15 02:14:10,686 - utils.orchestrator - INFO - ML forecasts for 1 series (min_obs=20)...
+2026-03-15 02:14:10,701 - forecasting.ml_models - INFO - Generating ML forecasts for 1 series (skipped 0 with < 20 observations)
+2026-03-15 02:14:10,701 - utils.orchestrator - INFO -   -> ML: 0 forecast rows
+2026-03-15 02:14:10,702 - utils.orchestrator - INFO - Neural forecasts for 1 series (min_obs=30)...
+2026-03-15 02:14:10,732 - utils.orchestrator - INFO - Foundation model forecasts for 1 series...
+2026-03-15 02:14:10,764 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 1 series only
+2026-03-15 02:14:10,809 - db.db - INFO - bulk_insert: 4 rows -> zcube.forecast_results
+2026-03-15 02:14:10,810 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (4 rows)
+2026-03-15 02:14:16,001 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:59841' processes=8 threads=16, memory=111.76 GiB>
+2026-03-15 02:14:16,001 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-15 02:14:16,001 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:14:16,001 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-15 02:14:16,001 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:14:16,018 - utils.orchestrator - INFO - Loaded backtesting overrides for 1 series
+2026-03-15 02:14:16,018 - utils.orchestrator - INFO - Running parallel backtesting with Dask (1 series -> 1 batches of ~100)...
+2026-03-15 02:14:18,549 - utils.orchestrator - INFO - Backtest complete: 1/1 series processed
+2026-03-15 02:14:18,552 - utils.orchestrator - INFO - Targeted save: replacing data for 1 series only
+2026-03-15 02:14:18,572 - db.db - INFO - bulk_insert: 16 rows -> zcube.backtest_metrics
+2026-03-15 02:14:18,572 - utils.orchestrator - INFO - Backtest metrics saved to zcube.backtest_metrics (16 rows)
+2026-03-15 02:14:18,576 - utils.orchestrator - INFO - Backtest summary by method:
+                  mae        rmse
+method                           
+AutoARIMA  533.364405  647.460037
+AutoETS    720.142644  820.759110
+AutoTheta  639.586744  732.131661
+MSTL       620.482856  709.791141
+2026-03-15 02:14:18,610 - db.db - INFO - bulk_insert: 128 rows -> zcube.forecasts_by_origin
+2026-03-15 02:14:18,611 - utils.orchestrator - INFO - Per-origin forecasts saved to zcube.forecasts_by_origin (128 rows)
+2026-03-15 02:14:18,611 - utils.orchestrator - INFO - SCORING: Computing composite method rankings from backtest metrics...
+2026-03-15 02:14:18,626 - selection.best_method - INFO - Loaded backtesting weights from DB/config
+2026-03-15 02:14:18,626 - selection.best_method - INFO - MethodSelector initialised with weights: {'mae': 0.4, 'bias': 0.15, 'mase': 0.1, 'rmse': 0.2, 'coverage_90': 0.15}
+2026-03-15 02:14:18,638 - utils.orchestrator - INFO - Targeted save: replacing best methods for 1 series only
+2026-03-15 02:14:18,670 - db.db - INFO - bulk_insert: 1 rows -> zcube.best_method_per_series
+2026-03-15 02:14:18,670 - utils.orchestrator - INFO - Best methods saved to zcube.best_method_per_series (1 rows)
+2026-03-15 02:14:18,671 - utils.orchestrator - INFO - Best method distribution: {'AutoARIMA': 1}
+2026-03-15 02:37:53,612 - run_pipeline - INFO - Running single step: forecast (scenario_id=1)
+2026-03-15 02:37:54,199 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:37:54,200 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-15 02:37:54,200 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:37:54,260 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 2 override series
+2026-03-15 02:37:54,260 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-15 02:37:54,278 - utils.orchestrator - INFO - Statistical forecasts for 1 series...
+2026-03-15 02:37:54,792 - utils.orchestrator - INFO -   -> Statistical: 4 forecast rows
+2026-03-15 02:37:54,792 - utils.orchestrator - INFO - ML forecasts for 1 series (min_obs=20)...
+2026-03-15 02:37:54,809 - forecasting.ml_models - INFO - Generating ML forecasts for 1 series (skipped 0 with < 20 observations)
+2026-03-15 02:37:54,810 - utils.orchestrator - INFO -   -> ML: 0 forecast rows
+2026-03-15 02:37:54,810 - utils.orchestrator - INFO - Neural forecasts for 1 series (min_obs=30)...
+2026-03-15 02:37:54,835 - utils.orchestrator - INFO - Foundation model forecasts for 1 series...
+2026-03-15 02:37:54,856 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 1 series only
+2026-03-15 02:37:54,907 - db.db - INFO - bulk_insert: 4 rows -> zcube.forecast_results
+2026-03-15 02:37:54,907 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (4 rows)
+2026-03-15 02:38:01,452 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:5742' processes=8 threads=16, memory=111.76 GiB>
+2026-03-15 02:38:01,453 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-15 02:38:01,453 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:38:01,453 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-15 02:38:01,453 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:38:01,492 - utils.orchestrator - INFO - Loaded backtesting overrides for 1 series
+2026-03-15 02:38:01,493 - utils.orchestrator - INFO - Running parallel backtesting with Dask (1 series -> 1 batches of ~100)...
+2026-03-15 02:38:04,613 - utils.orchestrator - INFO - Backtest complete: 1/1 series processed
+2026-03-15 02:38:04,615 - utils.orchestrator - INFO - Targeted save: replacing data for 1 series only
+2026-03-15 02:38:04,675 - db.db - INFO - bulk_insert: 16 rows -> zcube.backtest_metrics
+2026-03-15 02:38:04,676 - utils.orchestrator - INFO - Backtest metrics saved to zcube.backtest_metrics (16 rows)
+2026-03-15 02:38:04,697 - utils.orchestrator - INFO - Backtest summary by method:
+                  mae        rmse
+method                           
+AutoARIMA  533.364405  647.460037
+AutoETS    720.142644  820.759110
+AutoTheta  639.586744  732.131661
+MSTL       620.482856  709.791141
+2026-03-15 02:38:04,742 - db.db - INFO - bulk_insert: 128 rows -> zcube.forecasts_by_origin
+2026-03-15 02:38:04,743 - utils.orchestrator - INFO - Per-origin forecasts saved to zcube.forecasts_by_origin (128 rows)
+2026-03-15 02:38:04,743 - utils.orchestrator - INFO - SCORING: Computing composite method rankings from backtest metrics...
+2026-03-15 02:38:04,763 - selection.best_method - INFO - Loaded backtesting weights from DB/config
+2026-03-15 02:38:04,763 - selection.best_method - INFO - MethodSelector initialised with weights: {'mae': 0.4, 'bias': 0.15, 'mase': 0.1, 'rmse': 0.2, 'coverage_90': 0.15}
+2026-03-15 02:38:04,782 - utils.orchestrator - INFO - Targeted save: replacing best methods for 1 series only
+2026-03-15 02:38:04,821 - db.db - INFO - bulk_insert: 1 rows -> zcube.best_method_per_series
+2026-03-15 02:38:04,822 - utils.orchestrator - INFO - Best methods saved to zcube.best_method_per_series (1 rows)
+2026-03-15 02:38:04,823 - utils.orchestrator - INFO - Best method distribution: {'AutoARIMA': 1}
+2026-03-15 02:39:42,147 - run_pipeline - INFO - Running single step: forecast (scenario_id=1)
+2026-03-15 02:39:42,697 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:39:42,697 - utils.orchestrator - INFO - STEP 3: Forecasting (Statistical + ML + Neural + Foundation)
+2026-03-15 02:39:42,697 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:39:42,749 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 2 override series
+2026-03-15 02:39:42,749 - utils.orchestrator - INFO - Running forecasting in serial mode...
+2026-03-15 02:39:42,767 - utils.orchestrator - INFO - Statistical forecasts for 1 series...
+2026-03-15 02:39:43,263 - utils.orchestrator - INFO -   -> Statistical: 4 forecast rows
+2026-03-15 02:39:43,264 - utils.orchestrator - INFO - ML forecasts for 1 series (min_obs=20)...
+2026-03-15 02:39:43,298 - forecasting.ml_models - INFO - Generating ML forecasts for 1 series (skipped 0 with < 20 observations)
+2026-03-15 02:39:43,299 - utils.orchestrator - INFO -   -> ML: 0 forecast rows
+2026-03-15 02:39:43,299 - utils.orchestrator - INFO - Neural forecasts for 1 series (min_obs=30)...
+2026-03-15 02:39:43,316 - utils.orchestrator - INFO - Foundation model forecasts for 1 series...
+2026-03-15 02:39:43,346 - utils.orchestrator - INFO - Targeted save: replacing forecasts for 1 series only
+2026-03-15 02:39:43,410 - db.db - INFO - bulk_insert: 4 rows -> zcube.forecast_results
+2026-03-15 02:39:43,410 - utils.orchestrator - INFO - Forecasts saved to zcube.forecast_results (4 rows)
+2026-03-15 02:39:48,989 - utils.orchestrator - INFO - Started local Dask client: <Client: 'tcp://127.0.0.1:32649' processes=8 threads=16, memory=111.76 GiB>
+2026-03-15 02:39:48,989 - utils.orchestrator - INFO - Dashboard: http://127.0.0.1:8787/status
+2026-03-15 02:39:48,989 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:39:48,989 - utils.orchestrator - INFO - STEP 4: Backtesting with Per-Origin Forecast Storage
+2026-03-15 02:39:48,989 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:39:49,007 - utils.orchestrator - INFO - Loaded backtesting overrides for 2 series
+2026-03-15 02:39:49,007 - utils.orchestrator - INFO - Running parallel backtesting with Dask (1 series -> 1 batches of ~100)...
+2026-03-15 02:39:52,195 - utils.orchestrator - INFO - Backtest complete: 1/1 series processed
+2026-03-15 02:39:52,198 - utils.orchestrator - INFO - Targeted save: replacing data for 1 series only
+2026-03-15 02:39:52,227 - db.db - INFO - bulk_insert: 16 rows -> zcube.backtest_metrics
+2026-03-15 02:39:52,228 - utils.orchestrator - INFO - Backtest metrics saved to zcube.backtest_metrics (16 rows)
+2026-03-15 02:39:52,232 - utils.orchestrator - INFO - Backtest summary by method:
+                  mae        rmse
+method                           
+AutoARIMA  623.624204  769.883790
+AutoETS    738.517186  871.239335
+AutoTheta  851.209240  975.598472
+MSTL       623.369029  759.538638
+2026-03-15 02:39:52,265 - db.db - INFO - bulk_insert: 240 rows -> zcube.forecasts_by_origin
+2026-03-15 02:39:52,265 - utils.orchestrator - INFO - Per-origin forecasts saved to zcube.forecasts_by_origin (240 rows)
+2026-03-15 02:39:52,265 - utils.orchestrator - INFO - SCORING: Computing composite method rankings from backtest metrics...
+2026-03-15 02:39:52,278 - selection.best_method - INFO - Loaded backtesting weights from DB/config
+2026-03-15 02:39:52,279 - selection.best_method - INFO - MethodSelector initialised with weights: {'mae': 0.4, 'bias': 0.15, 'mase': 0.1, 'rmse': 0.2, 'coverage_90': 0.15}
+2026-03-15 02:39:52,291 - utils.orchestrator - INFO - Targeted save: replacing best methods for 1 series only
+2026-03-15 02:39:52,324 - db.db - INFO - bulk_insert: 1 rows -> zcube.best_method_per_series
+2026-03-15 02:39:52,325 - utils.orchestrator - INFO - Best methods saved to zcube.best_method_per_series (1 rows)
+2026-03-15 02:39:52,326 - utils.orchestrator - INFO - Best method distribution: {'MSTL': 1}
+2026-03-15 02:42:50,362 - run_pipeline - INFO - Running single step: etl (scenario_id=1)
+2026-03-15 02:42:50,443 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:42:50,443 - utils.orchestrator - INFO - STEP 1: ETL - Extract, Transform, Load
+2026-03-15 02:42:50,443 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:42:50,472 - etl.etl - INFO - ETLPipeline initialized
+2026-03-15 02:42:50,472 - etl.etl - INFO -   Source : dp_plan.calc_dp_actual
+2026-03-15 02:42:50,472 - etl.etl - INFO -   Output : zcube.demand_actuals
+2026-03-15 02:42:50,472 - etl.etl - INFO - ================================================================================
+2026-03-15 02:42:50,472 - etl.etl - INFO - ETL PIPELINE START
+2026-03-15 02:42:50,472 - etl.etl - INFO -   Timestamp : 2026-03-15T02:42:50.472464
+2026-03-15 02:42:50,472 - etl.etl - INFO -   Source    : ep-gentle-rain-a5ba1hxu.us-east-2.aws.neon.tech:5432/scenario
+2026-03-15 02:42:50,472 - etl.etl - INFO -   Tables    : ['zcube.item', 'zcube.site', 'zcube.demand_actuals', 'zcube.forecast_results', 'zcube.forecast_adjustments', 'zcube.process_log']
+2026-03-15 02:42:50,472 - etl.etl - INFO -   Frequency : W
+2026-03-15 02:42:50,472 - etl.etl - INFO -   Output    : zcube.demand_actuals
+2026-03-15 02:42:50,472 - etl.etl - INFO - ================================================================================
+2026-03-15 02:42:50,472 - etl.etl - INFO - 
+--- INIT DB ---
+2026-03-15 02:42:50,472 - etl.etl - INFO - Initialising local database schema...
+2026-03-15 02:42:50,525 - db.db - INFO - Schema 'zcube' tables created/verified
+2026-03-15 02:42:50,711 - db.db - INFO - Schema 'zcube' fully initialised
+2026-03-15 02:42:50,711 - etl.etl - INFO - Database schema ready
+2026-03-15 02:42:50,711 - etl.etl - INFO - 
+--- DIMENSION TABLES ---
+2026-03-15 02:42:50,713 - etl.etl - INFO - Loading dimension tables from dp_plan -> zcube...
+2026-03-15 02:42:51,370 - etl.etl - INFO -   dp_plan.dp_item_type -> zcube.item_type
+2026-03-15 02:42:51,628 - etl.etl - INFO -     -> 3 item type(s) upserted
+2026-03-15 02:42:51,628 - etl.etl - INFO -   dp_plan.dp_site_type -> zcube.site_type
+2026-03-15 02:42:51,759 - etl.etl - INFO -     -> 6 site type(s) upserted
+2026-03-15 02:42:51,992 - etl.etl - INFO -   dp_plan.dp_item -> zcube.item
+2026-03-15 02:42:52,111 - etl.etl - INFO -     Source dp_plan.dp_item: gathering 2 extra column(s) into attributes JSONB: ['uom_id', 'group_id']
+2026-03-15 02:42:54,845 - etl.etl - INFO -     -> 54,360 item(s) upserted
+2026-03-15 02:42:54,846 - etl.etl - INFO -     -> extra columns gathered into attributes: ['uom_id', 'group_id']
+2026-03-15 02:42:54,846 - etl.etl - INFO -   dp_plan.dp_site -> zcube.site
+2026-03-15 02:42:54,964 - etl.etl - INFO -     Source dp_plan.dp_site: gathering 1 extra column(s) into attributes JSONB: ['group_id']
+2026-03-15 02:42:55,674 - etl.etl - INFO -     -> 13,988 site(s) upserted
+2026-03-15 02:42:55,674 - etl.etl - INFO -     -> extra columns gathered into attributes: ['group_id']
+2026-03-15 02:42:58,264 - etl.etl - INFO -   plan.item: enriching 57,417 item(s) with plan attributes
+2026-03-15 02:43:01,547 - etl.etl - INFO -     -> 54,360 item(s) enriched with plan attributes
+2026-03-15 02:43:02,111 - etl.etl - INFO -   plan.site: enriching 13,985 site(s) with plan attributes
+2026-03-15 02:43:02,774 - etl.etl - INFO -     -> 13,985 site(s) enriched with plan attributes
+2026-03-15 02:43:02,787 - etl.etl - INFO - Dimension tables loaded successfully
+2026-03-15 02:43:02,801 - etl.etl - INFO - 
+--- EXTRACT ---
+2026-03-15 02:43:02,802 - etl.etl - INFO - Extracting from remote (dp_plan.calc_dp_actual)...
+2026-03-15 02:48:29,594 - etl.etl - INFO - Extracted 821,760 rows, 53,224 unique series
+2026-03-15 02:48:29,632 - etl.etl - INFO - 
+--- TRANSFORM ---
+2026-03-15 02:48:29,632 - etl.etl - INFO - Starting transformation...
+2026-03-15 02:48:29,771 - etl.etl - INFO - Dropping 19,523 rows with null/non-numeric values
+2026-03-15 02:48:29,913 - etl.etl - INFO - Aggregating to frequency=W (W), method=sum
+2026-03-15 02:48:30,832 - etl.etl - INFO - Filtering series with < 52 observations: removing 49,444 series
+2026-03-15 02:48:30,952 - etl.etl - INFO - Transformation complete: 821,760 -> 383,255 rows, 53,224 -> 3,780 series
+2026-03-15 02:48:30,953 - etl.etl - INFO - 
+--- LOAD ---
+2026-03-15 02:48:39,692 - etl.etl - INFO - Truncating zcube.demand_actuals...
+2026-03-15 02:48:39,698 - etl.etl - INFO - Inserting 383,255 rows into zcube.demand_actuals...
+2026-03-15 02:48:44,087 - etl.etl - INFO - Back-filling item_name / site_name from dimension tables...
+2026-03-15 02:48:45,761 - etl.etl - INFO - Back-filled names for 229,287 row(s)
+2026-03-15 02:48:45,761 - etl.etl - INFO - Removing orphan rows with no matching item or site...
+2026-03-15 02:48:45,951 - etl.etl - INFO - Removed 153,968 orphan row(s) with no matching item/site
+2026-03-15 02:48:45,967 - etl.etl - INFO - Inserted 383,255 rows into zcube.demand_actuals
+2026-03-15 02:48:48,157 - etl.etl - WARNING - Could not upsert series hashes: INSERT has more target columns than expressions
+LINE 1: ...T INTO zcube.series_hashes (unique_id, data_hash, hashed_at)
+                                                             ^
+
+2026-03-15 02:48:48,213 - etl.etl - INFO - Loaded 383,255 rows into zcube.demand_actuals
+2026-03-15 02:48:48,214 - etl.etl - INFO - 
+================================================================================
+2026-03-15 02:48:48,214 - etl.etl - INFO - ETL PIPELINE COMPLETE
+2026-03-15 02:48:48,214 - etl.etl - INFO -   Duration        : 357.7s
+2026-03-15 02:48:48,214 - etl.etl - INFO -   Total rows      : 383,255
+2026-03-15 02:48:48,225 - etl.etl - INFO -   Total series    : 3,780
+2026-03-15 02:48:48,227 - etl.etl - INFO -   Date range      : 2021-03-14 00:00:00 to 2026-12-13 00:00:00
+2026-03-15 02:48:48,227 - etl.etl - INFO -   Output table    : zcube.demand_actuals
+2026-03-15 02:48:48,227 - etl.etl - INFO - ================================================================================
+2026-03-15 02:48:48,275 - utils.orchestrator - INFO - ETL complete: 383255 rows, 3780 series
+2026-03-15 02:48:52,462 - run_pipeline - INFO - Running single step: outlier-detection (scenario_id=1)
+2026-03-15 02:48:52,960 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:48:52,960 - utils.orchestrator - INFO - STEP 1b: Outlier Detection & Correction
+2026-03-15 02:48:52,960 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:48:52,989 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2395 assignments, 18 param sets, 2 override series
+2026-03-15 02:48:52,991 - utils.orchestrator - INFO - Parameter grouping (outlier_detection): 2 groups (0 individual overrides)
+2026-03-15 02:48:53,004 - outlier.detection - INFO - OutlierDetector initialized: detection=iqr, correction=clip, enabled=True
+2026-03-15 02:48:53,032 - outlier.detection - INFO - Running outlier detection on 2336 series (method=iqr, correction=clip)
+2026-03-15 02:49:13,100 - outlier.detection - INFO - Outlier detection complete: 12576 outliers detected across 1631 series (of 2336 total)
+2026-03-15 02:49:13,119 - outlier.detection - INFO - OutlierDetector initialized: detection=iqr, correction=clip, enabled=True
+2026-03-15 02:49:13,130 - outlier.detection - INFO - Running outlier detection on 29 series (method=iqr, correction=clip)
+2026-03-15 02:49:13,161 - outlier.detection - INFO - Outlier detection complete: 97 outliers detected across 18 series (of 29 total)
+2026-03-15 02:49:25,140 - utils.orchestrator - INFO - Corrected data saved to zcube.demand_actuals (229,287 rows updated)
+2026-03-15 02:49:25,831 - db.db - INFO - bulk_insert: 12,673 rows -> zcube.detected_outliers
+2026-03-15 02:49:25,832 - utils.orchestrator - INFO - Outliers saved to zcube.detected_outliers (12,673 outliers)
+2026-03-15 02:49:30,318 - run_pipeline - INFO - Running single step: segmentation (scenario_id=1)
+2026-03-15 02:49:30,390 - segmentation.segmentation - INFO - Segmentation: computing ABC classification …
+2026-03-15 02:49:33,433 - segmentation.segmentation - INFO - ABC classification: A=121  B=402  C=1842
+2026-03-15 02:49:33,641 - segmentation.segmentation - INFO -   Segment 'All': 2365 series
+2026-03-15 02:49:34,470 - segmentation.segmentation - INFO - Segment 24: assigned 256 series
+2026-03-15 02:49:34,470 - segmentation.segmentation - INFO -   Segment 'Green': 256 series
+2026-03-15 02:49:34,515 - segmentation.segmentation - INFO - Segment 42: assigned 145 series
+2026-03-15 02:49:34,516 - segmentation.segmentation - INFO -   Segment 'packaging': 145 series
+2026-03-15 02:49:34,557 - segmentation.segmentation - INFO - Segment 44: assigned 147 series
+2026-03-15 02:49:34,558 - segmentation.segmentation - INFO -   Segment 'Hardfruits': 147 series
+2026-03-15 02:49:34,597 - segmentation.segmentation - INFO - Segment 96: assigned 2 series
+2026-03-15 02:49:34,598 - segmentation.segmentation - INFO -   Segment '10285': 2 series
+2026-03-15 02:49:34,598 - segmentation.segmentation - INFO - Segmentation: resolving parameter assignments …
+2026-03-15 02:49:34,812 - segmentation.segmentation - INFO - Resolved parameter assignments for 2365 series
+2026-03-15 02:49:34,813 - segmentation.segmentation - INFO -   Parameter assignments resolved for 2365 series
+2026-03-15 02:49:39,630 - run_pipeline - INFO - Running single step: characterize (scenario_id=1)
+2026-03-15 02:49:40,102 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:49:40,103 - utils.orchestrator - INFO - STEP 2: Time Series Characterization
+2026-03-15 02:49:40,103 - utils.orchestrator - INFO - ================================================================================
+2026-03-15 02:49:40,143 - utils.parameter_resolver - INFO - ParameterResolver loaded: 2365 assignments, 18 param sets, 2 override series
+2026-03-15 02:49:40,198 - characterization.characterization - INFO - Starting characterization of 2365 time series
+2026-03-15 02:49:41,752 - characterization.characterization - INFO -   Characterizing series 100/2365 (14787_3054)
+2026-03-15 02:49:43,444 - characterization.characterization - INFO -   Characterizing series 200/2365 (19909_7480)
+2026-03-15 02:49:45,042 - characterization.characterization - INFO -   Characterizing series 300/2365 (28580_5949)
+2026-03-15 02:49:46,372 - characterization.characterization - INFO -   Characterizing series 400/2365 (29059_7889)
+2026-03-15 02:49:47,878 - characterization.characterization - INFO -   Characterizing series 500/2365 (30223_4876)
+2026-03-15 02:49:49,230 - characterization.characterization - INFO -   Characterizing series 600/2365 (31827_1044)
+2026-03-15 02:49:50,642 - characterization.characterization - INFO -   Characterizing series 700/2365 (33201_7561)
+2026-03-15 02:49:51,942 - characterization.characterization - INFO -   Characterizing series 800/2365 (34275_2293)
+2026-03-15 02:49:53,308 - characterization.characterization - INFO -   Characterizing series 900/2365 (36541_4308)
+2026-03-15 02:49:54,552 - characterization.characterization - INFO -   Characterizing series 1000/2365 (39151_5949)
+2026-03-15 02:49:55,975 - characterization.characterization - INFO -   Characterizing series 1100/2365 (41725_6422)
+2026-03-15 02:49:57,315 - characterization.characterization - INFO -   Characterizing series 1200/2365 (43279_1432)
+2026-03-15 02:49:58,768 - characterization.characterization - INFO -   Characterizing series 1300/2365 (43825_6347)
+2026-03-15 02:50:00,118 - characterization.characterization - INFO -   Characterizing series 1400/2365 (45096_1374)
+2026-03-15 02:50:01,428 - characterization.characterization - INFO -   Characterizing series 1500/2365 (46326_5493)
+2026-03-15 02:50:02,753 - characterization.characterization - INFO -   Characterizing series 1600/2365 (47169_1039)
+2026-03-15 02:50:04,166 - characterization.characterization - INFO -   Characterizing series 1700/2365 (47872_2882)
+2026-03-15 02:50:05,621 - characterization.characterization - INFO -   Characterizing series 1800/2365 (51796_15017)
+2026-03-15 02:50:07,276 - characterization.characterization - INFO -   Characterizing series 1900/2365 (52230_529)
+2026-03-15 02:50:08,659 - characterization.characterization - INFO -   Characterizing series 2000/2365 (62435_8414)
+2026-03-15 02:50:10,088 - characterization.characterization - INFO -   Characterizing series 2100/2365 (6610_1038)
+2026-03-15 02:50:11,458 - characterization.characterization - INFO -   Characterizing series 2200/2365 (73246_1051)
+2026-03-15 02:50:13,051 - characterization.characterization - INFO -   Characterizing series 2300/2365 (74263_3054)
+2026-03-15 02:50:14,009 - characterization.characterization - INFO -   Characterizing series 2365/2365 (9806_6094)
+2026-03-15 02:50:14,029 - characterization.characterization - INFO - ======================================================================
+2026-03-15 02:50:14,029 - characterization.characterization - INFO - TIME SERIES CHARACTERIZATION SUMMARY
+2026-03-15 02:50:14,029 - characterization.characterization - INFO - ======================================================================
+2026-03-15 02:50:14,029 - characterization.characterization - INFO - Total series analyzed        : 2365
+2026-03-15 02:50:14,030 - characterization.characterization - INFO - With seasonality             : 2079 (87.9%)
+2026-03-15 02:50:14,030 - characterization.characterization - INFO - With trend                   : 668 (28.2%)
+2026-03-15 02:50:14,030 - characterization.characterization - INFO - Intermittent                 : 0 (0.0%)
+2026-03-15 02:50:14,030 - characterization.characterization - INFO - Stationary                   : 1755 (74.2%)
+2026-03-15 02:50:14,030 - characterization.characterization - INFO - Sufficient for ML (>=20)  : 2365 (100.0%)
+2026-03-15 02:50:14,030 - characterization.characterization - INFO - Sufficient for DL (>=30) : 2365 (100.0%)
+2026-03-15 02:50:14,031 - characterization.characterization - INFO - Complexity distribution:
+2026-03-15 02:50:14,031 - characterization.characterization - INFO -        low:   824 (34.8%)
+2026-03-15 02:50:14,031 - characterization.characterization - INFO -     medium:  1541 (65.2%)
+2026-03-15 02:50:14,031 - characterization.characterization - INFO -       high:     0 (0.0%)
+2026-03-15 02:50:14,031 - characterization.characterization - INFO - ======================================================================
+2026-03-15 02:50:14,399 - db.db - INFO - bulk_insert: 2,365 rows -> zcube.time_series_characteristics
+2026-03-15 02:50:14,399 - utils.orchestrator - INFO - Characterized 2365 series
+2026-03-15 02:50:14,400 - utils.orchestrator - INFO - Complexity distribution: {'medium': 1541, 'low': 824}
+2026-03-15 02:50:14,400 - utils.orchestrator - INFO - Intermittent: 0

@@ -51,7 +51,8 @@ from utils.process_logger import ProcessLogger, ListHandler
 def _dask_forecast_batch(config_path: str,
                          batch_df: pd.DataFrame,
                          batch_chars: pd.DataFrame,
-                         config_override: dict = None) -> pd.DataFrame:
+                         config_override: dict = None,
+                         overrides_map: dict = None) -> pd.DataFrame:
     """
     Module-level standalone function submitted to Dask workers.
 
@@ -65,6 +66,8 @@ def _dask_forecast_batch(config_path: str,
         batch_chars: Characteristics slice for this batch.
         config_override: Optional dict deep-merged onto config.yaml before
             component construction (parameter-aware pipeline).
+        overrides_map: Optional {unique_id: {method: {param: value}}} overrides
+            passed from the Time Series Viewer hyperparameter cards.
 
     Returns:
         DataFrame with forecast results for the batch.
@@ -80,6 +83,7 @@ def _dask_forecast_batch(config_path: str,
         stat_forecasts = stat_forecaster.forecast_multiple_series(
             df=batch_df,
             characteristics_df=batch_chars,
+            overrides_map=overrides_map,
             show_progress=False,
         )
         if not stat_forecasts.empty:
@@ -471,6 +475,9 @@ class ForecastOrchestrator:
         self._method_selector = None
         self._outlier_detector = None
         self._parameter_resolver = None
+        # Per-series hyperparameter overrides: {unique_id: {method: {param: value}}}
+        # Set by run_pipeline.py when --overrides-json is passed; consumed by step_forecast.
+        self.series_overrides: dict = {}
 
         # Dask client
         self.client = None
@@ -889,7 +896,8 @@ class ForecastOrchestrator:
                        df: pd.DataFrame,
                        characteristics_df: pd.DataFrame,
                        methods_filter: Optional[List[str]] = None,
-                       config_override: dict = None) -> pd.DataFrame:
+                       config_override: dict = None,
+                       overrides_map: dict = None) -> pd.DataFrame:
         """
         Generate forecasts for a batch of time series across all model families.
 
@@ -926,6 +934,7 @@ class ForecastOrchestrator:
             stat_forecasts = _stat_fc.forecast_multiple_series(
                 df=df,
                 characteristics_df=characteristics_df,
+                overrides_map=overrides_map,
                 show_progress=False,
             )
             self.logger.info(f"  -> Statistical: {len(stat_forecasts)} forecast rows")
@@ -1118,7 +1127,17 @@ class ForecastOrchestrator:
             for config_override, uids in param_groups:
                 grp_chars = characteristics_df[characteristics_df['unique_id'].isin(uids)]
                 grp_df = df[df['unique_id'].isin(uids)]
-                grp_fc = self.forecast_batch(grp_df, grp_chars, config_override=config_override)
+                # Slice overrides to only the series in this group
+                grp_overrides = (
+                    {uid: self.series_overrides[uid]
+                     for uid in uids if uid in self.series_overrides}
+                    if self.series_overrides else None
+                )
+                grp_fc = self.forecast_batch(
+                    grp_df, grp_chars,
+                    config_override=config_override,
+                    overrides_map=grp_overrides,
+                )
                 if not grp_fc.empty:
                     group_results.append(grp_fc)
             forecasts_df = pd.concat(group_results, ignore_index=True) if group_results else pd.DataFrame()
@@ -1139,12 +1158,18 @@ class ForecastOrchestrator:
                     batch_chars = grp_chars.iloc[start_idx:end_idx]
                     batch_ids = batch_chars['unique_id'].tolist()
                     batch_df = df[df['unique_id'].isin(batch_ids)]
+                    batch_overrides = (
+                        {uid: self.series_overrides[uid]
+                         for uid in batch_ids if uid in self.series_overrides}
+                        if self.series_overrides else None
+                    )
                     future = self.client.submit(
                         _dask_forecast_batch,
                         self.config_path,
                         batch_df,
                         batch_chars,
                         config_override=config_override,
+                        overrides_map=batch_overrides,
                     )
                     futures.append(future)
 
