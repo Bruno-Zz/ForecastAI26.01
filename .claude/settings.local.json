@@ -127,7 +127,22 @@
       "Bash(sed -n '1,50p' /c/allDev/ForecastAI2026.01/files/db/db.py)",
       "Bash(sed -n '250,350p' /c/allDev/ForecastAI2026.01/files/db/db.py)",
       "Bash(node --input-type=module --eval \"import\\(''''./src/components/ProcessLog.jsx''''\\).then\\(\\(\\)=>console.log\\(''''OK''''\\)\\).catch\\(e=>console.error\\(e.message\\)\\)\")",
-      "Bash(cmd.exe /c \"cd /d C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\frontend && npx vite build 2>&1\")"
+      "Bash(cmd.exe /c \"cd /d C:\\\\allDev\\\\ForecastAI2026.01\\\\files\\\\frontend && npx vite build 2>&1\")",
+      "Bash(DB_HOST=localhost DB_PORT=5432 DB_NAME=thebicycle DB_USER=postgres DB_PASSWORD=postgres DB_SCHEMA=zcube PYTHONIOENCODING=utf-8 python -c \":*)",
+      "Bash(PYTHONIOENCODING=utf-8 python scripts/load_bicycle_causal.py)",
+      "Bash(python -c \":*)",
+      "Bash(python3.13 -c \":*)",
+      "Bash(python3.13 -c \"import ast; src=open\\(''api/main.py'',''r'',encoding=''utf-8''\\).read\\(\\); ast.parse\\(src\\); print\\(''OK'', src.count\\(chr\\(10\\)\\), ''lines''\\)\")",
+      "Bash(python3.13 -c \"import time; time.sleep\\(5\\)\")",
+      "Bash(python3.13 -c \"import time; time.sleep\\(8\\)\")",
+      "Bash(python3.13 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(''''port 8000 API:'''', d.get\\(''''message'''',''''not found''''\\)\\)\")",
+      "Bash(python3.13 -c \"import time; time.sleep\\(10\\)\" curl -s http://localhost:8002/)",
+      "Bash(python3.13 -c \"import json,sys; print\\(json.load\\(sys.stdin\\).get\\(''''message'''',''''err''''\\)\\)\")",
+      "Bash(python3.13 -c \"import os, time; print\\(''main.py mtime before:'', time.ctime\\(os.path.getmtime\\(''api/main.py''\\)\\)\\)\")",
+      "Bash(python3.13 -c \"import os, time; print\\(''main.py mtime after edit:'', time.ctime\\(os.path.getmtime\\(''api/main.py''\\)\\)\\)\")",
+      "Bash(python3.13 -c \"import time; time.sleep\\(20\\)\" curl -s http://localhost:8002/)",
+      "Bash(python3.13:*)",
+      "Bash(venv/Scripts/python.exe -c \":*)"
     ]
   }
 }

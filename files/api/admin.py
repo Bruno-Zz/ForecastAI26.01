@@ -191,21 +191,33 @@ def _seed_new_db(db_name: str, schema_name: str, master_pg: dict) -> None:
     from db.db import set_account_context, reset_account_context
 
     account_cfg = {
-        "host":     master_pg["host"],
-        "port":     master_pg["port"],
-        "database": db_name,
-        "user":     master_pg["user"],
-        "password": master_pg["password"],
-        "schema":   schema_name,
-        "sslmode":  master_pg.get("sslmode", "disable"),
+        "host":         master_pg["host"],
+        "port":         master_pg["port"],
+        "database":     db_name,
+        "user":         master_pg["user"],
+        "password":     master_pg["password"],
+        "schema":       schema_name,
+        "sslmode":      master_pg.get("sslmode", "disable"),
+        "display_name": "",  # not needed for context; just for completeness
     }
     token = set_account_context(account_cfg)
     try:
+        # 1. Default admin user
         try:
             from api.auth import seed_default_admin
             seed_default_admin()
         except Exception as exc:
             logger.warning("seed_default_admin skipped: %s", exc)
+
+        # 2. Default parameter rows (forecasting, etl, parallel, etc.)
+        #    Every new account gets the full set of factory-default parameters so
+        #    the pipeline can run immediately without manual configuration.
+        try:
+            from api.main import seed_parameters
+            seed_parameters()
+            logger.info("Default parameters seeded into %s.%s", db_name, schema_name)
+        except Exception as exc:
+            logger.warning("seed_parameters skipped: %s", exc)
     finally:
         reset_account_context(token)
 
@@ -342,6 +354,14 @@ def _provision_clone(
                 f"{restore_err.decode()[:500]}"
             )
         logger.info("Cloned %s → %s", source_db, db_name)
+
+        # After the raw pg_restore, patch any NEW parameter keys that were added
+        # to the factory defaults after the source account was last updated.
+        # This ensures the cloned account inherits the latest schema without losing
+        # the source account's custom values (seed_parameters uses ON CONFLICT DO NOTHING
+        # for new rows and a deep-merge for existing rows).
+        _provision_jobs[job_id]["status"] = "seeding"
+        _seed_new_db(db_name, schema_name, master_pg)
 
         _provision_jobs[job_id]["status"] = "registering"
         acc = create_account_record(display_name, db_name, schema_name)

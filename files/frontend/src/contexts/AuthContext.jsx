@@ -139,8 +139,10 @@ export function AuthProvider({ children }) {
   const allowedSegments   = user?.allowed_segments || [];
   const allowedSegmentsEdit = user?.allowed_segments_edit || [];
 
-  // The tenant account this session is scoped to (UUID)
-  const currentAccount = user?.account_id ? { id: user.account_id } : null;
+  // The tenant account this session is scoped to (UUID + display name from JWT)
+  const currentAccount = user?.account_id
+    ? { id: user.account_id, name: user.account_name || "" }
+    : null;
 
   const hasSegmentAccess = (segmentId, edit = false) => {
     if (isAdmin) return true;

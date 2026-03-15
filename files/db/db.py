@@ -90,7 +90,9 @@ def _get_pg_config() -> dict:
             logger.debug("Could not read config.yaml database section: %s", exc)
 
     def _get(yaml_key: str, env_key: str, default: str) -> str:
-        return yaml_cfg.get(yaml_key) or os.environ.get(env_key, default)
+        # Environment variables take priority so that multi-tenant pipeline
+        # subprocesses can override config.yaml by injecting DB_* env vars.
+        return os.environ.get(env_key) or yaml_cfg.get(yaml_key) or default
 
     return {
         "host":     _get("host",     "DB_HOST",     "localhost"),

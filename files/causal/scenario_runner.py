@@ -75,7 +75,22 @@ def run_causal_scenarios(scenario_ids: list[int],
         cols = ["scenario_id", "item_id", "site_id", "period_start",
                 "demand_mean", "demand_stddev", "scheduled_demand",
                 "unscheduled_demand", "removal_driver"]
-        bulk_insert(schema, "causal_results", all_demand_rows, cols, page_size=5000)
+        # Convert list-of-dicts → list-of-tuples in column order
+        rows_as_tuples = [
+            tuple(row.get(c) for c in cols)
+            for row in all_demand_rows
+        ]
+        # Delete existing results for these scenarios first (don't truncate whole table)
+        sid_csv = ",".join(str(s) for s in scenario_ids)
+        bulk_insert(
+            None,                          # config_path  (ignored)
+            f"{schema}.causal_results",    # fully-qualified table name
+            cols,                          # column names
+            rows_as_tuples,                # data as tuples
+            truncate=False,
+            delete_where=f"scenario_id IN ({sid_csv})",
+            page_size=5000,
+        )
     logger.info("Saved %d causal demand rows for %d scenarios",
                 len(all_demand_rows), len(scenarios))
 

@@ -141,6 +141,9 @@ class UserResponse(BaseModel):
     can_create_override: bool = False
     allowed_segments_edit: List[int] = []
     created_at: str
+    # Multi-tenancy: present when the user is scoped to a specific account
+    account_id: Optional[str] = None
+    account_name: Optional[str] = None
 
 
 class TokenResponse(BaseModel):
@@ -160,10 +163,12 @@ class ChangePasswordRequest(BaseModel):
 # ────────────────────────────────────────────────────────
 
 
-def _create_access_token(user_row: dict, account_id: Optional[str] = None) -> str:
+def _create_access_token(user_row: dict, account_id: Optional[str] = None,
+                          account_name: Optional[str] = None) -> str:
     """Create a signed JWT for the given tenant user.
 
-    account_id — UUID of the tenant account this token is scoped to.
+    account_id   — UUID of the tenant account this token is scoped to.
+    account_name — Human-readable display name for the account (shown in the UI toolbar).
     If None the token has no account scope (legacy single-tenant mode).
     """
     exp_minutes = _token_expiry_minutes()
@@ -180,12 +185,14 @@ def _create_access_token(user_row: dict, account_id: Optional[str] = None) -> st
         "allowed_segments_edit": user_row.get("allowed_segments_edit", []) or [],
         "is_superadmin": False,
         "account_id": account_id,
+        "account_name": account_name or "",
         "exp": datetime.now(timezone.utc) + timedelta(minutes=exp_minutes),
     }
     return jwt.encode(payload, _jwt_secret(), algorithm=ALGORITHM)
 
 
-def _create_superadmin_token(superadmin_row: dict, account_id: str) -> str:
+def _create_superadmin_token(superadmin_row: dict, account_id: str,
+                              account_name: Optional[str] = None) -> str:
     """Create a signed JWT for a superAdmin logged into a specific account."""
     exp_minutes = _token_expiry_minutes()
     payload = {
@@ -201,12 +208,20 @@ def _create_superadmin_token(superadmin_row: dict, account_id: str) -> str:
         "allowed_segments_edit": [],
         "is_superadmin": True,
         "account_id": account_id,
+        "account_name": account_name or "",
         "exp": datetime.now(timezone.utc) + timedelta(minutes=exp_minutes),
     }
     return jwt.encode(payload, _jwt_secret(), algorithm=ALGORITHM)
 
 
-def _user_row_to_response(row: dict) -> UserResponse:
+def _user_row_to_response(row: dict,
+                           account_id: Optional[str] = None,
+                           account_name: Optional[str] = None) -> UserResponse:
+    """Build a UserResponse from a DB user row.
+
+    Pass account_id / account_name (from the JWT / token being issued) so the
+    frontend can display the current account without needing to re-decode the JWT.
+    """
     return UserResponse(
         id=str(row["id"]),
         email=row["email"],
@@ -219,6 +234,8 @@ def _user_row_to_response(row: dict) -> UserResponse:
         can_create_override=row.get("can_create_override", False) or False,
         allowed_segments_edit=row.get("allowed_segments_edit", []) or [],
         created_at=str(row["created_at"]),
+        account_id=account_id or None,
+        account_name=account_name or None,
     )
 
 
@@ -375,6 +392,21 @@ def _get_account_cache() -> dict:
         return {}
 
 
+def _get_account_name(account_id: Optional[str]) -> str:
+    """Return the human-readable display name for an account from the cache.
+
+    Falls back to an empty string when the account is not found (single-tenant
+    or master DB unavailable) so the JWT claim is always a string.
+    """
+    if not account_id:
+        return ""
+    cache = _get_account_cache()
+    entry = cache.get(account_id)
+    if entry:
+        return entry.get("display_name", "")
+    return ""
+
+
 def _log_auth_event(
     account_id: Optional[str],
     email: str,
@@ -511,7 +543,9 @@ async def login(body: LoginRequest):
                 ],
             }
         # Phase 2: account selected — issue superAdmin JWT
-        token = _create_superadmin_token(superadmin, body.account_id)
+        _sa_acc_name = _get_account_name(body.account_id)
+        token = _create_superadmin_token(superadmin, body.account_id,
+                                           account_name=_sa_acc_name)
         sa_response = UserResponse(
             id=str(superadmin["id"]),
             email=superadmin["email"],
@@ -524,6 +558,8 @@ async def login(body: LoginRequest):
             can_create_override=True,
             allowed_segments_edit=[],
             created_at=str(superadmin.get("created_at", "")),
+            account_id=body.account_id or None,
+            account_name=_sa_acc_name or None,
         )
         _log_auth_event(body.account_id, superadmin["email"], "login",
                         {"role": "superadmin", "auth_provider": "local"})
@@ -584,13 +620,14 @@ async def login(body: LoginRequest):
     if not user["is_active"]:
         raise HTTPException(status_code=403, detail="Account is disabled")
 
-    token = _create_access_token(user, account_id=account_id)
+    _acc_name = _get_account_name(account_id)
+    token = _create_access_token(user, account_id=account_id, account_name=_acc_name)
     _log_auth_event(account_id, user["email"], "login",
                     {"role": user["role"], "auth_provider": "local"})
     return TokenResponse(
         access_token=token,
         expires_in=_token_expiry_minutes() * 60,
-        user=_user_row_to_response(user),
+        user=_user_row_to_response(user, account_id=account_id, account_name=_acc_name),
     )
 
 
@@ -640,7 +677,9 @@ async def microsoft_login(body: MicrosoftTokenRequest):
                     ],
                 }
             # Phase 2: account selected — issue superAdmin JWT
-            token = _create_superadmin_token(sa, body.account_id)
+            _sa_acc_name_ms = _get_account_name(body.account_id)
+            token = _create_superadmin_token(sa, body.account_id,
+                                               account_name=_sa_acc_name_ms)
             sa_response = UserResponse(
                 id=str(sa["id"]),
                 email=sa["email"],
@@ -653,6 +692,8 @@ async def microsoft_login(body: MicrosoftTokenRequest):
                 can_create_override=True,
                 allowed_segments_edit=[],
                 created_at=str(sa.get("created_at", "")),
+                account_id=body.account_id or None,
+                account_name=_sa_acc_name_ms or None,
             )
             _log_auth_event(body.account_id, sa["email"], "login",
                             {"role": "superadmin", "auth_provider": "microsoft"})
@@ -713,13 +754,14 @@ async def microsoft_login(body: MicrosoftTokenRequest):
         account_cache = _get_account_cache()
         if account_cache:
             account_id = next(iter(account_cache))
-    token = _create_access_token(user, account_id=account_id)
+    _acc_name = _get_account_name(account_id)
+    token = _create_access_token(user, account_id=account_id, account_name=_acc_name)
     _log_auth_event(account_id, user["email"], "login",
                     {"role": user["role"], "auth_provider": "microsoft"})
     return TokenResponse(
         access_token=token,
         expires_in=_token_expiry_minutes() * 60,
-        user=_user_row_to_response(user),
+        user=_user_row_to_response(user, account_id=account_id, account_name=_acc_name),
     )
 
 
@@ -773,7 +815,9 @@ async def google_login(body: GoogleTokenRequest):
                         for a in accounts
                     ],
                 }
-            token = _create_superadmin_token(sa, body.account_id)
+            _sa_acc_name_gg = _get_account_name(body.account_id)
+            token = _create_superadmin_token(sa, body.account_id,
+                                               account_name=_sa_acc_name_gg)
             sa_response = UserResponse(
                 id=str(sa["id"]),
                 email=sa["email"],
@@ -786,6 +830,8 @@ async def google_login(body: GoogleTokenRequest):
                 can_create_override=True,
                 allowed_segments_edit=[],
                 created_at=str(sa.get("created_at", "")),
+                account_id=body.account_id or None,
+                account_name=_sa_acc_name_gg or None,
             )
             return TokenResponse(
                 access_token=token,
@@ -842,20 +888,25 @@ async def google_login(body: GoogleTokenRequest):
         account_cache = _get_account_cache()
         if account_cache:
             account_id = next(iter(account_cache))
-    token = _create_access_token(user, account_id=account_id)
+    _acc_name = _get_account_name(account_id)
+    token = _create_access_token(user, account_id=account_id, account_name=_acc_name)
     _log_auth_event(account_id, user["email"], "login",
                     {"role": user["role"], "auth_provider": "google"})
     return TokenResponse(
         access_token=token,
         expires_in=_token_expiry_minutes() * 60,
-        user=_user_row_to_response(user),
+        user=_user_row_to_response(user, account_id=account_id, account_name=_acc_name),
     )
 
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(request: Request):
-    """Return current authenticated user info."""
+    """Return current authenticated user info, including multi-tenancy fields."""
     jwt_user = get_current_user(request)
+    # Account fields are always read from the live JWT state so they stay
+    # in sync even when the user hasn't re-logged-in since the feature was added.
+    acc_id   = jwt_user.get("account_id") or None
+    acc_name = jwt_user.get("account_name") or _get_account_name(acc_id) or None
 
     # SuperAdmins are stored in master DB — not in a tenant DB
     if jwt_user.get("is_superadmin") or jwt_user.get("role") == "superadmin":
@@ -871,12 +922,18 @@ async def get_me(request: Request):
             can_create_override=True,
             allowed_segments_edit=[],
             created_at="",
+            account_id=acc_id,
+            account_name=acc_name,
         )
 
     user = _db_fetch_user_by_id(jwt_user["id"])
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return _user_row_to_response(user)
+    resp = _user_row_to_response(user)
+    # Inject account fields (not stored in tenant DB, come from JWT / cache)
+    resp.account_id   = acc_id
+    resp.account_name = acc_name
+    return resp
 
 
 @router.post("/users", response_model=UserResponse)

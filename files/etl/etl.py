@@ -699,14 +699,16 @@ class ETLPipeline:
         conn = get_conn()
         try:
             with conn.cursor() as cur:
+                # Include forecast_hash column (NULL on fresh insert) to match the
+                # 4-column table schema: (unique_id, data_hash, forecast_hash, hashed_at)
                 psycopg2.extras.execute_values(
                     cur,
-                    f"""INSERT INTO {table} (unique_id, data_hash, hashed_at)
+                    f"""INSERT INTO {table} (unique_id, data_hash, forecast_hash, hashed_at)
                         VALUES %s
                         ON CONFLICT (unique_id) DO UPDATE
-                          SET data_hash = EXCLUDED.data_hash,
+                          SET data_hash  = EXCLUDED.data_hash,
                               hashed_at  = NOW()""",
-                    rows,
+                    [(uid, dh, None, None) for uid, dh in rows],
                 )
             conn.commit()
             self.logger.info(f"Upserted {len(rows):,} series hashes into {table}")

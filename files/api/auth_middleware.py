@@ -156,7 +156,8 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
             "can_create_override": payload.get("can_create_override", False),
             "allowed_segments_edit": payload.get("allowed_segments_edit", []),
             # Multi-tenancy fields
-            "account_id": account_id,
+            "account_id":   account_id,
+            "account_name": payload.get("account_name", ""),
             "is_superadmin": payload.get("is_superadmin", False),
         }
         request.state.jti = jti

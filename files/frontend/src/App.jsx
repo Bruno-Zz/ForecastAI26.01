@@ -95,7 +95,7 @@ import ProtectedRoute from './components/ProtectedRoute';
 
 function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
   const location = useLocation();
-  const { user, isAdmin, isSuperAdmin, logout } = useAuth();
+  const { user, isAdmin, isSuperAdmin, logout, currentAccount } = useAuth();
   const [lastSeries, setLastSeries] = useState(null);
   const [lastSeriesLabel, setLastSeriesLabel] = useState(null);
 
@@ -216,6 +216,18 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
       <div className="px-2 pb-2 border-t border-gray-100 dark:border-gray-700 pt-2 space-y-1">
         {open && user && (
           <div className="px-3 py-1.5">
+            {/* Account name — shown when account_name is present in the JWT */}
+            {currentAccount?.name && (
+              <div className="flex items-center gap-1 mb-1">
+                <svg className="w-3 h-3 text-blue-500 dark:text-blue-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                </svg>
+                <p className="text-[11px] font-semibold text-blue-600 dark:text-blue-400 truncate">
+                  {currentAccount.name}
+                </p>
+              </div>
+            )}
             <p className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate">{user.display_name}</p>
             <p className="text-xs text-gray-400 dark:text-gray-500 truncate">{user.email}</p>
             {isSuperAdmin ? (
@@ -227,6 +239,16 @@ function Sidebar({ open, onToggle, onStartTour, onStartFullTour }) {
                 Admin
               </span>
             )}
+          </div>
+        )}
+        {/* Collapsed sidebar: show account initial as a small badge */}
+        {!open && currentAccount?.name && (
+          <div className="flex justify-center" title={currentAccount.name}>
+            <div className="w-6 h-6 rounded bg-blue-100 dark:bg-blue-900/40 flex items-center justify-center">
+              <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400">
+                {currentAccount.name.charAt(0).toUpperCase()}
+              </span>
+            </div>
           </div>
         )}
         <div className={`flex items-center ${open ? 'justify-between px-1' : 'justify-center'}`}>

@@ -107,13 +107,14 @@ def _build_account_cache() -> None:
         for acc in get_all_accounts():
             cp = acc.get("connection_params") or {}
             new_entries[acc["id"]] = {
-                "host":     cp.get("host", master_pg["host"]),
-                "port":     cp.get("port", master_pg["port"]),
-                "database": acc["db_name"],
-                "user":     cp.get("user", master_pg["user"]),
-                "password": cp.get("password", master_pg["password"]),
-                "schema":   acc["schema_name"],
-                "sslmode":  cp.get("sslmode", "disable"),
+                "host":         cp.get("host", master_pg["host"]),
+                "port":         cp.get("port", master_pg["port"]),
+                "database":     acc["db_name"],
+                "user":         cp.get("user", master_pg["user"]),
+                "password":     cp.get("password", master_pg["password"]),
+                "schema":       acc["schema_name"],
+                "sslmode":      cp.get("sslmode", "disable"),
+                "display_name": acc.get("display_name", ""),  # shown in UI toolbar
             }
         _account_cache.clear()
         _account_cache.update(new_entries)
@@ -235,18 +236,88 @@ PARAMETER_REGISTRY = [
 ]
 
 # Data cache
-data_cache = {
-    "time_series": None,
-    "time_series_original": None,
-    "characteristics": None,
-    "forecasts": None,
-    "distributions": None,
-    "metrics": None,
-    "best_methods": None,
-    "forecasts_by_origin": None,
-    "outliers": None,
-    "config": None,
-}
+class _AccountScopedCache:
+    """
+    A dict-like cache that transparently namespaces every entry with the current
+    tenant's database name so that different accounts never share cached data.
+
+    The external API is identical to a plain dict; existing code needs no changes.
+    All keys are stored internally as ``"{db_name}:{key}"``, derived from the active
+    ``db.db._account_ctx`` ContextVar.
+
+    Pipeline threads (which have no ContextVar) call ``invalidate_for_db(db_name, keys)``
+    to explicitly clear entries for a specific account after a pipeline run.
+    """
+
+    _TEMPLATE = {
+        "time_series": None,
+        "time_series_original": None,
+        "characteristics": None,
+        "forecasts": None,
+        "distributions": None,
+        "metrics": None,
+        "best_methods": None,
+        "forecasts_by_origin": None,
+        "outliers": None,
+        "config": None,
+    }
+
+    def __init__(self):
+        self._store: dict = {}
+
+    def _ns(self) -> str:
+        """Return the namespace (db_name) for the current account context."""
+        try:
+            from db.db import _account_ctx
+            ctx = _account_ctx.get()
+            return (ctx.get("database", "") if ctx else "") or "_default_"
+        except Exception:
+            return "_default_"
+
+    def _fk(self, k: str) -> str:
+        """Return the fully-namespaced key for the current account."""
+        return f"{self._ns()}:{k}"
+
+    # ── dict-compatible API ──────────────────────────────────────────────────
+
+    def __getitem__(self, k: str):
+        return self._store.get(self._fk(k), self._TEMPLATE.get(k))
+
+    def __setitem__(self, k: str, v):
+        self._store[self._fk(k)] = v
+
+    def __contains__(self, k: str):
+        return self._fk(k) in self._store or k in self._TEMPLATE
+
+    def get(self, k: str, default=None):
+        fk = self._fk(k)
+        if fk in self._store:
+            return self._store[fk]
+        return self._TEMPLATE.get(k, default)
+
+    def items(self):
+        """Yield (short_key, value) pairs for the current account only."""
+        ns = self._ns()
+        prefix = f"{ns}:"
+        for fk, v in self._store.items():
+            if fk.startswith(prefix):
+                yield fk[len(prefix):], v
+        # Also yield keys that exist in template but not yet set for this account
+        for k, default_v in self._TEMPLATE.items():
+            if f"{prefix}{k}" not in self._store:
+                yield k, default_v
+
+    # ── pipeline thread helper ───────────────────────────────────────────────
+
+    def invalidate_for_db(self, db_name: str, keys):
+        """Explicitly clear cache entries for a specific database (called from pipeline threads)."""
+        for k in keys:
+            fk = f"{db_name}:{k}"
+            if fk in self._store:
+                self._store[fk] = None
+
+
+data_cache = _AccountScopedCache()
 
 
 # Pydantic models for API responses
@@ -630,6 +701,23 @@ def load_data():
         logger.error(f"Error loading data from DB: {e}", exc_info=True)
 
 
+async def _ensure_data_loaded() -> None:
+    """Lazily load data for the current account if the cache is empty.
+
+    Called at the top of endpoints that read from data_cache so that a fresh
+    account (or a newly started server) auto-populates without requiring an
+    explicit POST /api/reload first.  Uses contextvars.copy_context() so the
+    per-account ContextVar is visible inside the thread-pool worker.
+    """
+    if data_cache["characteristics"] is not None:
+        return  # already loaded — fast path
+    import asyncio
+    import contextvars
+    ctx = contextvars.copy_context()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, ctx.run, load_data)
+
+
 def _get_config():
     """Get config from cache with defaults."""
     return data_cache.get("config") or {}
@@ -738,30 +826,69 @@ def seed_parameters() -> None:
 async def startup_event():
     """Load data on startup and ensure DB schema exists."""
     logger.info("Starting API server...")
-    # Ensure local DB schema is up-to-date
-    if _DB_AVAILABLE:
+    # Ensure local DB schema is up-to-date for every registered account
+    from db.db import set_account_context, reset_account_context as _reset_ctx
+    _accounts_to_init = list(_account_cache.items()) if _account_cache else []
+    if not _accounts_to_init and _DB_AVAILABLE:
+        # Single-tenant fallback: init with default config (no account cache)
+        _accounts_to_init = [("_default_", None)]
+
+    for _acc_id, _acc_cfg in _accounts_to_init:
+        _ctx_tok = set_account_context(_acc_cfg) if _acc_cfg else None
         try:
-            _init_db_schema()
-            logger.info("DB schema initialised")
-        except Exception as exc:
-            logger.warning(f"DB schema init failed (non-fatal): {exc}")
-        # Seed default admin user on first run
-        try:
-            seed_default_admin()
-        except Exception as exc:
-            logger.warning(f"Admin seed failed (non-fatal): {exc}")
-        # Seed default parameter rows in DB
-        try:
-            seed_parameters()
-        except Exception as exc:
-            logger.warning(f"Parameter seed failed (non-fatal): {exc}")
-        # Mark any leftover 'running' process_log rows as interrupted
-        _mark_stale_db_steps()
-    # Pre-warm data cache in a background thread so the server accepts
-    # requests immediately instead of blocking until all data is loaded.
+            if _DB_AVAILABLE:
+                try:
+                    _init_db_schema()
+                    logger.info("DB schema initialised for account '%s'",
+                                _acc_cfg.get("display_name", _acc_id) if _acc_cfg else "default")
+                except Exception as exc:
+                    logger.warning(f"DB schema init failed (non-fatal): {exc}")
+                try:
+                    seed_default_admin()
+                except Exception as exc:
+                    logger.warning(f"Admin seed failed (non-fatal): {exc}")
+                try:
+                    seed_parameters()
+                except Exception as exc:
+                    logger.warning(f"Parameter seed failed (non-fatal): {exc}")
+                try:
+                    _mark_stale_db_steps()
+                except Exception as exc:
+                    logger.warning(f"Stale step mark failed (non-fatal): {exc}")
+        finally:
+            if _ctx_tok is not None:
+                _reset_ctx(_ctx_tok)
+    # Pre-warm data cache for every registered account so the dashboard
+    # is immediately ready for any tenant.  Runs in a thread pool (non-blocking)
+    # with the correct per-account ContextVar so each account's data is stored
+    # under its own namespace in _AccountScopedCache.
     import asyncio
+    from db.db import set_account_context, reset_account_context
+
+    def _startup_load_all_accounts():
+        """Load data cache for every active account at startup."""
+        if _account_cache:
+            for acc_id, acc_cfg in list(_account_cache.items()):
+                try:
+                    tok = set_account_context(acc_cfg)
+                    try:
+                        load_data()
+                        logger.info(
+                            "Startup cache warm: loaded data for '%s'",
+                            acc_cfg.get("display_name", acc_id),
+                        )
+                    finally:
+                        reset_account_context(tok)
+                except Exception as exc:
+                    logger.warning(
+                        "Startup cache warm failed for account %s: %s", acc_id, exc
+                    )
+        else:
+            # Single-tenant fallback: no account cache, load with default config
+            load_data()
+
     loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, load_data)
+    loop.run_in_executor(None, _startup_load_all_accounts)
 
 
 @app.post("/api/reload")
@@ -1539,6 +1666,8 @@ async def get_series_list(
         complexity: Filter by complexity level (low, medium, high)
         intermittent: Filter by intermittency status
     """
+    # Lazy-load cache for the current tenant if not yet populated.
+    await _ensure_data_loaded()
     if data_cache["characteristics"] is None:
         raise HTTPException(status_code=503, detail="Data not loaded")
 
@@ -3991,6 +4120,30 @@ async def get_series_distributions(unique_id: str, scenario_id: int = Query(defa
 # Pipeline Runner
 # ---------------------------------------------------------------------------
 
+def _account_db_env(account_cfg: dict | None) -> dict:
+    """
+    Build a copy of os.environ with DB_* variables overridden for the given
+    account's database config.  Passed as *env* to every pipeline subprocess so
+    that run_pipeline.py connects to the correct tenant DB regardless of what
+    config.yaml says.
+
+    When account_cfg is None (single-tenant mode) the current process environment
+    is returned unchanged so config.yaml / existing env vars continue to work.
+    """
+    env = os.environ.copy()
+    # Always force UTF-8 in the subprocess so print() works regardless of Windows locale
+    env["PYTHONIOENCODING"] = "utf-8"
+    if account_cfg:
+        env["DB_HOST"]     = str(account_cfg.get("host",     env.get("DB_HOST",     "localhost")))
+        env["DB_PORT"]     = str(account_cfg.get("port",     env.get("DB_PORT",     "5432")))
+        env["DB_NAME"]     = str(account_cfg.get("database", env.get("DB_NAME",     "postgres")))
+        env["DB_USER"]     = str(account_cfg.get("user",     env.get("DB_USER",     "postgres")))
+        env["DB_PASSWORD"] = str(account_cfg.get("password", env.get("DB_PASSWORD", "")))
+        env["DB_SCHEMA"]   = str(account_cfg.get("schema",   env.get("DB_SCHEMA",   "zcube")))
+        env["DB_SSLMODE"]  = str(account_cfg.get("sslmode",  env.get("DB_SSLMODE",  "disable")))
+    return env
+
+
 # In-memory job store: job_id -> {status, step, log_lines, started_at, ended_at}
 _pipeline_jobs: Dict[str, Dict] = {}
 _pipeline_lock = threading.Lock()
@@ -4230,6 +4383,8 @@ def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = Non
     with _pipeline_lock:
         _pipeline_jobs[job_id]["status"] = "running"
         _pipeline_jobs[job_id]["started_at"] = datetime.utcnow().isoformat()
+        _acct_cfg = _pipeline_jobs[job_id].get("_account_cfg")
+    _subprocess_env = _account_db_env(_acct_cfg)
 
     try:
         # On Unix, start a new process group so we can kill the whole tree
@@ -4238,7 +4393,10 @@ def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = Non
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",      # explicit UTF-8 — Windows default (cp1252) breaks on arrows/ticks
+            errors="replace",      # never let a bad char kill the reader
             bufsize=1,
+            env=_subprocess_env,   # ← tenant DB credentials injected here
         )
         if sys.platform != "win32":
             popen_kwargs["start_new_session"] = True  # new process group for killpg
@@ -4281,9 +4439,13 @@ def _run_pipeline_step_thread(job_id: str, step_arg: str, extra_args: list = Non
             "distribution":    ["distributions"],
         }
         if exit_code == 0:
-            for _k in _STEP_CACHE_INVALIDATION.get(step_arg, []):
-                if _k in data_cache:
-                    data_cache[_k] = None
+            _inv_keys = _STEP_CACHE_INVALIDATION.get(step_arg, [])
+            if _inv_keys:
+                # Use the account-aware invalidation (threads have no ContextVar)
+                data_cache.invalidate_for_db(
+                    _acct_cfg.get("database", "_default_") if _acct_cfg else "_default_",
+                    _inv_keys,
+                )
 
         # After a successful ETL run, run ANALYZE so the planner stats are current
         if exit_code == 0 and step_arg == "etl" and _DB_AVAILABLE:
@@ -4320,6 +4482,10 @@ def _run_full_pipeline_thread(job_id: str):
     with _pipeline_lock:
         _pipeline_jobs[job_id]["status"] = "running"
         _pipeline_jobs[job_id]["started_at"] = datetime.utcnow().isoformat()
+        # Build subprocess env once for all steps — injects the tenant DB credentials
+        # so run_pipeline.py connects to the correct account database.
+        _acct_cfg = _pipeline_jobs[job_id].get("_account_cfg")
+    _subprocess_env = _account_db_env(_acct_cfg)
 
     for step_id in PIPELINE_STEP_ORDER:
         step_arg = PIPELINE_STEPS[step_id]["arg"]
@@ -4345,7 +4511,10 @@ def _run_full_pipeline_thread(job_id: str):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",      # explicit UTF-8 — Windows default (cp1252) breaks on arrows/ticks
+            errors="replace",
             bufsize=1,
+            env=_subprocess_env,   # ← tenant DB credentials injected here
         )
         if sys.platform != "win32":
             popen_kwargs["start_new_session"] = True
@@ -4397,13 +4566,11 @@ def _run_full_pipeline_thread(job_id: str):
             _pipeline_jobs[job_id]["log_lines"].append(f"✓ {step_label} complete")
 
     # All steps succeeded — invalidate output caches so next request re-reads from DB
-    _PIPELINE_OUTPUT_CACHE_KEYS = [
+    _db_name_final = _acct_cfg.get("database", "_default_") if _acct_cfg else "_default_"
+    data_cache.invalidate_for_db(_db_name_final, [
         "forecasts", "forecasts_by_origin", "metrics", "best_methods",
-        "distributions", "characteristics",
-    ]
-    for _k in _PIPELINE_OUTPUT_CACHE_KEYS:
-        if _k in data_cache:
-            data_cache[_k] = None
+        "distributions", "characteristics", "time_series", "time_series_original",
+    ])
 
     with _pipeline_lock:
         _pipeline_jobs[job_id]["log_lines"].append(
@@ -4429,11 +4596,19 @@ async def run_full_pipeline(request: Request):
         raise HTTPException(
             status_code=403, detail="You don't have permission to run the pipeline"
         )
-    # Clean up stale jobs first, then reject if any job is genuinely running
+    account_id = user.get("account_id") or ""
+    # Capture the current tenant DB config now, while the ContextVar is still set
+    # in this request coroutine.  Threading.Thread does NOT inherit ContextVars,
+    # so we store it explicitly in the job dict and pass it as DB_* env vars to
+    # every pipeline subprocess so they connect to the right tenant database.
+    from db.db import _account_ctx as _db_account_ctx
+    _captured_account_cfg = _db_account_ctx.get()   # dict or None
+
+    # Clean up stale jobs first, then reject if any job for THIS account is genuinely running
     with _pipeline_lock:
         _cleanup_stale_jobs()
         for job in _pipeline_jobs.values():
-            if job.get("status") == "running":
+            if job.get("account_id", "") == account_id and job.get("status") == "running":
                 raise HTTPException(
                     status_code=409,
                     detail=f"A pipeline job is already running (job {job['job_id']})",
@@ -4443,6 +4618,8 @@ async def run_full_pipeline(request: Request):
     with _pipeline_lock:
         _pipeline_jobs[job_id] = {
             "job_id": job_id,
+            "account_id": account_id,
+            "_account_cfg": _captured_account_cfg,   # tenant DB config for subprocess env
             "step": "full-pipeline",
             "step_label": "Full Pipeline",
             "current_step": None,
@@ -4826,11 +5003,17 @@ async def run_pipeline_step(
             detail=f"Unknown step '{step}'. Valid: {list(PIPELINE_STEPS)}",
         )
 
-    # Clean up stale jobs first, then reject if same step is genuinely running
+    account_id = user.get("account_id") or ""
+    from db.db import _account_ctx as _db_account_ctx
+    _captured_account_cfg = _db_account_ctx.get()
+
+    # Clean up stale jobs first, then reject if same step is genuinely running for THIS account
     with _pipeline_lock:
         _cleanup_stale_jobs()
         for job in _pipeline_jobs.values():
-            if job.get("step") == step and job.get("status") == "running":
+            if (job.get("account_id", "") == account_id
+                    and job.get("step") == step
+                    and job.get("status") == "running"):
                 raise HTTPException(
                     status_code=409,
                     detail=f"Step '{step}' is already running (job {job['job_id']})",
@@ -4852,6 +5035,8 @@ async def run_pipeline_step(
     with _pipeline_lock:
         _pipeline_jobs[job_id] = {
             "job_id": job_id,
+            "account_id": account_id,
+            "_account_cfg": _captured_account_cfg,
             "step": step,
             "step_label": step_label,
             "status": "pending",
@@ -4895,11 +5080,17 @@ async def run_forecast_for_series(req: RunForecastRequest, request: Request):
     if not req.series:
         raise HTTPException(status_code=400, detail="No series provided")
 
-    # Clean up stale jobs first, then reject if a series-forecast is genuinely running
+    account_id = user.get("account_id") or ""
+    from db.db import _account_ctx as _db_account_ctx
+    _captured_account_cfg = _db_account_ctx.get()
+
+    # Clean up stale jobs first, then reject if a series-forecast is genuinely running for THIS account
     with _pipeline_lock:
         _cleanup_stale_jobs()
         for job in _pipeline_jobs.values():
-            if job.get("step") == "forecast-series" and job.get("status") == "running":
+            if (job.get("account_id", "") == account_id
+                    and job.get("step") == "forecast-series"
+                    and job.get("status") == "running"):
                 raise HTTPException(
                     status_code=409,
                     detail=f"A series forecast job is already running (job {job['job_id']})",
@@ -4909,6 +5100,8 @@ async def run_forecast_for_series(req: RunForecastRequest, request: Request):
     with _pipeline_lock:
         _pipeline_jobs[job_id] = {
             "job_id": job_id,
+            "account_id": account_id,
+            "_account_cfg": _captured_account_cfg,
             "step": "forecast-series",
             "step_label": f"Forecast ({len(req.series)} series)",
             "status": "pending",
@@ -5050,11 +5243,15 @@ async def delete_hyperparams(unique_id: str, method: Optional[str] = None):
 
 
 @app.get("/api/pipeline/jobs")
-async def get_pipeline_jobs():
-    """Return all recent pipeline jobs (latest first), each enriched with parsed progress."""
+async def get_pipeline_jobs(request: Request):
+    """Return recent pipeline jobs for the current account (latest first), with progress."""
+    from api.auth import get_current_user as _gcur
+    _u = _gcur(request)
+    account_id = (_u.get("account_id") or "") if _u else ""
     with _pipeline_lock:
         _cleanup_stale_jobs()
-        jobs = list(_pipeline_jobs.values())
+        jobs = [j for j in _pipeline_jobs.values()
+                if j.get("account_id", "") == account_id]
     enriched = []
     for job in jobs:
         j = dict(job)
@@ -5128,11 +5325,14 @@ def _extract_progress(log_lines: list) -> dict:
 
 
 @app.get("/api/pipeline/jobs/{job_id}")
-async def get_pipeline_job(job_id: str):
-    """Return status + full log for a specific job, with progress info."""
+async def get_pipeline_job(job_id: str, request: Request):
+    """Return status + full log for a specific job (account-scoped), with progress info."""
+    from api.auth import get_current_user as _gcur
+    _u = _gcur(request)
+    account_id = (_u.get("account_id") or "") if _u else ""
     with _pipeline_lock:
         job = _pipeline_jobs.get(job_id)
-    if job is None:
+    if job is None or job.get("account_id", "") != account_id:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     # Enrich with parsed progress
     result = dict(job)
@@ -5141,11 +5341,14 @@ async def get_pipeline_job(job_id: str):
 
 
 @app.post("/api/pipeline/jobs/{job_id}/kill")
-async def kill_pipeline_job(job_id: str):
-    """Interrupt (kill) a running pipeline job."""
+async def kill_pipeline_job(job_id: str, request: Request):
+    """Interrupt (kill) a running pipeline job (account-scoped)."""
+    from api.auth import get_current_user as _gcur
+    _u = _gcur(request)
+    account_id = (_u.get("account_id") or "") if _u else ""
     with _pipeline_lock:
         job = _pipeline_jobs.get(job_id)
-    if job is None:
+    if job is None or job.get("account_id", "") != account_id:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     if job.get("status") != "running":
         raise HTTPException(
@@ -5185,18 +5388,23 @@ async def kill_pipeline_job(job_id: str):
 
 
 @app.post("/api/pipeline/jobs/reset")
-async def reset_pipeline_jobs():
-    """Force-clear all stale/completed jobs from the in-memory store.
+async def reset_pipeline_jobs(request: Request):
+    """Force-clear all stale/completed jobs for the current account from the in-memory store.
 
     Running jobs whose process is still alive are left untouched.
     Dead-process "running" jobs are marked as error.
     Completed/errored jobs older than 10 minutes are removed.
     """
+    from api.auth import get_current_user as _gcur
+    _u = _gcur(request)
+    account_id = (_u.get("account_id") or "") if _u else ""
     with _pipeline_lock:
         _cleanup_stale_jobs()
         now = datetime.utcnow()
         to_remove = []
         for job_id, job in _pipeline_jobs.items():
+            if job.get("account_id", "") != account_id:
+                continue
             if job.get("status") in ("success", "error"):
                 ended = job.get("ended_at")
                 if ended:
@@ -5212,18 +5420,23 @@ async def reset_pipeline_jobs():
                 to_remove.append(job_id)
         for jid in to_remove:
             del _pipeline_jobs[jid]
-        remaining = {jid: j.get("status") for jid, j in _pipeline_jobs.items()}
+        remaining = {jid: j.get("status") for jid, j in _pipeline_jobs.items()
+                     if j.get("account_id", "") == account_id}
     return {"status": "ok", "removed": len(to_remove), "remaining": remaining}
 
 
 @app.get("/api/pipeline/jobs/{job_id}/stream")
-async def stream_pipeline_logs(job_id: str):
+async def stream_pipeline_logs(job_id: str, request: Request):
     """
-    Server-Sent Events stream of log lines for a running/completed job.
+    Server-Sent Events stream of log lines for a running/completed job (account-scoped).
     The client receives lines as they are produced and a final 'done' event.
     """
+    from api.auth import get_current_user as _gcur
+    _u = _gcur(request)
+    account_id = (_u.get("account_id") or "") if _u else ""
     with _pipeline_lock:
-        if job_id not in _pipeline_jobs:
+        job_check = _pipeline_jobs.get(job_id)
+        if job_check is None or job_check.get("account_id", "") != account_id:
             raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
     async def event_generator():
@@ -7318,28 +7531,44 @@ async def get_causal_mdfh(item_id: Optional[int] = Query(None),
 @app.post("/api/causal/mdfh/fit")
 async def fit_mdfh_endpoint(request: Request):
     """Trigger MLE MDFH fitting from demand_actuals. Returns job_id."""
-    from api.auth import get_current_user as auth_get_current_user
+    try:
+        from api.auth import get_current_user as auth_get_current_user
 
-    user = auth_get_current_user(request)
-    if not _user_can_run_process(user):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-    _require_db()
+        user = auth_get_current_user(request)
+        if not _user_can_run_process(user):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        _require_db()
 
-    job_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
 
-    def _run():
-        try:
-            from causal.mdfh_fitter import fit_from_demand_actuals
-            n = fit_from_demand_actuals()
-            pipeline_jobs[job_id]["status"] = "completed"
-            pipeline_jobs[job_id]["result"] = {"rows_written": n}
-        except Exception as exc:
-            pipeline_jobs[job_id]["status"] = "failed"
-            pipeline_jobs[job_id]["error"] = str(exc)
+        def _run():
+            try:
+                from causal.mdfh_fitter import fit_from_demand_actuals
+                n = fit_from_demand_actuals()
+                _pipeline_jobs[job_id]["status"] = "completed"
+                _pipeline_jobs[job_id]["result"] = {"rows_written": n}
+            except Exception as exc:
+                logger.exception("mdfh fit failed: %s", exc)
+                _pipeline_jobs[job_id]["status"] = "failed"
+                _pipeline_jobs[job_id]["error"] = str(exc)
 
-    pipeline_jobs[job_id] = {"status": "running", "started_at": datetime.utcnow().isoformat()}
-    threading.Thread(target=_run, daemon=True).start()
-    return {"job_id": job_id, "status": "running"}
+        _pipeline_jobs[job_id] = {
+            "job_id": job_id,
+            "account_id": user.get("account_id", ""),
+            "step": "causal-mdfh-fit",
+            "status": "running",
+            "log_lines": [],
+            "started_at": datetime.utcnow().isoformat(),
+        }
+        import contextvars as _cv
+        _ctx = _cv.copy_context()
+        threading.Thread(target=_ctx.run, args=(_run,), daemon=True).start()
+        return {"job_id": job_id, "status": "running"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("fit_mdfh_endpoint error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/api/causal/mdfh/fit-bayesian")
@@ -7396,20 +7625,29 @@ async def fit_mdfh_bayesian_endpoint(request: Request):
             conn.close()
 
             if prior_df.empty or removals_df.empty:
-                pipeline_jobs[job_id]["status"] = "completed"
-                pipeline_jobs[job_id]["result"] = {"rows_written": 0, "note": "no data"}
+                _pipeline_jobs[job_id]["status"] = "completed"
+                _pipeline_jobs[job_id]["result"] = {"rows_written": 0, "note": "no data"}
                 return
 
             posterior_df = fit_mdfh_bayesian(removals_df, prior_df)
             n = save_mdfh(posterior_df)
-            pipeline_jobs[job_id]["status"] = "completed"
-            pipeline_jobs[job_id]["result"] = {"rows_written": n}
+            _pipeline_jobs[job_id]["status"] = "completed"
+            _pipeline_jobs[job_id]["result"] = {"rows_written": n}
         except Exception as exc:
-            pipeline_jobs[job_id]["status"] = "failed"
-            pipeline_jobs[job_id]["error"] = str(exc)
+            _pipeline_jobs[job_id]["status"] = "failed"
+            _pipeline_jobs[job_id]["error"] = str(exc)
 
-    pipeline_jobs[job_id] = {"status": "running", "started_at": datetime.utcnow().isoformat()}
-    threading.Thread(target=_run, daemon=True).start()
+    _pipeline_jobs[job_id] = {
+        "job_id": job_id,
+        "account_id": user.get("account_id", ""),
+        "step": "causal-mdfh-bayesian",
+        "status": "running",
+        "log_lines": [],
+        "started_at": datetime.utcnow().isoformat(),
+    }
+    import contextvars as _cv
+    _ctx = _cv.copy_context()
+    threading.Thread(target=_ctx.run, args=(_run,), daemon=True).start()
     return {"job_id": job_id, "status": "running"}
 
 
@@ -7689,31 +7927,47 @@ async def delete_causal_scenario(scenario_id: int):
 @app.post("/api/causal/scenarios/run")
 async def run_causal_scenarios_endpoint(body: CausalRunRequest, request: Request):
     """Run selected causal scenarios. Returns job_id."""
-    from api.auth import get_current_user as auth_get_current_user
-    user = auth_get_current_user(request)
-    if not _user_can_run_process(user):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-    _require_db()
+    try:
+        from api.auth import get_current_user as auth_get_current_user
+        user = auth_get_current_user(request)
+        if not _user_can_run_process(user):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        _require_db()
 
-    job_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
 
-    def _run():
-        try:
-            from causal.scenario_runner import run_causal_scenarios
-            result = run_causal_scenarios(
-                body.scenario_ids,
-                horizon_periods=body.horizon_periods,
-                feed_meio=body.feed_meio,
-            )
-            pipeline_jobs[job_id]["status"] = "completed"
-            pipeline_jobs[job_id]["result"] = result
-        except Exception as exc:
-            pipeline_jobs[job_id]["status"] = "failed"
-            pipeline_jobs[job_id]["error"] = str(exc)
+        def _run():
+            try:
+                from causal.scenario_runner import run_causal_scenarios
+                result = run_causal_scenarios(
+                    body.scenario_ids,
+                    horizon_periods=body.horizon_periods,
+                    feed_meio=body.feed_meio,
+                )
+                _pipeline_jobs[job_id]["status"] = "completed"
+                _pipeline_jobs[job_id]["result"] = result
+            except Exception as exc:
+                logger.exception("causal scenario run failed: %s", exc)
+                _pipeline_jobs[job_id]["status"] = "failed"
+                _pipeline_jobs[job_id]["error"] = str(exc)
 
-    pipeline_jobs[job_id] = {"status": "running", "started_at": datetime.utcnow().isoformat()}
-    threading.Thread(target=_run, daemon=True).start()
-    return {"job_id": job_id, "status": "running"}
+        _pipeline_jobs[job_id] = {
+            "job_id": job_id,
+            "account_id": user.get("account_id", ""),
+            "step": "causal-run",
+            "status": "running",
+            "log_lines": [],
+            "started_at": datetime.utcnow().isoformat(),
+        }
+        import contextvars as _cv
+        _ctx = _cv.copy_context()
+        threading.Thread(target=_ctx.run, args=(_run,), daemon=True).start()
+        return {"job_id": job_id, "status": "running"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("run_causal_scenarios_endpoint error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ── Results ──────────────────────────────────────────────────────────────
@@ -7894,14 +8148,23 @@ async def run_pooling_analysis_endpoint(request: Request):
                 scenario_ids, target_fill_rate, local_lt_days, hub_lt_days
             )
             n = save_pooling_recommendations(recs)
-            pipeline_jobs[job_id]["status"] = "completed"
-            pipeline_jobs[job_id]["result"] = {"recommendations_saved": n}
+            _pipeline_jobs[job_id]["status"] = "completed"
+            _pipeline_jobs[job_id]["result"] = {"recommendations_saved": n}
         except Exception as exc:
-            pipeline_jobs[job_id]["status"] = "failed"
-            pipeline_jobs[job_id]["error"] = str(exc)
+            _pipeline_jobs[job_id]["status"] = "failed"
+            _pipeline_jobs[job_id]["error"] = str(exc)
 
-    pipeline_jobs[job_id] = {"status": "running", "started_at": datetime.utcnow().isoformat()}
-    threading.Thread(target=_run, daemon=True).start()
+    _pipeline_jobs[job_id] = {
+        "job_id": job_id,
+        "account_id": user.get("account_id", ""),
+        "step": "causal-pooling",
+        "status": "running",
+        "log_lines": [],
+        "started_at": datetime.utcnow().isoformat(),
+    }
+    import contextvars as _cv
+    _ctx = _cv.copy_context()
+    threading.Thread(target=_ctx.run, args=(_run,), daemon=True).start()
     return {"job_id": job_id, "status": "running"}
 
 
@@ -8123,3 +8386,4 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
+  # reload check 2

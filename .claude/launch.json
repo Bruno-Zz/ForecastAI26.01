@@ -2,6 +2,13 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "api",
+      "runtimeExecutable": "C:\\allDev\\ForecastAI2026.01\\files\\venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "api.main:app", "--host", "127.0.0.1", "--port", "8003", "--reload"],
+      "cwd": "C:\\allDev\\ForecastAI2026.01\\files",
+      "port": 8003
+    },
+    {
       "name": "frontend",
       "runtimeExecutable": "C:\\Program Files\\nodejs\\npm.cmd",
       "runtimeArgs": ["run", "dev", "--prefix", "files/frontend"],
