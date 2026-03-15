@@ -1288,6 +1288,37 @@ class ETLPipeline:
 
 
 # --------------------------------------------------------------------------
+# Factory — returns the correct ETL class for the current account config
+# --------------------------------------------------------------------------
+
+def create_etl_pipeline(config_path=None) -> "ETLPipeline":
+    """
+    Instantiate and return the appropriate ETL pipeline class for the current
+    account's ``data_source`` configuration.
+
+    When ``data_source.source_type == "excel"`` the ``ExcelETLPipeline``
+    adapter (``etl/adapters/excel_etl.py``) is returned; otherwise the
+    default ``ETLPipeline`` is used.
+
+    This factory is the **recommended entry point** for all callers that
+    previously instantiated ``ETLPipeline()`` directly.
+    """
+    # Quick-read of data_source to determine the source_type before __init__
+    try:
+        from db.db import load_config_from_db
+        config = load_config_from_db()
+        source_type = config.get("data_source", {}).get("source_type", "").lower()
+    except Exception:
+        source_type = ""
+
+    if source_type == "excel":
+        from etl.adapters.excel_etl import ExcelETLPipeline
+        return ExcelETLPipeline(config_path=config_path)
+
+    return ETLPipeline(config_path=config_path)
+
+
+# --------------------------------------------------------------------------
 # Convenience entry point
 # --------------------------------------------------------------------------
 
@@ -1316,7 +1347,7 @@ def main():
         print(f"ETL skipped for scenario_id={scenario_id}")
         return
 
-    pipeline = ETLPipeline()
+    pipeline = create_etl_pipeline()
     df = pipeline.run()
     print(f"\nETL complete. Output shape: {df.shape}")
     print(f"Series: {df['unique_id'].nunique()}")

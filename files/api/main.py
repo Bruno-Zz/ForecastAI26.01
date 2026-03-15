@@ -4051,10 +4051,16 @@ def _cleanup_stale_jobs():
         if job.get("status") != "running":
             continue
 
-        # Check if the process is still alive
+        # Check if the process is still alive.
+        # pid=None means the job is between pipeline steps (previous subprocess
+        # exited cleanly, next one not yet started).  In that case we skip the
+        # alive-check so the job is not mis-classified as stale.
         pid = job.get("pid")
-        process_alive = False
-        if pid:
+        if pid is None:
+            # Between steps — only apply the wall-clock timeout check below.
+            process_alive = True
+        else:
+            process_alive = False
             try:
                 if sys.platform == "win32":
                     result = subprocess.run(
@@ -4361,8 +4367,15 @@ def _run_full_pipeline_thread(job_id: str):
             proc.wait()
             exit_code = proc.returncode
 
+            # Clear the PID immediately once the subprocess has exited so that
+            # _cleanup_stale_jobs (which runs on every UI poll) does not see a
+            # dead PID and mistakenly mark this still-running job as stale.
+            with _pipeline_lock:
+                _pipeline_jobs[job_id]["pid"] = None
+
         except Exception as exc:
             with _pipeline_lock:
+                _pipeline_jobs[job_id]["pid"] = None
                 _pipeline_jobs[job_id]["log_lines"].append(f"[ERROR] {exc}")
                 _pipeline_jobs[job_id]["status"] = "error"
                 _pipeline_jobs[job_id]["ended_at"] = datetime.utcnow().isoformat()

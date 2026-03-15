@@ -32,7 +32,7 @@ project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
 from utils.orchestrator import ForecastOrchestrator
-from etl.etl import ETLPipeline
+from etl.etl import create_etl_pipeline as ETLPipeline  # factory: auto-selects adapter by source_type
 
 
 def setup_logging(level: str = "INFO", log_file: str = None):
